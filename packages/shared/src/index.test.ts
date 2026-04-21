@@ -16,13 +16,13 @@ describe("protocol parsing", () => {
     expect(
       parseLeaderToServerMessage({
         type: "command.dispatch",
-        atAgents: ["alice", "bob"],
+        atAgents: "queue",
         prompt: "run checks",
         timeoutSec: 30,
       }),
     ).toMatchObject({
       type: "command.dispatch",
-      atAgents: ["alice", "bob"],
+      atAgents: "queue",
       prompt: "run checks",
       timeoutSec: 30,
     });
@@ -42,11 +42,22 @@ describe("protocol parsing", () => {
         machineId: "alice",
         hostname: "host",
         labels: ["frontend"],
-        maxConcurrentTasks: 1,
-        activeTaskId: "task-1",
+        activeMainTaskId: "task-1",
+        activeQueueTaskId: "task-2",
         lastOutputSeq: 4,
       }),
-    ).toMatchObject({ activeTaskId: "task-1", lastOutputSeq: 4 });
+    ).toMatchObject({ activeMainTaskId: "task-1", activeQueueTaskId: "task-2", lastOutputSeq: 4 });
+  });
+
+  it("accepts task started session ids", () => {
+    expect(
+      parseEmployeeToServerMessage({
+        type: "task.started",
+        taskId: "task-1",
+        pid: 123,
+        sessionId: "session-1",
+      }),
+    ).toMatchObject({ type: "task.started", sessionId: "session-1" });
   });
 
   it("rejects malformed server-to-agent dispatch messages", () => {
@@ -56,6 +67,7 @@ describe("protocol parsing", () => {
         taskId: "task-1",
         leaderCommandId: "cmd-1",
         employeeId: "alice",
+        targetMode: "direct",
         prompt: "x",
         workspace: null,
         timeoutSec: 0,
@@ -65,9 +77,9 @@ describe("protocol parsing", () => {
 });
 
 describe("resolveAtAgentsFromPrompt", () => {
-  it("defaults to all when there are no selected or mentioned agents", () => {
+  it("defaults to queue when there are no selected or mentioned agents", () => {
     expect(resolveAtAgentsFromPrompt("run checks", employees)).toMatchObject({
-      atAgents: "all",
+      atAgents: "queue",
       prompt: "run checks",
     });
   });
@@ -84,11 +96,18 @@ describe("resolveAtAgentsFromPrompt", () => {
     });
   });
 
-  it("keeps all when only unknown @mentions are present", () => {
+  it("keeps queue when only unknown @mentions are present", () => {
     expect(resolveAtAgentsFromPrompt("@nobody run checks", employees)).toMatchObject({
-      atAgents: "all",
+      atAgents: "queue",
       prompt: "@nobody run checks",
       unknownMentions: ["nobody"],
+    });
+  });
+
+  it("keeps explicit all target even when mentions are present", () => {
+    expect(resolveAtAgentsFromPrompt("@Alice run checks", employees, "all")).toMatchObject({
+      atAgents: "all",
+      prompt: "run checks",
     });
   });
 });

@@ -27,6 +27,7 @@ pnpm-debug.log*
 *.db-shm
 *.db-wal
 .agent-state*.json
+.ai-teams/
 
 # Tool caches
 .cache/

@@ -69,6 +69,8 @@ pnpm start:server
 默认地址：
 
 - HTTP: `http://localhost:3789/health`
+- Swagger UI: `http://localhost:3789/docs`
+- OpenAPI JSON: `http://localhost:3789/docs/json`
 - WebSocket:
   - `ws://localhost:3789/ws/agent`
   - `ws://localhost:3789/ws/leader`
@@ -76,6 +78,53 @@ pnpm start:server
 默认 SQLite 数据库：
 
 - `data/ai-teams.db`
+
+REST 发任务接口：
+
+```bash
+curl -X POST http://localhost:3789/api/tasks \
+  -H "Authorization: Bearer dev-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "atAgents": "queue",
+    "prompt": "帮我分析当前项目",
+    "workspace": "/Users/junhang/workspace/project",
+    "webhook": "http://localhost:9000/ai-teams-webhook"
+  }'
+```
+
+请求成功后立即返回：
+
+```json
+{
+  "status": "accepted",
+  "leaderCommandId": "...",
+  "tasks": [{ "id": "...", "status": "queued" }]
+}
+```
+
+`atAgents` 支持 `"queue"`、`"all"` 或 `["alice", "bob"]`。`webhook` 可选，也可以写成 `webhookUrl` 或 `{ "url": "..." }`；服务端会用 `POST` 回调 `task.started`、`task.output` 和 `task.completed` / `task.failed` / `task.cancelled` / `task.timeout` 事件。
+
+按 Claude session id 获取会话历史：
+
+```bash
+curl http://localhost:3789/api/sessions/<SESSION_ID>/history \
+  -H "Authorization: Bearer dev-token"
+```
+
+返回内容包含该 session 下的任务列表，以及可直接渲染的 `messages`：
+
+```json
+{
+  "sessionId": "...",
+  "tasks": [],
+  "messages": [
+    { "type": "task.prompt", "role": "user", "content": "..." },
+    { "type": "task.output", "role": "assistant", "content": "..." },
+    { "type": "task.result", "role": "assistant", "content": "..." }
+  ]
+}
+```
 
 可通过环境变量覆盖：
 
@@ -139,9 +188,19 @@ pnpm dev:agent
 - `AI_TEAMS_SERVER_PORT`，默认 `3789`
 - `SERVER_URL`，默认 `ws://localhost:3789`
 - `EMPLOYEE_LABELS`，逗号分隔，例如 `frontend,react`
-- `AGENT_STATE_FILE`，默认当前目录下 `.agent-state.<EMPLOYEE_ID>.json`
+- `AGENT_STATE_FILE`，默认 `DEFAULT_WORKSPACE/.ai-teams/agents/<EMPLOYEE_ID>/session-state.json`
 - `CLAUDE_PERMISSION_MODE`，默认 `default`；如需绕过权限需显式设置
 - `DEFAULT_WORKSPACE`，默认当前目录
+- `AGENT_RECORDS_DIR`，默认 `DEFAULT_WORKSPACE/.ai-teams/agents/<EMPLOYEE_ID>`，每日 Markdown 记录会写入 `daily/YYYY-MM-DD.md`
+- `CLAUDE_HOOKS_ENABLED`，默认开启；设为 `false` 可关闭注入 Claude Code CLI 的会话记录 hooks
+
+Agent 记录规则：
+
+- 不传 `workspace` 时，Claude CLI 在 `DEFAULT_WORKSPACE` 下执行。
+- 默认会话状态、每日 Markdown、Claude hook 配置都保存在 `DEFAULT_WORKSPACE/.ai-teams/agents/<EMPLOYEE_ID>/` 子目录下。
+- `@Agent` 和选择具体 Agent 的任务使用该 Agent 默认 Claude session，适合作为长期会话管理。
+- 非 `@` 消息进入共享任务队列，由空闲 Agent 消费执行，每个队列任务使用独立 Claude session。
+- Agent 自身会记录任务开始/结束；Claude Code CLI hooks 会记录 SessionStart、UserPromptSubmit、PostToolUse、Stop、SessionEnd 等事件。
 
 任务超时默认由服务端控制：
 

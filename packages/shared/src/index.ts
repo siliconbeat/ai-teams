@@ -10,7 +10,8 @@ export type TaskStatus =
   | "cancelled"
   | "timeout";
 
-export type AgentTarget = "all" | string[];
+export type AgentTarget = "queue" | "all" | string[];
+export type TaskTargetMode = "queue" | "direct" | "broadcast";
 
 export interface EmployeeSnapshot {
   id: string;
@@ -19,16 +20,19 @@ export interface EmployeeSnapshot {
   hostname: string;
   labels: string[];
   status: EmployeeStatus;
-  maxConcurrentTasks: number;
-  currentTaskId: string | null;
-  currentTaskPrompt: string | null;
+  mainTaskId: string | null;
+  mainTaskPrompt: string | null;
+  queueTaskId: string | null;
+  queueTaskPrompt: string | null;
   lastSeenAt: string;
 }
 
 export interface TaskRecord {
   id: string;
   leaderCommandId: string;
-  employeeId: string;
+  employeeId: string | null;
+  sessionId: string | null;
+  targetMode: TaskTargetMode;
   prompt: string;
   workspace: string | null;
   timeoutSec: number;
@@ -62,6 +66,7 @@ export type ServerToEmployeeMessage =
       taskId: string;
       leaderCommandId: string;
       employeeId: string;
+      targetMode: TaskTargetMode;
       prompt: string;
       workspace: string | null;
       timeoutSec: number;
@@ -76,13 +81,14 @@ export type EmployeeToServerMessage =
       machineId: string;
       hostname: string;
       labels: string[];
-      maxConcurrentTasks: number;
-      activeTaskId?: string | null;
+      activeMainTaskId?: string | null;
+      activeQueueTaskId?: string | null;
       lastOutputSeq?: number;
     }
   | { type: "agent.heartbeat"; employeeId: string }
+  | { type: "agent.request_task"; employeeId: string }
   | { type: "task.accepted"; taskId: string }
-  | { type: "task.started"; taskId: string; pid: number }
+  | { type: "task.started"; taskId: string; pid: number; sessionId?: string | null }
   | { type: "task.output"; taskId: string; stream: "stdout" | "stderr"; seq: number; content: string }
   | { type: "task.completed"; taskId: string; exitCode: number; summary?: string }
   | { type: "task.failed"; taskId: string; error: string }
@@ -194,8 +200,8 @@ export function parseEmployeeToServerMessage(value: unknown): EmployeeToServerMe
       machineId: nonEmptyStringField(message, "machineId"),
       hostname: nonEmptyStringField(message, "hostname"),
       labels: stringArrayField(message, "labels"),
-      maxConcurrentTasks: positiveIntegerField(message, "maxConcurrentTasks"),
-      activeTaskId: optionalNullableStringField(message, "activeTaskId"),
+      activeMainTaskId: optionalNullableStringField(message, "activeMainTaskId"),
+      activeQueueTaskId: optionalNullableStringField(message, "activeQueueTaskId"),
       lastOutputSeq: optionalNonNegativeNumberField(message, "lastOutputSeq"),
     };
   }
@@ -204,12 +210,21 @@ export function parseEmployeeToServerMessage(value: unknown): EmployeeToServerMe
     return { type, employeeId: nonEmptyStringField(message, "employeeId") };
   }
 
+  if (type === "agent.request_task") {
+    return { type, employeeId: nonEmptyStringField(message, "employeeId") };
+  }
+
   if (type === "task.accepted" || type === "task.cancelled") {
     return { type, taskId: nonEmptyStringField(message, "taskId") };
   }
 
   if (type === "task.started") {
-    return { type, taskId: nonEmptyStringField(message, "taskId"), pid: nonNegativeNumberField(message, "pid") };
+    return {
+      type,
+      taskId: nonEmptyStringField(message, "taskId"),
+      pid: nonNegativeNumberField(message, "pid"),
+      sessionId: optionalNullableStringField(message, "sessionId"),
+    };
   }
 
   if (type === "task.output") {
@@ -252,6 +267,7 @@ export function parseServerToEmployeeMessage(value: unknown): ServerToEmployeeMe
       taskId: nonEmptyStringField(message, "taskId"),
       leaderCommandId: nonEmptyStringField(message, "leaderCommandId"),
       employeeId: nonEmptyStringField(message, "employeeId"),
+      targetMode: taskTargetModeField(message, "targetMode"),
       prompt: nonEmptyStringField(message, "prompt"),
       workspace: nullableStringField(message, "workspace"),
       timeoutSec: positiveNumberField(message, "timeoutSec"),
@@ -293,9 +309,9 @@ export function parseServerToLeaderMessage(value: unknown): ServerToLeaderMessag
 export function resolveAtAgentsFromPrompt(
   prompt: string,
   employees: Array<Pick<EmployeeSnapshot, "id" | "name">>,
-  selected: AgentTarget = "all",
+  selected: AgentTarget = "queue",
 ): { atAgents: AgentTarget; prompt: string; matchedMentions: string[]; unknownMentions: string[] } {
-  const selectedIds = selected === "all" ? [] : [...selected];
+  const selectedIds = selected === "all" || selected === "queue" ? [] : [...selected];
   const matchedIds = new Set<string>(selectedIds);
   const matchedMentions: string[] = [];
   const unknownMentions: string[] = [];
@@ -317,6 +333,15 @@ export function resolveAtAgentsFromPrompt(
     return "";
   }).replace(/\s+/g, " ").trim();
 
+  if (selected === "all") {
+    return {
+      atAgents: "all",
+      prompt: cleanedPrompt || prompt.trim(),
+      matchedMentions,
+      unknownMentions,
+    };
+  }
+
   if (matchedIds.size > 0) {
     return {
       atAgents: [...matchedIds],
@@ -327,7 +352,7 @@ export function resolveAtAgentsFromPrompt(
   }
 
   return {
-    atAgents: "all",
+    atAgents: "queue",
     prompt: prompt.trim(),
     matchedMentions,
     unknownMentions,
@@ -400,13 +425,24 @@ function stringArrayField(record: Record<string, unknown>, key: string): string[
 
 function agentTargetField(record: Record<string, unknown>, key: string): AgentTarget {
   const value = record[key];
+  if (value === "queue") {
+    return "queue";
+  }
   if (value === "all") {
     return "all";
   }
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) {
-    throw new ProtocolError(`${key} must be "all" or a non-empty string array.`);
+    throw new ProtocolError(`${key} must be "queue", "all", or a non-empty string array.`);
   }
   return value.map((item) => item.trim());
+}
+
+function taskTargetModeField(record: Record<string, unknown>, key: string): TaskTargetMode {
+  const value = record[key];
+  if (value === "queue" || value === "direct" || value === "broadcast") {
+    return value;
+  }
+  throw new ProtocolError(`${key} must be queue, direct, or broadcast.`);
 }
 
 function positiveNumberField(record: Record<string, unknown>, key: string): number {

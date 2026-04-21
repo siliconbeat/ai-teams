@@ -22,6 +22,8 @@ body {
   margin: 0;
   min-height: 100vh;
   background: transparent;
+  font-size: 13px;
+  line-height: 1.42;
 }
 
 button,
@@ -48,26 +50,26 @@ textarea {
   display: grid;
   min-height: 100dvh;
   place-items: center;
-  padding: 24px;
+  padding: 18px;
   overflow: auto;
 }
 
 .auth-card {
-  width: min(420px, 100%);
+  width: min(390px, 100%);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 20px;
-  padding: 22px;
+  border-radius: 14px;
+  padding: 18px;
   background: rgba(13, 23, 39, 0.88);
-  box-shadow: 0 18px 40px rgba(1, 8, 20, 0.28);
+  box-shadow: 0 14px 32px rgba(1, 8, 20, 0.24);
 }
 
 .auth-brand {
-  margin-bottom: 18px;
+  margin-bottom: 14px;
 }
 
 .topbar,
 .command-panel {
-  padding: 24px;
+  padding: 12px 14px;
   backdrop-filter: blur(16px);
   background: rgba(9, 18, 33, 0.76);
 }
@@ -77,7 +79,7 @@ textarea {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 28px;
+  gap: 14px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   position: relative;
   z-index: 10;
@@ -85,7 +87,7 @@ textarea {
 
 .brand {
   display: flex;
-  gap: 14px;
+  gap: 10px;
   align-items: center;
   flex: 0 0 auto;
 }
@@ -93,25 +95,30 @@ textarea {
 .brand-badge {
   display: grid;
   place-items: center;
-  width: 42px;
-  height: 42px;
-  border-radius: 14px;
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
   background: linear-gradient(135deg, #63b3ff, #67ffd4);
   color: #07203f;
   font-weight: 800;
+  font-size: 13px;
+}
+
+.brand strong {
+  font-size: 14px;
 }
 
 .brand p {
-  margin: 4px 0 0;
+  margin: 2px 0 0;
   color: #90a1be;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .nav-list {
   display: flex;
   flex: 1;
   flex-direction: row;
-  gap: 10px;
+  gap: 6px;
   justify-content: flex-end;
   overflow-x: auto;
 }
@@ -119,12 +126,13 @@ textarea {
 .nav-item {
   flex: 0 0 auto;
   border: 0;
-  border-radius: 14px;
-  padding: 12px 14px;
+  border-radius: 9px;
+  padding: 7px 10px;
   text-align: left;
   color: #c9d6f2;
   background: rgba(255, 255, 255, 0.04);
   cursor: pointer;
+  font-size: 12px;
   white-space: nowrap;
 }
 
@@ -139,8 +147,8 @@ textarea {
   min-width: 0;
   min-height: 0;
   flex-direction: column;
-  gap: 18px;
-  padding: 28px;
+  gap: 10px;
+  padding: 12px 14px;
   overflow: auto;
   overscroll-behavior: contain;
 }
@@ -157,7 +165,7 @@ textarea {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  margin-bottom: 24px;
+  margin-bottom: 10px;
 }
 
 .board-header h1,
@@ -166,15 +174,28 @@ textarea {
   margin: 0;
 }
 
+.board-header h1,
+.task-log-panel h1 {
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.panel-card h2,
+.section-title-row h2 {
+  font-size: 15px;
+  line-height: 1.25;
+}
+
 .board-header p {
-  margin: 8px 0 0;
+  margin: 5px 0 0;
   color: #92a6c8;
+  font-size: 12px;
 }
 
 .employee-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 18px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 560px), 1fr));
+  gap: 10px;
 }
 
 .employee-card,
@@ -182,27 +203,27 @@ textarea {
 .task-log-panel,
 .empty-state {
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 20px;
+  border-radius: 14px;
   background: rgba(13, 23, 39, 0.8);
-  box-shadow: 0 18px 40px rgba(1, 8, 20, 0.28);
+  box-shadow: 0 12px 30px rgba(1, 8, 20, 0.24);
 }
 
 .employee-card {
-  padding: 18px;
+  padding: 10px;
 }
 
 .task-log-panel {
   flex: 0 0 auto;
   margin: 0;
-  padding: 18px;
+  padding: 10px;
 }
 
 .section-title-row {
   display: flex;
   justify-content: space-between;
-  gap: 18px;
+  gap: 10px;
   align-items: flex-start;
-  margin-bottom: 16px;
+  margin-bottom: 10px;
 }
 
 .section-title-row h2 {
@@ -210,14 +231,15 @@ textarea {
 }
 
 .section-title-row p {
-  margin: 6px 0 0;
+  margin: 4px 0 0;
   color: #90a1be;
+  font-size: 12px;
 }
 
 .filter-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
   justify-content: flex-end;
 }
 
@@ -225,10 +247,11 @@ textarea {
 .target-chip {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 999px;
-  padding: 7px 10px;
+  padding: 5px 8px;
   color: #c9d6f2;
   background: rgba(255, 255, 255, 0.04);
   cursor: pointer;
+  font-size: 12px;
 }
 
 .filter-chip.active,
@@ -240,19 +263,52 @@ textarea {
 .employee-card__header {
   display: flex;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
+  gap: 10px;
+  align-items: flex-start;
+  margin-bottom: 8px;
+}
+
+.employee-card__title {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
 }
 
 .employee-card__header h2 {
   margin: 0;
-  font-size: 18px;
+  font-size: 15px;
 }
 
-.employee-card__header p {
-  margin: 6px 0 0;
+.task-state-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 1px 6px;
   color: #90a1be;
-  font-size: 13px;
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 10px;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+
+.task-state-badge.task-running,
+.task-state-badge.task-accepted,
+.task-state-badge.task-dispatched {
+  color: #9bc8ff;
+  background: rgba(93, 166, 255, 0.1);
+}
+
+.task-state-badge.task-completed {
+  color: #9df6b5;
+  background: rgba(121, 255, 209, 0.08);
+}
+
+.task-state-badge.task-failed,
+.task-state-badge.task-cancelled,
+.task-state-badge.task-timeout {
+  color: #ff9e9e;
+  background: rgba(255, 89, 89, 0.1);
 }
 
 .employee-meta,
@@ -265,16 +321,19 @@ textarea {
 }
 
 .employee-meta {
-  margin-bottom: 14px;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  row-gap: 4px;
+  margin-bottom: 8px;
   color: #7f93b5;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .task-strip {
   align-items: center;
-  margin-bottom: 14px;
-  padding: 10px 12px;
-  border-radius: 14px;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border-radius: 9px;
   background: rgba(255, 255, 255, 0.04);
 }
 
@@ -292,24 +351,26 @@ textarea {
 .task-strip span {
   flex: 1;
   color: #c9d6f2;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .log-window {
   margin: 0;
+  width: 100%;
+  aspect-ratio: 16 / 9;
   min-height: 220px;
-  max-height: 280px;
+  max-height: 460px;
   overflow: auto;
-  border-radius: 16px;
+  border-radius: 10px;
   border: 1px solid rgba(121, 255, 209, 0.12);
-  padding: 16px;
+  padding: 10px;
   background:
     linear-gradient(180deg, rgba(121, 255, 209, 0.03), transparent 34%),
     #06101b;
   color: #bfffd4;
   font-family: "SFMono-Regular", "Menlo", monospace;
-  font-size: 12px;
-  line-height: 1.65;
+  font-size: 11px;
+  line-height: 1.55;
   white-space: pre-wrap;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
 }
@@ -317,10 +378,10 @@ textarea {
 .status-pill {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   border-radius: 999px;
-  padding: 8px 12px;
-  font-size: 12px;
+  padding: 5px 8px;
+  font-size: 11px;
   background: rgba(255, 255, 255, 0.05);
 }
 
@@ -330,6 +391,15 @@ textarea {
 
 .status-pill.offline {
   color: #f5a8a8;
+}
+
+.status-pill.agent-presence {
+  flex: 0 0 auto;
+}
+
+.status-pill.busy {
+  color: #9bc8ff;
+  background: rgba(93, 166, 255, 0.12);
 }
 
 .status-pill.failed {
@@ -354,13 +424,13 @@ textarea {
   min-height: 0;
   height: 100%;
   flex-direction: column;
-  gap: 18px;
+  gap: 10px;
   border-left: 1px solid rgba(255, 255, 255, 0.08);
   overflow: hidden;
 }
 
 .panel-card {
-  padding: 18px;
+  padding: 10px;
 }
 
 .chat-panel {
@@ -375,14 +445,14 @@ textarea {
   display: flex;
   flex: 0 0 auto;
   justify-content: space-between;
-  gap: 14px;
+  gap: 10px;
   align-items: flex-start;
 }
 
 .chat-header p {
-  margin: 8px 0 0;
+  margin: 3px 0 0;
   color: #90a1be;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .chat-header code {
@@ -394,8 +464,8 @@ textarea {
   flex: 1 1 auto;
   min-height: 0;
   flex-direction: column;
-  gap: 12px;
-  margin-top: 18px;
+  gap: 8px;
+  margin-top: 10px;
   overflow: auto;
   padding-right: 4px;
   overscroll-behavior: contain;
@@ -403,16 +473,16 @@ textarea {
 
 .chat-composer {
   flex: 0 0 auto;
-  margin-top: 16px;
-  padding-top: 14px;
+  margin-top: 10px;
+  padding-top: 10px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .target-picker {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  max-height: 94px;
+  gap: 6px;
+  max-height: 78px;
   overflow: auto;
   overscroll-behavior: contain;
 }
@@ -420,8 +490,8 @@ textarea {
 .chat-message {
   width: fit-content;
   max-width: 88%;
-  border-radius: 18px 18px 6px 18px;
-  padding: 12px;
+  border-radius: 11px 11px 4px 11px;
+  padding: 8px;
 }
 
 .leader-message {
@@ -442,7 +512,7 @@ textarea {
 }
 
 .chat-message p {
-  margin: 8px 0;
+  margin: 6px 0;
   color: #eef4ff;
   white-space: pre-wrap;
 }
@@ -454,19 +524,19 @@ textarea {
 .chat-message__meta span,
 .chat-empty {
   color: #90a1be;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .field {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-top: 16px;
+  gap: 5px;
+  margin-top: 9px;
 }
 
 .field span {
   color: #98abcb;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .field input,
@@ -474,15 +544,16 @@ textarea {
 .field textarea {
   width: 100%;
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 14px;
-  padding: 12px 14px;
+  border-radius: 9px;
+  padding: 8px 10px;
   background: rgba(255, 255, 255, 0.04);
   color: #eef4ff;
+  font-size: 12px;
 }
 
 .field textarea {
-  min-height: 112px;
-  max-height: 156px;
+  min-height: 82px;
+  max-height: 112px;
   resize: none;
   overflow: auto;
 }
@@ -490,45 +561,47 @@ textarea {
 .primary-button,
 .secondary-button {
   border: 0;
-  border-radius: 14px;
+  border-radius: 10px;
   cursor: pointer;
 }
 
 .primary-button {
   width: 100%;
-  margin-top: 18px;
-  padding: 12px 16px;
+  margin-top: 10px;
+  padding: 8px 12px;
   color: #07203f;
   background: linear-gradient(135deg, #68b6ff, #79ffd1);
   font-weight: 700;
+  font-size: 12px;
 }
 
 .secondary-button {
-  padding: 8px 10px;
+  padding: 6px 8px;
   background: rgba(255, 255, 255, 0.08);
   color: #eef4ff;
+  font-size: 12px;
 }
 
 .history-list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  margin-top: 18px;
+  gap: 10px;
+  margin-top: 14px;
 }
 
 .task-table {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 6px;
 }
 
 .task-row {
   display: flex;
   justify-content: space-between;
-  gap: 18px;
+  gap: 10px;
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 16px;
-  padding: 12px 14px;
+  border-radius: 9px;
+  padding: 8px 10px;
   background: rgba(255, 255, 255, 0.04);
 }
 
@@ -537,7 +610,7 @@ textarea {
 }
 
 .task-row__main p {
-  margin: 6px 0 0;
+  margin: 4px 0 0;
   color: #c9d6f2;
 }
 
@@ -545,7 +618,7 @@ textarea {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 8px;
+  gap: 6px;
   white-space: nowrap;
 }
 
@@ -556,29 +629,29 @@ textarea {
 
 .error-text {
   display: inline-block;
-  margin-top: 6px;
+  margin-top: 4px;
   color: #ffb3b3;
 }
 
 .history-item {
-  border-radius: 14px;
-  padding: 12px;
+  border-radius: 10px;
+  padding: 10px;
   background: rgba(255, 255, 255, 0.04);
 }
 
 .history-item p,
 .history-empty {
-  margin: 8px 0 0;
+  margin: 6px 0 0;
   color: #c9d6f2;
 }
 
 .history-meta span {
   color: #90a1be;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .empty-state {
-  padding: 32px;
+  padding: 24px;
   color: #90a1be;
   text-align: center;
 }
@@ -601,14 +674,14 @@ textarea {
   .topbar {
     align-items: flex-start;
     flex-direction: column;
-    gap: 12px;
-    padding: 14px 18px;
+    gap: 10px;
+    padding: 12px 14px;
   }
 
   .brand-badge {
-    width: 36px;
-    height: 36px;
-    border-radius: 12px;
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
   }
 
   .nav-list {
@@ -617,20 +690,20 @@ textarea {
   }
 
   .nav-item {
-    padding: 9px 11px;
+    padding: 7px 9px;
   }
 
   .workspace-panel {
-    padding: 20px;
+    padding: 12px;
   }
 
   .command-panel {
     border-top: 1px solid rgba(255, 255, 255, 0.08);
-    padding: 14px;
+    padding: 10px;
   }
 
   .command-panel .panel-card {
-    padding: 14px;
+    padding: 10px;
   }
 
   .chat-header {
@@ -643,8 +716,8 @@ textarea {
   }
 
   .chat-list {
-    gap: 10px;
-    margin-top: 12px;
+    gap: 8px;
+    margin-top: 10px;
   }
 
   .section-title-row,
@@ -657,31 +730,31 @@ textarea {
   }
 
   .chat-composer {
-    margin-top: 12px;
-    padding-top: 12px;
+    margin-top: 10px;
+    padding-top: 10px;
   }
 
   .chat-composer .field {
-    gap: 6px;
-    margin-top: 10px;
+    gap: 5px;
+    margin-top: 8px;
   }
 
   .chat-composer .field input,
   .chat-composer .field textarea {
-    padding: 9px 10px;
+    padding: 8px 9px;
   }
 
   .chat-composer .primary-button {
-    margin-top: 12px;
-    padding: 10px 14px;
+    margin-top: 10px;
+    padding: 8px 12px;
   }
 
   .target-chip {
-    padding: 6px 9px;
+    padding: 5px 8px;
   }
 
   .field textarea {
-    min-height: 74px;
-    max-height: 82px;
+    min-height: 68px;
+    max-height: 78px;
   }
 }

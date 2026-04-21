@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import { createHmac } from "node:crypto";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { AddressInfo } from "node:net";
@@ -12,6 +14,7 @@ const TOKEN = "test-token";
 let tmpDir: string;
 let server: AiTeamsServer;
 let baseUrl: string;
+let httpBaseUrl: string;
 let sockets: WebSocket[];
 
 beforeEach(async () => {
@@ -27,6 +30,7 @@ beforeEach(async () => {
   await server.app.listen({ port: 0, host: "127.0.0.1" });
   const address = server.app.server.address() as AddressInfo;
   baseUrl = `ws://127.0.0.1:${address.port}`;
+  httpBaseUrl = `http://127.0.0.1:${address.port}`;
 });
 
 afterEach(async () => {
@@ -44,6 +48,17 @@ describe("AI Teams server integration", () => {
 
     const leader = await connectLeader();
     expect(leader.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it("serves Swagger OpenAPI documentation without API token", async () => {
+    const response = await fetch(`${httpBaseUrl}/docs/json`);
+    expect(response.status).toBe(200);
+    const openapi = (await response.json()) as {
+      openapi: string;
+      paths: Record<string, unknown>;
+    };
+    expect(openapi.openapi).toMatch(/^3\./);
+    expect(openapi.paths["/api/tasks"]).toBeTruthy();
   });
 
   it("dispatches all and multiple-agent commands to registered agents", async () => {
@@ -77,9 +92,33 @@ describe("AI Teams server integration", () => {
     await runBothTask;
   });
 
+  it("dispatches queue commands to one available agent at a time", async () => {
+    const alice = await connectAgent("alice");
+    const bob = await connectAgent("bob");
+    const leader = await connectLeader();
+
+    const aliceDispatch = waitForAgentDispatch(alice);
+    const bobUnexpected = waitForAgentDispatch(bob, 80).then(() => true, () => false);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "queued once" }));
+
+    const first = await aliceDispatch;
+    expect(first.prompt).toBe("queued once");
+    expect(first.employeeId).toBe("alice");
+    expect(first.targetMode).toBe("queue");
+    expect(await bobUnexpected).toBe(false);
+
+    const bobDispatch = waitForAgentDispatch(bob);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "queued twice" }));
+    const second = await bobDispatch;
+    expect(second.prompt).toBe("queued twice");
+    expect(second.employeeId).toBe("bob");
+    expect(second.targetMode).toBe("queue");
+  });
+
   it("streams agent task events to leaders and completes the task", async () => {
     const agent = await connectAgent("alice");
     const leader = await connectLeader();
+    const sessionId = "claude-session-1";
 
     const dispatchPromise = waitForAgentDispatch(agent);
     leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "hello" }));
@@ -93,13 +132,33 @@ describe("AI Teams server integration", () => {
       (message) => message.type === "task.upsert" && message.task.id === dispatch.taskId && message.task.status === "completed",
     );
     agent.send(JSON.stringify({ type: "task.accepted", taskId: dispatch.taskId }));
-    agent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 123 }));
+    agent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 123, sessionId }));
     agent.send(JSON.stringify({ type: "task.output", taskId: dispatch.taskId, stream: "stdout", seq: 1, content: "hi" }));
     agent.send(JSON.stringify({ type: "task.completed", taskId: dispatch.taskId, exitCode: 0, summary: "done" }));
 
     await outputPromise;
     const completed = await completedPromise;
     expect(completed.type).toBe("task.upsert");
+    expect(completed.task.sessionId).toBe(sessionId);
+
+    const historyResponse = await fetch(`${httpBaseUrl}/api/sessions/${sessionId}/history`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(historyResponse.status).toBe(200);
+    const history = (await historyResponse.json()) as {
+      sessionId: string;
+      tasks: Array<{ id: string }>;
+      messages: Array<{ type: string; role: string; taskId: string; content: string }>;
+    };
+    expect(history.sessionId).toBe(sessionId);
+    expect(history.tasks.map((task) => task.id)).toContain(dispatch.taskId);
+    expect(history.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "task.prompt", role: "user", taskId: dispatch.taskId, content: "hello" }),
+        expect.objectContaining({ type: "task.output", role: "assistant", taskId: dispatch.taskId, content: "hi" }),
+        expect.objectContaining({ type: "task.result", role: "assistant", taskId: dispatch.taskId, content: "done" }),
+      ]),
+    );
   });
 
   it("allows reconnect within grace period and fails after grace expires", async () => {
@@ -165,6 +224,100 @@ describe("AI Teams server integration", () => {
     const close = await waitForClose(bob);
     expect(close.code).toBe(1008);
   });
+
+  it("accepts REST task submissions and posts webhook callbacks for task lifecycle", async () => {
+    const agent = await connectAgent("alice");
+    const webhook = await startWebhookServer();
+
+    try {
+      const dispatchPromise = waitForAgentDispatch(agent);
+      const response = await fetch(`${httpBaseUrl}/api/tasks`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${TOKEN}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          atAgents: ["alice"],
+          prompt: "rest task",
+          webhook: webhook.url,
+        }),
+      });
+
+      expect(response.status).toBe(202);
+      const body = (await response.json()) as { status: string; tasks: Array<{ id: string; prompt: string }> };
+      expect(body.status).toBe("accepted");
+      expect(body.tasks).toHaveLength(1);
+      expect(body.tasks[0]?.prompt).toBe("rest task");
+
+      const dispatch = await dispatchPromise;
+      agent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 123 }));
+      agent.send(
+        JSON.stringify({
+          type: "task.output",
+          taskId: dispatch.taskId,
+          stream: "stdout",
+          seq: 1,
+          content: "[done] result: step complete",
+        }),
+      );
+      agent.send(JSON.stringify({ type: "task.completed", taskId: dispatch.taskId, exitCode: 0, summary: "done" }));
+
+      await waitUntil(() => webhook.events.some((event) => event.event === "task.completed"), 500);
+      expect(webhook.events.map((event) => event.event)).toEqual(
+        expect.arrayContaining(["task.started", "task.output", "task.completed"]),
+      );
+      expect(webhook.events.find((event) => event.event === "task.output")?.chunk?.content).toBe("[done] result: step complete");
+
+      for (const event of webhook.events) {
+        expect(event.signature).toBeTruthy();
+        expect(event.signature).toMatch(/^sha256=[0-9a-f]{64}$/);
+        const expected = `sha256=${createHmac("sha256", TOKEN).update(event.rawBody!).digest("hex")}`;
+        expect(event.signature).toBe(expected);
+      }
+    } finally {
+      await webhook.close();
+    }
+  });
+
+  it("allows parallel main and queue tasks on the same agent", async () => {
+    const agent = await connectAgent("alice");
+    const leader = await connectLeader();
+
+    // Send a direct task (main slot)
+    const mainDispatch = waitForAgentDispatch(agent);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "main task" }));
+    const mainTask = await mainDispatch;
+    expect(mainTask.targetMode).toBe("direct");
+
+    // Send a queue task — should dispatch to alice's queue slot since she's the only agent
+    const queueDispatch = waitForAgentDispatch(agent);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "queue task" }));
+    const queueTask = await queueDispatch;
+    expect(queueTask.targetMode).toBe("queue");
+
+    // Verify both slots are occupied
+    const snapshot = server.buildSnapshot();
+    const alice = snapshot.employees.find((e) => e.id === "alice")!;
+    expect(alice.mainTaskId).toBe(mainTask.taskId);
+    expect(alice.queueTaskId).toBe(queueTask.taskId);
+
+    // Complete main task — should free main slot
+    agent.send(JSON.stringify({ type: "task.completed", taskId: mainTask.taskId, exitCode: 0, summary: "main done" }));
+    await delay(20);
+    const afterMainComplete = server.buildSnapshot();
+    const aliceAfter = afterMainComplete.employees.find((e) => e.id === "alice")!;
+    expect(aliceAfter.mainTaskId).toBeNull();
+    expect(aliceAfter.queueTaskId).toBe(queueTask.taskId);
+
+    // Complete queue task — should free queue slot
+    agent.send(JSON.stringify({ type: "task.completed", taskId: queueTask.taskId, exitCode: 0, summary: "queue done" }));
+    await delay(20);
+    const afterQueueComplete = server.buildSnapshot();
+    const aliceFinal = afterQueueComplete.employees.find((e) => e.id === "alice")!;
+    expect(aliceFinal.mainTaskId).toBeNull();
+    expect(aliceFinal.queueTaskId).toBeNull();
+  });
 });
 
 async function connectLeader() {
@@ -181,8 +334,8 @@ async function connectAgent(employeeId: string, activeTaskId?: string) {
       machineId: employeeId,
       hostname: "test-host",
       labels: [],
-      maxConcurrentTasks: 1,
-      activeTaskId: activeTaskId ?? null,
+      activeMainTaskId: activeTaskId ?? null,
+      activeQueueTaskId: null,
       lastOutputSeq: 0,
     }),
   );
@@ -291,4 +444,33 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 500) {
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function startWebhookServer() {
+  const events: Array<{ event: string; chunk?: { content?: string }; signature?: string; rawBody?: string }> = [];
+  const server = http.createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    request.on("end", () => {
+      const rawBody = Buffer.concat(chunks).toString("utf8");
+      const signature = request.headers["x-ai-teams-signature"];
+      if (rawBody) {
+        events.push({
+          ...(JSON.parse(rawBody) as { event: string; chunk?: { content?: string } }),
+          signature: typeof signature === "string" ? signature : undefined,
+          rawBody,
+        });
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ status: "received" }));
+    });
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${address.port}/webhook`,
+    events,
+    close: () => new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))),
+  };
 }

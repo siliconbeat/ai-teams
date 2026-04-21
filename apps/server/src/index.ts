@@ -1,28 +1,24 @@
-import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DatabaseSync } from "node:sqlite";
 import Fastify, { type FastifyInstance } from "fastify";
+import swagger from "@fastify/swagger";
+import swaggerUi from "@fastify/swagger-ui";
 import websocket from "@fastify/websocket";
 import WebSocket from "ws";
 import {
   parseEmployeeToServerMessage,
   parseJsonMessage,
   parseLeaderToServerMessage,
-  type AgentTarget,
-  type EmployeeSnapshot,
-  type EmployeeToServerMessage,
   type LeaderToServerMessage,
-  type ServerToEmployeeMessage,
   type ServerToLeaderMessage,
   type StateSnapshot,
-  type TaskOutputChunk,
-  type TaskRecord,
-  type TaskStatus,
 } from "@ai-teams/shared";
+import { type ServerState, initDb, hydrateState } from "./db.js";
+import { type RestTaskRequest, errorResponseSchema, snapshotSchema, sessionHistorySchema, restTaskRequestSchema, restTaskAcceptedSchema, parseRestTaskRequest } from "./schemas.js";
+import { createDispatch, nowIso, sendJson } from "./dispatch.js";
+import type { DispatchContext } from "./dispatch.js";
 
-const TERMINAL_STATUSES = new Set<TaskStatus>(["completed", "failed", "cancelled", "timeout"]);
 const DEFAULT_PORT = 3789;
 
 export type AiTeamsServerOptions = {
@@ -42,27 +38,6 @@ export type AiTeamsServer = {
   buildSnapshot: () => StateSnapshot;
   close: () => Promise<void>;
 };
-
-type ServerState = {
-  agentSockets: Map<string, WebSocket>;
-  leaderSockets: Set<WebSocket>;
-  employees: Map<string, EmployeeSnapshot>;
-  tasks: Map<string, TaskRecord>;
-  taskLogs: Map<string, TaskOutputChunk[]>;
-  socketToEmployeeId: WeakMap<WebSocket, string>;
-  taskTimeouts: Map<string, NodeJS.Timeout>;
-  disconnectTimers: Map<string, NodeJS.Timeout>;
-};
-
-function nowIso() {
-  return new Date().toISOString();
-}
-
-function sendJson<T>(socket: WebSocket, payload: T) {
-  if (socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify(payload));
-  }
-}
 
 function isAuthorized(authToken: string, rawUrl: string, headers: Record<string, unknown>) {
   const bearer = typeof headers.authorization === "string" ? headers.authorization : "";
@@ -88,18 +63,61 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     employees: new Map(),
     tasks: new Map(),
     taskLogs: new Map(),
+    taskWebhooks: new Map(),
     socketToEmployeeId: new WeakMap(),
     taskTimeouts: new Map(),
     disconnectTimers: new Map(),
+    taskQueues: new Map(),
+    mainTaskQueues: new Map(),
+    sharedTaskQueue: [],
+    sharedQueueCursor: 0,
   };
 
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  const { DatabaseSync } = await import("node:sqlite");
   const db = new DatabaseSync(dbPath);
   initDb(db);
   hydrateState(db, state, defaultTimeoutSec, maxLogChunksPerTask);
 
   const app = Fastify({ logger: options.logger ?? true });
   await app.register(websocket);
+  await app.register(swagger, {
+    openapi: {
+      info: {
+        title: "AI Teams Server API",
+        description: "REST API for submitting AI Teams tasks and reading runtime state.",
+        version: "0.1.0",
+      },
+      components: {
+        securitySchemes: {
+          bearerAuth: {
+            type: "http",
+            scheme: "bearer",
+          },
+        },
+      },
+      security: [{ bearerAuth: [] }],
+    },
+  });
+  await app.register(swaggerUi, {
+    routePrefix: "/docs",
+    uiConfig: {
+      docExpansion: "list",
+      deepLinking: false,
+    },
+    staticCSP: true,
+  });
+
+  const dispatchCtx: DispatchContext = {
+    state,
+    db,
+    log: app.log,
+    authToken: options.authToken,
+    defaultTimeoutSec,
+    maxLogChunksPerTask,
+    disconnectGraceMs,
+  };
+  const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage } = createDispatch(dispatchCtx);
 
   function buildSnapshot(): StateSnapshot {
     return {
@@ -109,337 +127,54 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     };
   }
 
-  function broadcastToLeaders(payload: ServerToLeaderMessage) {
-    for (const socket of state.leaderSockets) {
-      sendJson(socket, payload);
-    }
-  }
-
-  function upsertEmployee(employee: EmployeeSnapshot) {
-    state.employees.set(employee.id, employee);
-    persistEmployee(db, employee);
-    broadcastToLeaders({ type: "employee.upsert", employee });
-  }
-
-  function upsertTask(task: TaskRecord) {
-    state.tasks.set(task.id, task);
-    persistTask(db, task);
-    broadcastToLeaders({ type: "task.upsert", task });
-  }
-
-  function clearTaskTimeout(taskId: string) {
-    const timer = state.taskTimeouts.get(taskId);
-    if (timer) {
-      clearTimeout(timer);
-      state.taskTimeouts.delete(taskId);
-    }
-  }
-
-  function setEmployeeTask(employeeId: string, taskId: string | null, prompt: string | null) {
-    const employee = state.employees.get(employeeId);
-    if (!employee) {
-      return;
-    }
-    employee.currentTaskId = taskId;
-    employee.currentTaskPrompt = prompt;
-    employee.lastSeenAt = nowIso();
-    upsertEmployee(employee);
-  }
-
-  function markTaskFailed(taskId: string, error: string) {
-    const task = state.tasks.get(taskId);
-    if (!task || TERMINAL_STATUSES.has(task.status)) {
-      return;
-    }
-    clearTaskTimeout(taskId);
-    task.status = "failed";
-    task.error = error;
-    task.summary = task.summary ?? error;
-    task.finishedAt = nowIso();
-    upsertTask(task);
-    setEmployeeTask(task.employeeId, null, null);
-  }
-
-  function appendTaskLog(chunk: TaskOutputChunk) {
-    const task = state.tasks.get(chunk.taskId);
-    if (!task || TERMINAL_STATUSES.has(task.status)) {
-      return;
-    }
-    const history = state.taskLogs.get(chunk.taskId) ?? [];
-    history.push(chunk);
-    if (history.length > maxLogChunksPerTask) {
-      history.splice(0, history.length - maxLogChunksPerTask);
-    }
-    state.taskLogs.set(chunk.taskId, history);
-    persistTaskLog(db, chunk, maxLogChunksPerTask);
-    broadcastToLeaders({ type: "task.output", chunk });
-  }
-
-  function markTaskTimeout(task: TaskRecord) {
-    const current = state.tasks.get(task.id);
-    if (!current || TERMINAL_STATUSES.has(current.status)) {
-      return;
-    }
-    const socket = state.agentSockets.get(task.employeeId);
-    if (socket) {
-      sendJson<ServerToEmployeeMessage>(socket, { type: "task.cancel", taskId: task.id });
-    }
-    current.status = "timeout";
-    current.finishedAt = nowIso();
-    current.error = `任务超过 ${task.timeoutSec} 秒未完成，已超时。`;
-    current.summary = current.error;
-    upsertTask(current);
-    setEmployeeTask(task.employeeId, null, null);
-    clearTaskTimeout(task.id);
-  }
-
-  function dispatchTask(task: TaskRecord) {
-    const employee = state.employees.get(task.employeeId);
-    const socket = state.agentSockets.get(task.employeeId);
-
-    if (!employee || employee.status !== "online" || !socket) {
-      markTaskFailed(task.id, "目标员工当前离线，任务未能分发。");
-      return;
-    }
-
-    if (employee.currentTaskId && employee.currentTaskId !== task.id) {
-      markTaskFailed(task.id, "目标员工当前忙碌，暂不支持并发任务。");
-      return;
-    }
-
-    task.status = "dispatched";
-    upsertTask(task);
-    setEmployeeTask(task.employeeId, task.id, task.prompt);
-    clearTaskTimeout(task.id);
-    state.taskTimeouts.set(task.id, setTimeout(() => markTaskTimeout(task), task.timeoutSec * 1000));
-
-    sendJson<ServerToEmployeeMessage>(socket, {
-      type: "task.dispatch",
-      taskId: task.id,
-      leaderCommandId: task.leaderCommandId,
-      employeeId: task.employeeId,
-      prompt: task.prompt,
-      workspace: task.workspace,
-      timeoutSec: task.timeoutSec,
-    });
-  }
-
-  function createTask(employeeId: string, prompt: string, workspace?: string, timeoutSec?: number, leaderCommandId?: string) {
-    const task: TaskRecord = {
-      id: randomUUID(),
-      leaderCommandId: leaderCommandId ?? randomUUID(),
-      employeeId,
-      prompt,
-      workspace: workspace?.trim() || null,
-      timeoutSec: timeoutSec ?? defaultTimeoutSec,
-      status: "queued",
-      createdAt: nowIso(),
-      startedAt: null,
-      finishedAt: null,
-      exitCode: null,
-      summary: null,
-      error: null,
+  function buildSessionHistory(sessionId: string) {
+    const extractDoneSessionId = (content: string) => {
+      const match = content.match(/^\[done\]\s+session_id:\s*(\S+)/m);
+      return match?.[1] ?? null;
     };
-
-    upsertTask(task);
-    dispatchTask(task);
-    return task;
-  }
-
-  function resolveTargetIds(target: AgentTarget) {
-    if (target === "all") {
-      return [...state.employees.values()].map((employee) => employee.id);
-    }
-    return [...new Set(target)];
-  }
-
-  function handleRegister(message: Extract<EmployeeToServerMessage, { type: "agent.register" }>, socket: WebSocket) {
-    const previous = state.employees.get(message.employeeId);
-    const previousTaskId = previous?.currentTaskId ?? null;
-    const activeTaskId = message.activeTaskId ?? null;
-
-    const disconnectTimer = state.disconnectTimers.get(message.employeeId);
-    if (disconnectTimer) {
-      clearTimeout(disconnectTimer);
-      state.disconnectTimers.delete(message.employeeId);
-    }
-
-    state.agentSockets.set(message.employeeId, socket);
-    state.socketToEmployeeId.set(socket, message.employeeId);
-
-    let currentTaskId: string | null = previousTaskId;
-    let currentTaskPrompt: string | null = previous?.currentTaskPrompt ?? null;
-    if (previousTaskId && activeTaskId !== previousTaskId) {
-      markTaskFailed(previousTaskId, "员工重连时未恢复原运行任务。");
-      currentTaskId = null;
-      currentTaskPrompt = null;
-    } else if (activeTaskId) {
-      const activeTask = state.tasks.get(activeTaskId);
-      if (activeTask && activeTask.employeeId === message.employeeId && !TERMINAL_STATUSES.has(activeTask.status)) {
-        currentTaskId = activeTask.id;
-        currentTaskPrompt = activeTask.prompt;
-      }
-    }
-
-    upsertEmployee({
-      id: message.employeeId,
-      name: message.name,
-      machineId: message.machineId,
-      hostname: message.hostname,
-      labels: message.labels,
-      status: "online",
-      maxConcurrentTasks: message.maxConcurrentTasks,
-      currentTaskId,
-      currentTaskPrompt,
-      lastSeenAt: nowIso(),
+    const tasks = [...state.tasks.values()]
+      .filter((task) => task.sessionId === sessionId || (state.taskLogs.get(task.id) ?? []).some((chunk) => extractDoneSessionId(chunk.content) === sessionId))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const messages = tasks.flatMap((task) => {
+      const taskLogs = [...(state.taskLogs.get(task.id) ?? [])].sort((a, b) => a.seq - b.seq);
+      const outputMessages = taskLogs.map((chunk) => ({
+        type: "task.output" as const,
+        role: "assistant" as const,
+        taskId: task.id,
+        stream: chunk.stream,
+        seq: chunk.seq,
+        content: chunk.content,
+        createdAt: chunk.createdAt,
+      }));
+      const resultMessage =
+        task.finishedAt && (task.summary || task.error)
+          ? [
+              {
+                type: "task.result" as const,
+                role: task.status === "failed" || task.status === "timeout" ? ("system" as const) : ("assistant" as const),
+                taskId: task.id,
+                content: task.summary || task.error || task.status,
+                createdAt: task.finishedAt,
+              },
+            ]
+          : [];
+      return [
+        {
+          type: "task.prompt" as const,
+          role: "user" as const,
+          taskId: task.id,
+          content: task.prompt,
+          createdAt: task.createdAt,
+        },
+        ...outputMessages,
+        ...resultMessage,
+      ];
     });
-  }
-
-  function taskBelongsToSocket(taskId: string, employeeId: string | undefined, socket: WebSocket) {
-    const socketEmployeeId = state.socketToEmployeeId.get(socket);
-    if (!socketEmployeeId || (employeeId && employeeId !== socketEmployeeId)) {
-      return false;
-    }
-    const task = state.tasks.get(taskId);
-    return Boolean(task && task.employeeId === socketEmployeeId);
-  }
-
-  function handleAgentMessage(message: EmployeeToServerMessage, socket: WebSocket) {
-    if (message.type === "agent.register") {
-      handleRegister(message, socket);
-      return;
-    }
-
-    const socketEmployeeId = state.socketToEmployeeId.get(socket);
-    if (!socketEmployeeId) {
-      sendJson<ServerToLeaderMessage>(socket as unknown as WebSocket, {
-        type: "server.error",
-        code: "agent_not_registered",
-        message: "Agent must register before sending task events.",
-      });
-      socket.close(1008, "agent_not_registered");
-      return;
-    }
-
-    if (message.type === "agent.heartbeat") {
-      if (message.employeeId !== socketEmployeeId) {
-        socket.close(1008, "employee_mismatch");
-        return;
-      }
-      const employee = state.employees.get(message.employeeId);
-      if (employee) {
-        employee.lastSeenAt = nowIso();
-        employee.status = "online";
-        upsertEmployee(employee);
-      }
-      return;
-    }
-
-    if (!taskBelongsToSocket(message.taskId, socketEmployeeId, socket)) {
-      socket.close(1008, "task_owner_mismatch");
-      return;
-    }
-
-    const task = state.tasks.get(message.taskId);
-    if (!task || TERMINAL_STATUSES.has(task.status)) {
-      return;
-    }
-
-    switch (message.type) {
-      case "task.accepted":
-        task.status = "accepted";
-        upsertTask(task);
-        break;
-      case "task.started":
-        task.status = "running";
-        task.startedAt = task.startedAt ?? nowIso();
-        upsertTask(task);
-        break;
-      case "task.output":
-        appendTaskLog({
-          taskId: message.taskId,
-          employeeId: task.employeeId,
-          stream: message.stream,
-          seq: message.seq,
-          content: message.content,
-          createdAt: nowIso(),
-        });
-        break;
-      case "task.completed":
-        task.status = "completed";
-        clearTaskTimeout(task.id);
-        task.finishedAt = nowIso();
-        task.exitCode = message.exitCode;
-        task.summary = message.summary ?? "任务执行完成。";
-        task.error = null;
-        upsertTask(task);
-        setEmployeeTask(task.employeeId, null, null);
-        break;
-      case "task.failed":
-        markTaskFailed(message.taskId, message.error);
-        break;
-      case "task.cancelled":
-        task.status = "cancelled";
-        clearTaskTimeout(task.id);
-        task.finishedAt = nowIso();
-        task.summary = "任务已取消。";
-        upsertTask(task);
-        setEmployeeTask(task.employeeId, null, null);
-        break;
-    }
-  }
-
-  function handleLeaderMessage(message: LeaderToServerMessage, socket: WebSocket) {
-    switch (message.type) {
-      case "command.dispatch": {
-        const targetIds = resolveTargetIds(message.atAgents);
-        if (targetIds.length === 0) {
-          sendJson<ServerToLeaderMessage>(socket, {
-            type: "command.error",
-            code: "no_target_agents",
-            message: "没有可用的目标员工。",
-          });
-          return;
-        }
-        const leaderCommandId = randomUUID();
-        for (const employeeId of targetIds) {
-          createTask(employeeId, message.prompt, message.workspace, message.timeoutSec, leaderCommandId);
-        }
-        break;
-      }
-      case "command.send":
-        createTask(message.employeeId, message.prompt, message.workspace, message.timeoutSec);
-        break;
-      case "command.broadcast":
-        handleLeaderMessage(
-          {
-            type: "command.dispatch",
-            atAgents: "all",
-            prompt: message.prompt,
-            workspace: message.workspace,
-            timeoutSec: message.timeoutSec,
-          },
-          socket,
-        );
-        break;
-      case "task.cancel": {
-        const task = state.tasks.get(message.taskId);
-        if (!task || TERMINAL_STATUSES.has(task.status)) {
-          return;
-        }
-        const agentSocket = state.agentSockets.get(task.employeeId);
-        if (!agentSocket) {
-          markTaskFailed(task.id, "员工已离线，无法取消运行中的进程。");
-          return;
-        }
-        sendJson<ServerToEmployeeMessage>(agentSocket, { type: "task.cancel", taskId: task.id });
-        break;
-      }
-    }
+    return { sessionId, tasks, messages };
   }
 
   app.addHook("preHandler", async (request, reply) => {
-    if (request.url.startsWith("/ws/")) {
+    if (request.url.startsWith("/ws/") || request.url.startsWith("/docs")) {
       return;
     }
     if (!isAuthorized(options.authToken, request.url, request.headers)) {
@@ -447,16 +182,127 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     }
   });
 
-  app.get("/health", async () => ({
-    status: "ok",
-    timestamp: nowIso(),
-    dbPath,
-    employees: state.employees.size,
-    leaders: state.leaderSockets.size,
-    tasks: state.tasks.size,
-  }));
+  app.get(
+    "/health",
+    {
+      schema: {
+        tags: ["system"],
+        summary: "Check server health",
+        response: {
+          200: {
+            type: "object",
+            required: ["status", "timestamp", "dbPath", "employees", "leaders", "tasks"],
+            properties: {
+              status: { type: "string", enum: ["ok"] },
+              timestamp: { type: "string", format: "date-time" },
+              dbPath: { type: "string" },
+              employees: { type: "number" },
+              leaders: { type: "number" },
+              tasks: { type: "number" },
+            },
+          },
+          401: errorResponseSchema,
+        },
+      },
+    },
+    async () => ({
+      status: "ok",
+      timestamp: nowIso(),
+      dbPath,
+      employees: state.employees.size,
+      leaders: state.leaderSockets.size,
+      tasks: state.tasks.size,
+    }),
+  );
 
-  app.get("/api/snapshot", async () => buildSnapshot());
+  app.get(
+    "/api/snapshot",
+    {
+      schema: {
+        tags: ["tasks"],
+        summary: "Get current employees, tasks, and task logs",
+        response: {
+          200: snapshotSchema,
+          401: errorResponseSchema,
+        },
+      },
+    },
+    async () => buildSnapshot(),
+  );
+
+  app.get<{ Params: { sessionId: string } }>(
+    "/api/sessions/:sessionId/history",
+    {
+      schema: {
+        tags: ["sessions"],
+        summary: "Get conversation history by session ID",
+        description:
+          "Returns task prompts, task output chunks, and terminal summaries/errors for the specified AI Teams Claude session ID.",
+        params: {
+          type: "object",
+          required: ["sessionId"],
+          properties: {
+            sessionId: { type: "string", minLength: 1 },
+          },
+        },
+        response: {
+          200: sessionHistorySchema,
+          401: errorResponseSchema,
+        },
+      },
+    },
+    async (request) => buildSessionHistory(request.params.sessionId),
+  );
+
+  app.post<{ Body: RestTaskRequest }>(
+    "/api/tasks",
+    {
+      schema: {
+        tags: ["tasks"],
+        summary: "Submit a task",
+        description:
+          "Submit a task to the shared queue, all agents, or one or more selected agents. Optional webhook receives task lifecycle callbacks.",
+        body: restTaskRequestSchema,
+        response: {
+          202: restTaskAcceptedSchema,
+          400: {
+            type: "object",
+            required: ["status", "code", "message"],
+            properties: {
+              status: { type: "string", enum: ["rejected"] },
+              code: { type: "string" },
+              message: { type: "string" },
+            },
+          },
+          401: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      try {
+        const { command, webhookUrl } = parseRestTaskRequest(request.body);
+        const result = dispatchLeaderCommand(command, webhookUrl);
+        if (!result.ok) {
+          return reply.code(400).send({
+            status: "rejected",
+            code: result.code,
+            message: result.message,
+          });
+        }
+        return reply.code(202).send({
+          status: "accepted",
+          leaderCommandId: result.leaderCommandId,
+          tasks: result.tasks,
+        });
+      } catch (error) {
+        return reply.code(400).send({
+          status: "rejected",
+          code: "invalid_request",
+          message: error instanceof Error ? error.message : "Invalid task request.",
+        });
+      }
+    },
+  );
 
   app.get("/ws/agent", { websocket: true }, (socket, request) => {
     if (!isAuthorized(options.authToken, request.url, request.headers)) {
@@ -488,12 +334,23 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
       if (employee) {
         employee.status = "offline";
         employee.lastSeenAt = nowIso();
-        upsertEmployee(employee);
-        if (employee.currentTaskId) {
+        for (const leaderSocket of state.leaderSockets) {
+          sendJson(leaderSocket, { type: "employee.upsert", employee });
+        }
+        if (employee.mainTaskId || employee.queueTaskId) {
           const timer = setTimeout(() => {
             const current = state.employees.get(employeeId);
-            if (current?.currentTaskId) {
-              markTaskFailed(current.currentTaskId, "员工连接中断且未在宽限期内恢复。");
+            if (current) {
+              const stillRunning = [current.mainTaskId, current.queueTaskId].filter(Boolean) as string[];
+              if (stillRunning.length > 0) {
+                const freshDispatch = createDispatch(dispatchCtx);
+                for (const taskId of stillRunning) {
+                  freshDispatch.handleAgentMessage(
+                    { type: "task.failed", taskId, error: "员工连接中断且未在宽限期内恢复。" },
+                    socket,
+                  );
+                }
+              }
             }
             state.disconnectTimers.delete(employeeId);
           }, disconnectGraceMs);
@@ -548,102 +405,6 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
       db.close();
     },
   };
-}
-
-function initDb(db: DatabaseSync) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS schema_meta (
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    );
-    INSERT INTO schema_meta (key, value)
-    VALUES ('version', '1')
-    ON CONFLICT(key) DO NOTHING;
-    CREATE TABLE IF NOT EXISTS employees (
-      id TEXT PRIMARY KEY,
-      payload_json TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS tasks (
-      id TEXT PRIMARY KEY,
-      payload_json TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS task_logs (
-      task_id TEXT NOT NULL,
-      seq INTEGER NOT NULL,
-      payload_json TEXT NOT NULL,
-      PRIMARY KEY (task_id, seq)
-    );
-  `);
-}
-
-function hydrateState(db: DatabaseSync, state: ServerState, defaultTimeoutSec: number, maxLogChunksPerTask: number) {
-  const employeeRows = db.prepare("SELECT payload_json FROM employees").all() as Array<{ payload_json: string }>;
-  for (const row of employeeRows) {
-    const employee = JSON.parse(row.payload_json) as EmployeeSnapshot;
-    employee.status = "offline";
-    state.employees.set(employee.id, employee);
-  }
-
-  const taskRows = db.prepare("SELECT payload_json FROM tasks").all() as Array<{ payload_json: string }>;
-  for (const row of taskRows) {
-    const task = JSON.parse(row.payload_json) as TaskRecord;
-    task.timeoutSec = task.timeoutSec ?? defaultTimeoutSec;
-    state.tasks.set(task.id, task);
-  }
-
-  const logRows = db
-    .prepare(
-      `
-        SELECT payload_json FROM (
-          SELECT task_id, seq, payload_json,
-          ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY seq DESC) AS rn
-          FROM task_logs
-        )
-        WHERE rn <= ?
-        ORDER BY task_id ASC, seq ASC
-      `,
-    )
-    .all(maxLogChunksPerTask) as Array<{ payload_json: string }>;
-  for (const row of logRows) {
-    const chunk = JSON.parse(row.payload_json) as TaskOutputChunk;
-    const history = state.taskLogs.get(chunk.taskId) ?? [];
-    history.push(chunk);
-    state.taskLogs.set(chunk.taskId, history);
-  }
-}
-
-function persistEmployee(db: DatabaseSync, employee: EmployeeSnapshot) {
-  db.prepare(`
-    INSERT INTO employees (id, payload_json)
-    VALUES (?, ?)
-    ON CONFLICT(id) DO UPDATE SET payload_json = excluded.payload_json
-  `).run(employee.id, JSON.stringify(employee));
-}
-
-function persistTask(db: DatabaseSync, task: TaskRecord) {
-  db.prepare(`
-    INSERT INTO tasks (id, payload_json)
-    VALUES (?, ?)
-    ON CONFLICT(id) DO UPDATE SET payload_json = excluded.payload_json
-  `).run(task.id, JSON.stringify(task));
-}
-
-function persistTaskLog(db: DatabaseSync, chunk: TaskOutputChunk, maxLogChunksPerTask: number) {
-  db.prepare(`
-    INSERT INTO task_logs (task_id, seq, payload_json)
-    VALUES (?, ?, ?)
-    ON CONFLICT(task_id, seq) DO UPDATE SET payload_json = excluded.payload_json
-  `).run(chunk.taskId, chunk.seq, JSON.stringify(chunk));
-  db.prepare(`
-    DELETE FROM task_logs
-    WHERE task_id = ?
-      AND seq NOT IN (
-        SELECT seq FROM task_logs
-        WHERE task_id = ?
-        ORDER BY seq DESC
-        LIMIT ?
-      )
-  `).run(chunk.taskId, chunk.taskId, maxLogChunksPerTask);
 }
 
 export function readOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): AiTeamsServerOptions {

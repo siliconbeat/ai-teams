@@ -10,6 +10,8 @@
   },
   "dependencies": {
     "@ai-teams/shared": "workspace:*",
+    "@fastify/swagger": "^9.7.0",
+    "@fastify/swagger-ui": "^5.2.5",
     "@fastify/websocket": "^11.0.0",
     "fastify": "^5.2.0",
     "ws": "^8.18.3"

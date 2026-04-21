@@ -117,7 +117,7 @@ export default function App() {
   const [history, setHistory] = useState<CommandHistoryItem[]>([]);
   const [activePage, setActivePage] = useState<ActivePage>("monitor");
   const [taskFilter, setTaskFilter] = useState<TaskStatus | "all">("all");
-  const [selectedTarget, setSelectedTarget] = useState<AgentTarget>("all");
+  const [selectedTarget, setSelectedTarget] = useState<AgentTarget>("queue");
   const [draft, setDraft] = useState<CommandDraft>({
     prompt: "",
     workspace: "",
@@ -194,9 +194,12 @@ export default function App() {
   );
 
   const activeTasksByEmployee = useMemo(() => {
-    const map: Record<string, TaskRecord | undefined> = {};
+    const map: Record<string, { main?: TaskRecord; queue?: TaskRecord }> = {};
     for (const employee of employeeList) {
-      map[employee.id] = employee.currentTaskId ? tasks[employee.currentTaskId] : undefined;
+      map[employee.id] = {
+        main: employee.mainTaskId ? tasks[employee.mainTaskId] : undefined,
+        queue: employee.queueTaskId ? tasks[employee.queueTaskId] : undefined,
+      };
     }
     return map;
   }, [employeeList, tasks]);
@@ -204,6 +207,9 @@ export default function App() {
   const latestTasksByEmployee = useMemo(() => {
     const map: Record<string, TaskRecord | undefined> = {};
     for (const task of Object.values(tasks)) {
+      if (!task.employeeId) {
+        continue;
+      }
       const current = map[task.employeeId];
       if (!current || task.createdAt > current.createdAt) {
         map[task.employeeId] = task;
@@ -215,7 +221,8 @@ export default function App() {
   const displayTasksByEmployee = useMemo(() => {
     const map: Record<string, TaskRecord | undefined> = {};
     for (const employee of employeeList) {
-      map[employee.id] = activeTasksByEmployee[employee.id] ?? latestTasksByEmployee[employee.id];
+      const slots = activeTasksByEmployee[employee.id];
+      map[employee.id] = slots?.main ?? slots?.queue ?? latestTasksByEmployee[employee.id];
     }
     return map;
   }, [activeTasksByEmployee, employeeList, latestTasksByEmployee]);
@@ -243,7 +250,7 @@ export default function App() {
       .map((task) => ({
         id: `employee-${task.id}`,
         side: "employee",
-        author: employees[task.employeeId]?.name ?? task.employeeId,
+        author: task.employeeId ? employees[task.employeeId]?.name ?? task.employeeId : "任务队列",
         content: task.summary || task.error || statusToMessage(task.status),
         createdAt: new Date(task.finishedAt ?? task.createdAt).toLocaleTimeString(),
         createdAtMs: new Date(task.finishedAt ?? task.createdAt).getTime(),
@@ -254,6 +261,9 @@ export default function App() {
   }, [employees, history, tasks]);
 
   function formatTarget(target: AgentTarget, employeeMap: Record<string, EmployeeSnapshot>) {
+    if (target === "queue") {
+      return "任务队列";
+    }
     if (target === "all") {
       return "@全部员工";
     }
@@ -274,6 +284,25 @@ export default function App() {
       return "任务执行失败。";
     }
     return `任务状态：${status}`;
+  }
+
+  function getAgentPresence(employee: EmployeeSnapshot, activeTask?: TaskRecord) {
+    if (employee.status === "offline") {
+      return { label: "离线", className: "offline" };
+    }
+    if (!activeTask) {
+      return { label: "在线", className: "online" };
+    }
+    if (activeTask.status === "dispatched") {
+      return { label: "派发中", className: "dispatched" };
+    }
+    if (activeTask.status === "accepted") {
+      return { label: "已接单", className: "accepted" };
+    }
+    if (activeTask.status === "running") {
+      return { label: "任务中", className: "busy" };
+    }
+    return { label: "在线", className: "online" };
   }
 
   function buildTaskHeader(task: TaskRecord) {
@@ -312,12 +341,16 @@ export default function App() {
 
   function toggleTarget(employeeId: string) {
     setSelectedTarget((current) => {
-      const currentIds = current === "all" ? [] : current;
+      const currentIds = current === "all" || current === "queue" ? [] : current;
       const next = currentIds.includes(employeeId)
         ? currentIds.filter((id) => id !== employeeId)
         : [...currentIds, employeeId];
-      return next.length === 0 ? "all" : next;
+      return next.length === 0 ? "queue" : next;
     });
+  }
+
+  function selectQueueTarget() {
+    setSelectedTarget("queue");
   }
 
   function selectAllTargets() {
@@ -383,6 +416,9 @@ export default function App() {
       const next: Record<string, EmployeeTerminalLog> = { ...current };
 
       for (const task of taskEntries) {
+        if (!task.employeeId) {
+          continue;
+        }
         const employeeId = task.employeeId;
         const currentLog = next[employeeId] ?? createTerminalLog();
         const seenTaskIds = new Set(currentLog.seenTaskIds);
@@ -517,38 +553,62 @@ export default function App() {
                 <div className="empty-state">暂无员工接入。先启动服务端和员工端。</div>
               ) : (
                 employeeList.map((employee) => {
+                  const slots = activeTasksByEmployee[employee.id];
+                  const mainTask = slots?.main;
+                  const queueTask = slots?.queue;
+                  const activeTask = mainTask ?? queueTask;
                   const task = displayTasksByEmployee[employee.id];
-                  const activeTask = activeTasksByEmployee[employee.id];
+                  const taskStatus = activeTask?.status ?? task?.status ?? "idle";
+                  const presence = getAgentPresence(employee, activeTask);
                   const terminalText = terminalLogs[employee.id]?.content || "等待输出...";
                   const isCancellable =
                     activeTask &&
                     (activeTask.status === "running" ||
                       activeTask.status === "accepted" ||
                       activeTask.status === "dispatched");
-                  return (
-                    <article className="employee-card" key={employee.id}>
-                      <div className="employee-card__header">
-                        <div>
-                          <h2>{employee.name}</h2>
-                          <p>{employee.hostname}</p>
-                        </div>
-                        <div className={`status-pill ${employee.status}`}>
-                          {employee.status === "online" ? "在线" : "离线"}
-                        </div>
-                      </div>
-                      <div className="employee-meta">
-                        <span>ID: {employee.id}</span>
-                        <span>标签: {employee.labels.join(", ") || "未设置"}</span>
-                      </div>
-                      <div className={`task-strip ${task ? `task-${task.status}` : ""}`}>
-                        <strong>{task ? task.status : "idle"}</strong>
-                        <span>{task?.prompt ?? "当前无任务"}</span>
-                        {isCancellable ? (
-                          <button className="secondary-button" onClick={() => cancelTask(activeTask.id)}>
+
+                  function buildSlotStrip(label: string, slotTask: TaskRecord | undefined) {
+                    const isActive =
+                      slotTask &&
+                      (slotTask.status === "running" ||
+                        slotTask.status === "accepted" ||
+                        slotTask.status === "dispatched");
+                    return (
+                      <div className={`task-strip ${slotTask ? `task-${slotTask.status}` : ""}`}>
+                        <span>
+                          {slotTask
+                            ? `[${label}] ${slotTask.prompt}`
+                            : `[${label}] 空闲`}
+                        </span>
+                        {isActive ? (
+                          <button className="secondary-button" onClick={() => cancelTask(slotTask.id)}>
                             取消
                           </button>
                         ) : null}
                       </div>
+                    );
+                  }
+
+                  return (
+                    <article className="employee-card" key={employee.id}>
+                      <div className="employee-card__header">
+                        <div>
+                          <div className="employee-card__title">
+                            <h2>{employee.name}</h2>
+                            <span className={`task-state-badge task-${taskStatus}`}>{taskStatus}</span>
+                          </div>
+                        </div>
+                        <div className={`status-pill agent-presence ${presence.className}`}>
+                          {presence.label}
+                        </div>
+                      </div>
+                      <div className="employee-meta">
+                        <span>{employee.hostname}</span>
+                        <span>ID: {employee.id}</span>
+                        <span>标签: {employee.labels.join(", ") || "未设置"}</span>
+                      </div>
+                      {buildSlotStrip("主任务", mainTask)}
+                      {buildSlotStrip("队列", queueTask)}
                       <pre
                         className="log-window"
                         ref={(element) => {
@@ -590,7 +650,7 @@ export default function App() {
                   taskList.map((task) => (
                     <div className={`task-row task-${task.status}`} key={task.id}>
                       <div className="task-row__main">
-                        <strong>{employees[task.employeeId]?.name ?? task.employeeId}</strong>
+                        <strong>{task.employeeId ? employees[task.employeeId]?.name ?? task.employeeId : "任务队列"}</strong>
                         <p>{task.prompt}</p>
                         {task.error ? <span className="error-text">{task.error}</span> : null}
                       </div>
@@ -637,13 +697,19 @@ export default function App() {
           <div className="chat-composer">
             <div className="target-picker">
               <button
+                className={`target-chip ${selectedTarget === "queue" ? "active" : ""}`}
+                onClick={selectQueueTarget}
+              >
+                任务队列
+              </button>
+              <button
                 className={`target-chip ${selectedTarget === "all" ? "active" : ""}`}
                 onClick={selectAllTargets}
               >
-                全部员工
+                @所有员工
               </button>
               {employeeList.map((employee) => {
-                const selected = selectedTarget !== "all" && selectedTarget.includes(employee.id);
+                const selected = selectedTarget !== "all" && selectedTarget !== "queue" && selectedTarget.includes(employee.id);
                 return (
                   <button
                     className={`target-chip ${selected ? "active" : ""}`}
@@ -668,7 +734,7 @@ export default function App() {
               <textarea
                 value={draft.prompt}
                 onChange={(event) => setDraft((current) => ({ ...current, prompt: event.target.value }))}
-                placeholder="按 Enter 发送；Option/Alt + Enter 换行。默认全员：分析登录重定向问题。或输入 @Alice 只发给 Alice。"
+                placeholder="按 Enter 发送；Option/Alt + Enter 换行。默认进入任务队列，由一个空闲 Agent 执行；输入 @Alice 或选择 Agent 可指定会话。"
                 rows={5}
                 onKeyDown={(event) => {
                   if (event.key !== "Enter" || event.altKey || event.nativeEvent.isComposing) {

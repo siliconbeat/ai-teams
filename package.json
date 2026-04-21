@@ -15,7 +15,7 @@
     "start:all": "concurrently -n server,alice,web -c blue,green,magenta \"pnpm start:server\" \"pnpm start:agent:alice\" \"pnpm start:web\"",
     "build": "pnpm --filter @ai-teams/shared build && pnpm -r --filter '!@ai-teams/shared' run build",
     "typecheck": "pnpm --filter @ai-teams/shared build && pnpm --filter @ai-teams/server build && pnpm --filter @ai-teams/agent build && pnpm --filter @ai-teams/web exec tsc -b",
-    "test": "vitest run"
+    "test": "pnpm --filter @ai-teams/shared build && vitest run"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
