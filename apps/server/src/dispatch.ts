@@ -13,7 +13,7 @@ import {
   type TaskStatus,
   type TaskTargetMode,
 } from "@ai-teams/shared";
-import type { ServerState } from "./db.js";
+import type { Database, ServerState } from "./db.js";
 import { persistEmployee, persistTask, persistTaskLog, persistTaskWebhook, persistSharedQueueCursor } from "./db.js";
 import type { WebhookEventType } from "./schemas.js";
 
@@ -40,7 +40,7 @@ export type DispatchContext = {
   defaultTimeoutSec: number;
   maxLogChunksPerTask: number;
   disconnectGraceMs: number;
-  db: import("node:sqlite").DatabaseSync;
+  db: Database;
   log: FastifyInstance["log"];
 };
 
@@ -55,13 +55,13 @@ export function createDispatch(ctx: DispatchContext) {
 
   function upsertEmployee(employee: EmployeeSnapshot) {
     state.employees.set(employee.id, employee);
-    persistEmployee(db, employee);
+    void persistEmployee(db, employee);
     broadcastToLeaders({ type: "employee.upsert", employee });
   }
 
   function upsertTask(task: TaskRecord) {
     state.tasks.set(task.id, task);
-    persistTask(db, task);
+    void persistTask(db, task);
     broadcastToLeaders({ type: "task.upsert", task });
   }
 
@@ -194,7 +194,7 @@ export function createDispatch(ctx: DispatchContext) {
       history.splice(0, history.length - ctx.maxLogChunksPerTask);
     }
     state.taskLogs.set(chunk.taskId, history);
-    persistTaskLog(db, chunk, ctx.maxLogChunksPerTask);
+    void persistTaskLog(db, chunk, ctx.maxLogChunksPerTask);
     broadcastToLeaders({ type: "task.output", chunk });
     postTaskWebhook(task, "task.output", { chunk });
   }
@@ -260,7 +260,7 @@ export function createDispatch(ctx: DispatchContext) {
 
     const employee = available[state.sharedQueueCursor % available.length];
     state.sharedQueueCursor = (state.sharedQueueCursor + 1) % Math.max(available.length, 1);
-    persistSharedQueueCursor(db, state.sharedQueueCursor);
+    void persistSharedQueueCursor(db, state.sharedQueueCursor);
     return employee.id;
   }
 
@@ -349,6 +349,7 @@ export function createDispatch(ctx: DispatchContext) {
       prompt: task.prompt,
       workspace: task.workspace,
       timeoutSec: task.timeoutSec,
+      cliConfig: task.cliConfig,
     });
   }
 
@@ -406,6 +407,7 @@ export function createDispatch(ctx: DispatchContext) {
     leaderCommandId: string | undefined,
     targetMode: TaskTargetMode,
     webhookUrl?: string | null,
+    cliConfig?: unknown,
   ) {
     const task: TaskRecord = {
       id: randomUUID(),
@@ -416,6 +418,7 @@ export function createDispatch(ctx: DispatchContext) {
       prompt,
       workspace: workspace?.trim() || null,
       timeoutSec: timeoutSec ?? ctx.defaultTimeoutSec,
+      cliConfig: (cliConfig && typeof cliConfig === "object" && !Array.isArray(cliConfig) ? cliConfig : null) as TaskRecord["cliConfig"],
       status: "queued",
       createdAt: nowIso(),
       startedAt: null,
@@ -423,11 +426,19 @@ export function createDispatch(ctx: DispatchContext) {
       exitCode: null,
       summary: null,
       error: null,
+      durationMs: null,
+      durationApiMs: null,
+      numTurns: null,
+      totalCostUsd: null,
+      usageInputTokens: null,
+      usageOutputTokens: null,
+      usageCacheReadTokens: null,
+      usageCacheCreationTokens: null,
     };
 
     if (webhookUrl) {
       state.taskWebhooks.set(task.id, webhookUrl);
-      persistTaskWebhook(db, task.id, webhookUrl);
+      void persistTaskWebhook(db, task.id, webhookUrl);
     }
     upsertTask(task);
     if (targetMode === "queue") {
@@ -452,13 +463,14 @@ export function createDispatch(ctx: DispatchContext) {
   function dispatchLeaderCommand(
     message: Extract<LeaderToServerMessage, { type: "command.dispatch" }>,
     webhookUrl?: string | null,
+    cliConfig?: unknown,
   ) {
     const leaderCommandId = randomUUID();
     if (message.atAgents === "queue") {
       return {
         ok: true as const,
         leaderCommandId,
-        tasks: [createTask(null, message.prompt, message.workspace, message.timeoutSec, leaderCommandId, "queue", webhookUrl)],
+        tasks: [createTask(null, message.prompt, message.workspace, message.timeoutSec, leaderCommandId, "queue", webhookUrl, cliConfig)],
       };
     }
 
@@ -476,7 +488,7 @@ export function createDispatch(ctx: DispatchContext) {
       ok: true as const,
       leaderCommandId,
       tasks: targetIds.map((employeeId) =>
-        createTask(employeeId, message.prompt, message.workspace, message.timeoutSec, leaderCommandId, targetMode, webhookUrl),
+        createTask(employeeId, message.prompt, message.workspace, message.timeoutSec, leaderCommandId, targetMode, webhookUrl, cliConfig),
       ),
     };
   }
@@ -637,6 +649,14 @@ export function createDispatch(ctx: DispatchContext) {
         task.exitCode = message.exitCode;
         task.summary = message.summary ?? "任务执行完成。";
         task.error = null;
+        task.durationMs = message.durationMs ?? task.durationMs;
+        task.durationApiMs = message.durationApiMs ?? task.durationApiMs;
+        task.numTurns = message.numTurns ?? task.numTurns;
+        task.totalCostUsd = message.totalCostUsd ?? task.totalCostUsd;
+        task.usageInputTokens = message.usageInputTokens ?? task.usageInputTokens;
+        task.usageOutputTokens = message.usageOutputTokens ?? task.usageOutputTokens;
+        task.usageCacheReadTokens = message.usageCacheReadTokens ?? task.usageCacheReadTokens;
+        task.usageCacheCreationTokens = message.usageCacheCreationTokens ?? task.usageCacheCreationTokens;
         upsertTask(task);
         postTaskWebhook(task, "task.completed");
         if (task.employeeId) {

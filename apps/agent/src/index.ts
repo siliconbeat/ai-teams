@@ -12,6 +12,7 @@ import {
   type EmployeeToServerMessage,
   type ServerToEmployeeMessage,
   type TaskTargetMode,
+  type TaskCliConfig,
 } from "@ai-teams/shared";
 import { CLAUDE_HOOK_SCRIPT_CONTENT } from "./claude-hook-script.js";
 
@@ -57,6 +58,17 @@ type ActiveTask = {
   retriedWithFreshSession: boolean;
   targetMode: TaskTargetMode;
   claudeSessionId: string;
+  cliConfig: TaskCliConfig | null;
+  resultMetrics: {
+    durationMs?: number;
+    durationApiMs?: number;
+    numTurns?: number;
+    totalCostUsd?: number;
+    usageInputTokens?: number;
+    usageOutputTokens?: number;
+    usageCacheReadTokens?: number;
+    usageCacheCreationTokens?: number;
+  };
 };
 
 let socket: WebSocket | null = null;
@@ -407,6 +419,7 @@ function handleClaudeJsonLine(taskId: string, line: string) {
     }
     task?.summary.push(parsed.result);
     emitOutput(taskId, "stdout", formatClaudeDoneNode(parsed));
+    extractMetrics(taskId, parsed);
   }
 }
 
@@ -429,9 +442,27 @@ function formatClaudeDoneNode(node: Record<string, unknown>) {
   return `${lines.join("\n")}\n`;
 }
 
+function extractMetrics(taskId: string, node: Record<string, unknown>) {
+  const task = findActiveTask(taskId);
+  if (!task) return;
+  if (typeof node.duration_ms === "number") task.resultMetrics.durationMs = node.duration_ms;
+  if (typeof node.duration_api_ms === "number") task.resultMetrics.durationApiMs = node.duration_api_ms;
+  if (typeof node.num_turns === "number") task.resultMetrics.numTurns = node.num_turns;
+  if (typeof node.total_cost_usd === "number") task.resultMetrics.totalCostUsd = node.total_cost_usd;
+  const usage = node.usage;
+  if (usage && typeof usage === "object") {
+    const u = usage as Record<string, unknown>;
+    if (typeof u.input_tokens === "number") task.resultMetrics.usageInputTokens = u.input_tokens;
+    if (typeof u.output_tokens === "number") task.resultMetrics.usageOutputTokens = u.output_tokens;
+    if (typeof u.cache_read_input_tokens === "number") task.resultMetrics.usageCacheReadTokens = u.cache_read_input_tokens;
+    if (typeof u.cache_creation_input_tokens === "number") task.resultMetrics.usageCacheCreationTokens = u.cache_creation_input_tokens;
+  }
+}
+
 function buildClaudeArgs(prompt: string, task: ActiveTask) {
   ensureWorkspaceClaudeMd();
   ensureClaudeHookFiles();
+  const cfg = task.cliConfig;
   const args = [
     "-p",
     "--output-format",
@@ -439,8 +470,34 @@ function buildClaudeArgs(prompt: string, task: ActiveTask) {
     "--include-partial-messages",
     "--verbose",
     "--permission-mode",
-    CLAUDE_PERMISSION_MODE,
+    cfg?.permissionMode ?? CLAUDE_PERMISSION_MODE,
   ];
+
+  if (cfg?.model) {
+    args.push("--model", cfg.model);
+  }
+  if (cfg?.maxTurns) {
+    args.push("--max-turns", String(cfg.maxTurns));
+  }
+  if (cfg?.systemPrompt) {
+    args.push("--system-prompt", cfg.systemPrompt);
+  }
+  if (cfg?.appendSystemPrompt) {
+    args.push("--append-system-prompt", cfg.appendSystemPrompt);
+  }
+  if (cfg?.allowedTools && cfg.allowedTools.length > 0) {
+    for (const tool of cfg.allowedTools) {
+      args.push("--allowedTools", tool);
+    }
+  }
+  if (cfg?.disallowedTools && cfg.disallowedTools.length > 0) {
+    for (const tool of cfg.disallowedTools) {
+      args.push("--disallowedTools", tool);
+    }
+  }
+  if (cfg?.extraArgs) {
+    args.push(...cfg.extraArgs);
+  }
 
   if (CLAUDE_HOOKS_ENABLED) {
     args.push("--settings", CLAUDE_HOOK_SETTINGS);
@@ -494,6 +551,7 @@ function finishTask(taskId: string, status: "completed" | "failed" | "cancelled"
       taskId,
       exitCode: typeof payload === "number" ? payload : 0,
       summary: current.summary.join("").trim().slice(0, 8000) || "Claude 已完成任务。",
+      ...current.resultMetrics,
     });
     if (current.targetMode === "queue") {
       requestTask();
@@ -647,6 +705,8 @@ function startTask(message: Extract<ServerToEmployeeMessage, { type: "task.dispa
     retriedWithFreshSession: false,
     targetMode: message.targetMode,
     claudeSessionId: message.targetMode === "queue" ? randomUUID() : agentState.claudeSessionId,
+    cliConfig: message.cliConfig ?? null,
+    resultMetrics: {},
   };
   slot.set(task);
 

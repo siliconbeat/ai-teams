@@ -1,4 +1,3 @@
-import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyInstance } from "fastify";
@@ -14,8 +13,8 @@ import {
   type ServerToLeaderMessage,
   type StateSnapshot,
 } from "@ai-teams/shared";
-import { type ServerState, initDb, hydrateState } from "./db.js";
-import { type RestTaskRequest, errorResponseSchema, snapshotSchema, sessionHistorySchema, restTaskRequestSchema, restTaskAcceptedSchema, parseRestTaskRequest } from "./schemas.js";
+import { type ServerState, createDatabaseFromEnv, initDb, hydrateState, type Database, queryTasks, getTaskById, deleteTask, updateTaskFields, dbRowToTask } from "./db.js";
+import { type RestTaskRequest, errorResponseSchema, snapshotSchema, sessionHistorySchema, restTaskRequestSchema, restTaskAcceptedSchema, taskListResponseSchema, taskRecordSchema, taskPatchSchema, parseRestTaskRequest } from "./schemas.js";
 import { createDispatch, nowIso, sendJson } from "./dispatch.js";
 import type { DispatchContext } from "./dispatch.js";
 
@@ -73,11 +72,14 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     sharedQueueCursor: 0,
   };
 
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  const { DatabaseSync } = await import("node:sqlite");
-  const db = new DatabaseSync(dbPath);
-  initDb(db);
-  hydrateState(db, state, defaultTimeoutSec, maxLogChunksPerTask);
+  const db = await createDatabaseFromEnv({
+    AI_TEAMS_AUTH_TOKEN: options.authToken,
+    DATA_DIR: options.dataDir,
+    DB_PATH: options.dbPath,
+    DATABASE_URL: process.env.DATABASE_URL,
+  });
+  await initDb(db);
+  await hydrateState(db, state, defaultTimeoutSec, maxLogChunksPerTask);
 
   const app = Fastify({ logger: options.logger ?? true });
   await app.register(websocket);
@@ -280,8 +282,8 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     },
     async (request, reply) => {
       try {
-        const { command, webhookUrl } = parseRestTaskRequest(request.body);
-        const result = dispatchLeaderCommand(command, webhookUrl);
+        const { command, webhookUrl, cliConfig } = parseRestTaskRequest(request.body);
+        const result = dispatchLeaderCommand(command, webhookUrl, cliConfig);
         if (!result.ok) {
           return reply.code(400).send({
             status: "rejected",
@@ -301,6 +303,132 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
           message: error instanceof Error ? error.message : "Invalid task request.",
         });
       }
+    },
+  );
+
+  app.get<{ Querystring: { status?: string; employeeId?: string; limit?: number; offset?: number } }>(
+    "/api/tasks",
+    {
+      schema: {
+        tags: ["tasks"],
+        summary: "List tasks with optional filters",
+        querystring: {
+          type: "object",
+          properties: {
+            status: { type: "string", enum: ["queued", "dispatched", "accepted", "running", "completed", "failed", "cancelled", "timeout"] },
+            employeeId: { type: "string" },
+            limit: { type: "number", minimum: 1, maximum: 100 },
+            offset: { type: "number", minimum: 0 },
+          },
+        },
+        response: {
+          200: taskListResponseSchema,
+          401: errorResponseSchema,
+        },
+      },
+    },
+    async (request) => {
+      const rows = await queryTasks(db, {
+        status: request.query.status,
+        employeeId: request.query.employeeId,
+        limit: request.query.limit,
+        offset: request.query.offset,
+      });
+      return { tasks: rows.map((row) => dbRowToTask(row, defaultTimeoutSec)) };
+    },
+  );
+
+  app.get<{ Params: { taskId: string } }>(
+    "/api/tasks/:taskId",
+    {
+      schema: {
+        tags: ["tasks"],
+        summary: "Get a single task by ID",
+        params: {
+          type: "object",
+          required: ["taskId"],
+          properties: { taskId: { type: "string", minLength: 1 } },
+        },
+        response: {
+          200: taskRecordSchema,
+          404: errorResponseSchema,
+          401: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const row = await getTaskById(db, request.params.taskId);
+      if (!row) {
+        return reply.code(404).send({ error: "Task not found." });
+      }
+      return dbRowToTask(row, defaultTimeoutSec);
+    },
+  );
+
+  app.patch<{ Params: { taskId: string }; Body: Record<string, unknown> }>(
+    "/api/tasks/:taskId",
+    {
+      schema: {
+        tags: ["tasks"],
+        summary: "Update a task",
+        params: {
+          type: "object",
+          required: ["taskId"],
+          properties: { taskId: { type: "string", minLength: 1 } },
+        },
+        body: taskPatchSchema,
+        response: {
+          200: taskRecordSchema,
+          404: errorResponseSchema,
+          401: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const allowed = new Set(["status", "timeoutSec", "cliConfig"]);
+      const fields: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(request.body)) {
+        if (allowed.has(key)) {
+          fields[key] = value;
+        }
+      }
+      const row = await updateTaskFields(db, request.params.taskId, fields);
+      if (!row) {
+        return reply.code(404).send({ error: "Task not found." });
+      }
+      return dbRowToTask(row, defaultTimeoutSec);
+    },
+  );
+
+  app.delete<{ Params: { taskId: string } }>(
+    "/api/tasks/:taskId",
+    {
+      schema: {
+        tags: ["tasks"],
+        summary: "Delete a task (only terminal status)",
+        params: {
+          type: "object",
+          required: ["taskId"],
+          properties: { taskId: { type: "string", minLength: 1 } },
+        },
+        response: {
+          200: { type: "object", required: ["deleted"], properties: { deleted: { type: "boolean" } } },
+          404: errorResponseSchema,
+          409: errorResponseSchema,
+          401: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const deleted = await deleteTask(db, request.params.taskId);
+      if (!deleted) {
+        const row = await getTaskById(db, request.params.taskId);
+        if (!row) {
+          return reply.code(404).send({ error: "Task not found." });
+        }
+        return reply.code(409).send({ error: "Task is not in a terminal status." });
+      }
+      return { deleted: true };
     },
   );
 

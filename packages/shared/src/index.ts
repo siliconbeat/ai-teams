@@ -13,6 +13,17 @@ export type TaskStatus =
 export type AgentTarget = "queue" | "all" | string[];
 export type TaskTargetMode = "queue" | "direct" | "broadcast";
 
+export interface TaskCliConfig {
+  model?: string;
+  permissionMode?: string;
+  maxTurns?: number;
+  systemPrompt?: string;
+  appendSystemPrompt?: string;
+  allowedTools?: string[];
+  disallowedTools?: string[];
+  extraArgs?: string[];
+}
+
 export interface EmployeeSnapshot {
   id: string;
   name: string;
@@ -36,6 +47,7 @@ export interface TaskRecord {
   prompt: string;
   workspace: string | null;
   timeoutSec: number;
+  cliConfig: TaskCliConfig | null;
   status: TaskStatus;
   createdAt: string;
   startedAt: string | null;
@@ -43,6 +55,14 @@ export interface TaskRecord {
   exitCode: number | null;
   summary: string | null;
   error: string | null;
+  durationMs: number | null;
+  durationApiMs: number | null;
+  numTurns: number | null;
+  totalCostUsd: number | null;
+  usageInputTokens: number | null;
+  usageOutputTokens: number | null;
+  usageCacheReadTokens: number | null;
+  usageCacheCreationTokens: number | null;
 }
 
 export interface TaskOutputChunk {
@@ -70,6 +90,7 @@ export type ServerToEmployeeMessage =
       prompt: string;
       workspace: string | null;
       timeoutSec: number;
+      cliConfig: TaskCliConfig | null;
     }
   | { type: "task.cancel"; taskId: string };
 
@@ -90,7 +111,20 @@ export type EmployeeToServerMessage =
   | { type: "task.accepted"; taskId: string }
   | { type: "task.started"; taskId: string; pid: number; sessionId?: string | null }
   | { type: "task.output"; taskId: string; stream: "stdout" | "stderr"; seq: number; content: string }
-  | { type: "task.completed"; taskId: string; exitCode: number; summary?: string }
+  | {
+      type: "task.completed";
+      taskId: string;
+      exitCode: number;
+      summary?: string;
+      durationMs?: number | null;
+      durationApiMs?: number | null;
+      numTurns?: number | null;
+      totalCostUsd?: number | null;
+      usageInputTokens?: number | null;
+      usageOutputTokens?: number | null;
+      usageCacheReadTokens?: number | null;
+      usageCacheCreationTokens?: number | null;
+    }
   | { type: "task.failed"; taskId: string; error: string }
   | { type: "task.cancelled"; taskId: string };
 
@@ -247,6 +281,14 @@ export function parseEmployeeToServerMessage(value: unknown): EmployeeToServerMe
       taskId: nonEmptyStringField(message, "taskId"),
       exitCode: nonNegativeNumberField(message, "exitCode"),
       summary: optionalStringField(message, "summary"),
+      durationMs: optionalNonNegativeNumberField(message, "durationMs"),
+      durationApiMs: optionalNonNegativeNumberField(message, "durationApiMs"),
+      numTurns: optionalNonNegativeNumberField(message, "numTurns"),
+      totalCostUsd: optionalNonNegativeNumberField(message, "totalCostUsd"),
+      usageInputTokens: optionalNonNegativeNumberField(message, "usageInputTokens"),
+      usageOutputTokens: optionalNonNegativeNumberField(message, "usageOutputTokens"),
+      usageCacheReadTokens: optionalNonNegativeNumberField(message, "usageCacheReadTokens"),
+      usageCacheCreationTokens: optionalNonNegativeNumberField(message, "usageCacheCreationTokens"),
     };
   }
 
@@ -271,6 +313,7 @@ export function parseServerToEmployeeMessage(value: unknown): ServerToEmployeeMe
       prompt: nonEmptyStringField(message, "prompt"),
       workspace: nullableStringField(message, "workspace"),
       timeoutSec: positiveNumberField(message, "timeoutSec"),
+      cliConfig: optionalCliConfigField(message, "cliConfig"),
     };
   }
 
@@ -481,4 +524,15 @@ function positiveIntegerField(record: Record<string, unknown>, key: string): num
     throw new ProtocolError(`${key} must be an integer.`);
   }
   return value;
+}
+
+function optionalCliConfigField(record: Record<string, unknown>, key: string): TaskCliConfig | null {
+  const value = record[key];
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new ProtocolError(`${key} must be an object or null.`);
+  }
+  return value as TaskCliConfig;
 }
