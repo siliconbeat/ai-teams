@@ -1,15 +1,18 @@
 {
-  "name": "@ai-teams/server",
+  "name": "@csdwd/ai-teams-server",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
+  "bin": {
+    "ai-teams-server": "./dist/index.js"
+  },
+  "files": ["dist"],
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
-    "start": "node dist/index.js"
+    "build": "node ../../scripts/build-bundle.js server",
+    "start": "node dist/index.js",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@ai-teams/shared": "workspace:*",
     "@fastify/swagger": "^9.7.0",
     "@fastify/swagger-ui": "^5.2.5",
     "@fastify/websocket": "^11.0.0",
@@ -18,10 +21,14 @@
     "ws": "^8.18.3"
   },
   "devDependencies": {
+    "@ai-teams/shared": "workspace:*",
     "@types/node": "^24.5.2",
     "@types/pg": "^8.20.0",
     "@types/ws": "^8.5.12",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

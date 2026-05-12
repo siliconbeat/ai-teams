@@ -110,6 +110,7 @@ export default function App() {
   const [tokenDraft, setTokenDraft] = useState(authToken);
   const [connected, setConnected] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [showReconnect, setShowReconnect] = useState(false);
   const [employees, setEmployees] = useState<Record<string, EmployeeSnapshot>>({});
   const [tasks, setTasks] = useState<Record<string, TaskRecord>>({});
   const [logs, setLogs] = useState<Record<string, TaskOutputChunk[]>>({});
@@ -122,38 +123,93 @@ export default function App() {
     prompt: "",
     workspace: "",
   });
+  const [mobileTerminalEmployeeId, setMobileTerminalEmployeeId] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const logWindowRefs = useRef<Record<string, HTMLPreElement | null>>({});
   const chatListRef = useRef<HTMLDivElement | null>(null);
+  const mobileChatRef = useRef<HTMLDivElement | null>(null);
+  const mobileTerminalRef = useRef<HTMLPreElement | null>(null);
+  const mobileTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     if (!authToken) {
       return;
     }
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const url = new URL(`${protocol}//${window.location.host}/ws/leader`);
-    url.searchParams.set("token", authToken);
-    const ws = new WebSocket(url);
-    wsRef.current = ws;
 
-    ws.onopen = () => {
-      setConnected(true);
-      setConnectionError(null);
-    };
-    ws.onclose = () => {
-      setConnected(false);
-      setConnectionError("连接已断开，请确认服务端 token 和网络状态。");
-    };
-    ws.onmessage = (event) => {
-      try {
-        const message = parseServerToLeaderMessage(parseJsonMessage(event.data));
-        handleLeaderEvent(message);
-      } catch (error) {
-        setConnectionError(error instanceof Error ? error.message : "服务端消息格式错误。");
+    let disposed = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let showReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    function connectLeader() {
+      if (disposed) return;
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const url = new URL(`${protocol}//${window.location.host}/ws/leader`);
+      url.searchParams.set("token", authToken);
+      const ws = new WebSocket(url);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        if (disposed) { ws.close(); return; }
+        setConnected(true);
+        setConnectionError(null);
+        setShowReconnect(false);
+        if (showReconnectTimer) { clearTimeout(showReconnectTimer); showReconnectTimer = null; }
+      };
+
+      ws.onclose = () => {
+        if (disposed) return;
+        wsRef.current = null;
+        setConnected(false);
+        // Show reconnect button after 10s if still not connected
+        if (showReconnectTimer) clearTimeout(showReconnectTimer);
+        showReconnectTimer = setTimeout(() => setShowReconnect(true), 10000);
+        reconnectTimer = setTimeout(connectLeader, 3000);
+      };
+
+      ws.onerror = () => {
+        if (disposed) return;
+        setShowReconnect(true);
+      };
+
+      ws.onmessage = (event) => {
+        if (disposed) return;
+        try {
+          const message = parseServerToLeaderMessage(parseJsonMessage(event.data));
+          handleLeaderEvent(message);
+        } catch (error) {
+          setConnectionError(error instanceof Error ? error.message : "服务端消息格式错误。");
+        }
+      };
+    }
+
+    connectLeader();
+
+    // Reconnect when page becomes visible after background suspension
+    function onVisibilityChange() {
+      if (document.visibilityState !== "visible") return;
+      const ws = wsRef.current;
+      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        wsRef.current = null;
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        connectLeader();
+      } else if (ws.readyState === WebSocket.OPEN) {
+        // Ping to verify the connection is truly alive
+        ws.send("");
+      }
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      disposed = true;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (showReconnectTimer) clearTimeout(showReconnectTimer);
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+        wsRef.current = null;
       }
     };
-
-    return () => ws.close();
   }, [authToken]);
 
   function handleLeaderEvent(message: ServerToLeaderMessage) {
@@ -235,21 +291,46 @@ export default function App() {
   }, [taskFilter, tasks]);
 
   const chatFeed = useMemo<ChatFeedItem[]>(() => {
-    const leaderItems: ChatFeedItem[] = history.map((item) => ({
-      id: `leader-${item.id}`,
-      side: "leader",
-      author: "Leader",
-      target: formatTarget(item.target, employees),
-      content: item.prompt,
-      createdAt: item.createdAt,
-      createdAtMs: item.createdAtMs,
-    }));
+    // Group tasks by leaderCommandId to deduplicate broadcast commands
+    const commandGroups = new Map<string, TaskRecord[]>();
+    for (const task of Object.values(tasks)) {
+      const key = task.leaderCommandId;
+      const group = commandGroups.get(key);
+      if (group) group.push(task);
+      else commandGroups.set(key, [task]);
+    }
+
+    const leaderItems: ChatFeedItem[] = [];
+    for (const groupTasks of commandGroups.values()) {
+      const first = groupTasks[0];
+      const targetMode = first.targetMode;
+      let target: string | undefined;
+      if (targetMode === "queue") {
+        target = "任务队列";
+      } else if (targetMode === "broadcast") {
+        target = "@全部员工";
+      } else {
+        target = groupTasks
+          .map((t) => (t.employeeId ? `@${employees[t.employeeId]?.name ?? t.employeeId}` : ""))
+          .filter(Boolean)
+          .join(" ");
+      }
+      leaderItems.push({
+        id: `leader-${first.leaderCommandId}`,
+        side: "leader",
+        author: "Leader",
+        target: target || undefined,
+        content: first.prompt,
+        createdAt: new Date(first.createdAt).toLocaleTimeString(),
+        createdAtMs: new Date(first.createdAt).getTime(),
+      });
+    }
 
     const employeeItems: ChatFeedItem[] = Object.values(tasks)
-      .filter((task) => task.finishedAt && ["completed", "failed", "cancelled", "timeout"].includes(task.status))
+      .filter((task) => task.finishedAt && isTerminalStatus(task.status))
       .map((task) => ({
         id: `employee-${task.id}`,
-        side: "employee",
+        side: "employee" as const,
         author: task.employeeId ? employees[task.employeeId]?.name ?? task.employeeId : "任务队列",
         content: task.summary || task.error || statusToMessage(task.status),
         createdAt: new Date(task.finishedAt ?? task.createdAt).toLocaleTimeString(),
@@ -258,7 +339,7 @@ export default function App() {
       }));
 
     return [...leaderItems, ...employeeItems].sort((a, b) => a.createdAtMs - b.createdAtMs);
-  }, [employees, history, tasks]);
+  }, [employees, tasks]);
 
   function formatTarget(target: AgentTarget, employeeMap: Record<string, EmployeeSnapshot>) {
     if (target === "queue") {
@@ -383,6 +464,7 @@ export default function App() {
       },
     ]);
     setDraft((current) => ({ ...current, prompt: "" }));
+    if (mobileTextareaRef.current) mobileTextareaRef.current.style.height = "auto";
   }
 
   function cancelTask(taskId: string) {
@@ -467,11 +549,27 @@ export default function App() {
     });
   }, [logs, tasks]);
 
+  function scrollToBottom(ref: React.RefObject<HTMLDivElement | null>) {
+    requestAnimationFrame(() => {
+      const el = ref.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+  }
+
   useEffect(() => {
-    if (chatListRef.current) {
-      chatListRef.current.scrollTop = chatListRef.current.scrollHeight;
-    }
+    scrollToBottom(chatListRef);
+    scrollToBottom(mobileChatRef);
   }, [chatFeed]);
+
+  useEffect(() => {
+    if (mobileTerminalEmployeeId && mobileTerminalRef.current) {
+      requestAnimationFrame(() => {
+        if (mobileTerminalRef.current) {
+          mobileTerminalRef.current.scrollTop = mobileTerminalRef.current.scrollHeight;
+        }
+      });
+    }
+  }, [mobileTerminalEmployeeId, terminalLogs]);
 
   if (!authToken) {
     return (
@@ -506,8 +604,26 @@ export default function App() {
     );
   }
 
+  // Mobile agent status pills
+  const mobileAgentStatus = employeeList.map((employee) => {
+    const slots = activeTasksByEmployee[employee.id];
+    const activeTask = slots?.main ?? slots?.queue;
+    const isOnline = employee.status !== "offline";
+    const isBusy = activeTask && ["running", "accepted", "dispatched"].includes(activeTask.status);
+    const presenceClass = !isOnline ? "offline" : isBusy ? "busy" : "online";
+    const taskLabel = activeTask && isBusy
+      ? activeTask.prompt.length > 20 ? activeTask.prompt.slice(0, 20) + "..." : activeTask.prompt
+      : "";
+    return { employee, presenceClass, taskLabel };
+  });
+
   return (
     <div className="app-shell">
+      {showReconnect && !connected && (
+        <div className="reconnect-overlay" onClick={() => window.location.reload()}>
+          刷新
+        </div>
+      )}
       <header className="topbar">
         <div className="brand">
           <span className="brand-badge">AI</span>
@@ -533,7 +649,124 @@ export default function App() {
           <button className="nav-item">异常记录</button>
           <button className="nav-item">统计分析</button>
         </nav>
+        <button className="secondary-button mobile-logout" onClick={clearToken}>
+          ⏻
+        </button>
       </header>
+
+      {/* Mobile: agent status bar */}
+      <div className="mobile-status-bar">
+        {mobileAgentStatus.length === 0 ? (
+          <div className="mobile-agent-pill offline">
+            <span className="dot" />
+            <span className="agent-name">暂无员工</span>
+          </div>
+        ) : (
+          mobileAgentStatus.map(({ employee, presenceClass, taskLabel }) => (
+            <div
+              className={`mobile-agent-pill ${presenceClass} ${mobileTerminalEmployeeId === employee.id ? "selected" : ""}`}
+              key={employee.id}
+              onClick={() => setMobileTerminalEmployeeId(mobileTerminalEmployeeId === employee.id ? null : employee.id)}
+            >
+              <span className="dot" />
+              <span className="agent-name">{employee.name}</span>
+              {taskLabel ? <span className="agent-task">{taskLabel}</span> : null}
+            </div>
+          ))
+        )}
+      </div>
+
+      {/* Mobile: terminal overlay */}
+      {mobileTerminalEmployeeId && (() => {
+        const emp = employees[mobileTerminalEmployeeId];
+        const text = terminalLogs[mobileTerminalEmployeeId]?.content || "等待输出...";
+        return (
+          <div className="mobile-terminal-overlay" onClick={() => setMobileTerminalEmployeeId(null)}>
+            <div className="mobile-terminal-card" onClick={(e) => e.stopPropagation()}>
+              <div className="mobile-terminal-header">
+                <span>{emp?.name ?? mobileTerminalEmployeeId}</span>
+                <button onClick={() => setMobileTerminalEmployeeId(null)}>✕</button>
+              </div>
+              <pre className="mobile-terminal-content" ref={mobileTerminalRef}>{text}</pre>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Mobile: chat feed */}
+      <div className="mobile-chat-feed" ref={mobileChatRef}>
+        {chatFeed.length === 0 ? (
+          <div className="mobile-chat-empty">还没有发送过指令。</div>
+        ) : (
+          chatFeed.map((item) => (
+            <div className={`chat-message ${item.side}-message ${item.status ? `task-${item.status}` : ""}`} key={item.id}>
+              <div className="chat-message__meta">
+                <strong>{item.author}</strong>
+                <span>{item.createdAt}</span>
+              </div>
+              <p>{item.content}</p>
+              {item.target ? <small>{item.target}</small> : null}
+            </div>
+          ))
+        )}
+      </div>
+
+      {/* Mobile: command input */}
+      <div className="mobile-input-bar">
+        <div className="mobile-target-row">
+          <button
+            className={`target-chip ${selectedTarget === "queue" ? "active" : ""}`}
+            onClick={selectQueueTarget}
+          >
+            队列
+          </button>
+          <button
+            className={`target-chip ${selectedTarget === "all" ? "active" : ""}`}
+            onClick={selectAllTargets}
+          >
+            全部
+          </button>
+          {employeeList.map((employee) => {
+            const selected = selectedTarget !== "all" && selectedTarget !== "queue" && selectedTarget.includes(employee.id);
+            return (
+              <button
+                className={`target-chip ${selected ? "active" : ""}`}
+                key={employee.id}
+                onClick={() => toggleTarget(employee.id)}
+              >
+                {employee.name}
+              </button>
+            );
+          })}
+        </div>
+        <div className="mobile-input-row">
+          <textarea
+            ref={mobileTextareaRef}
+            value={draft.prompt}
+            onChange={(event) => {
+              setDraft((current) => ({ ...current, prompt: event.target.value }));
+              event.target.style.height = "auto";
+              event.target.style.height = Math.min(event.target.scrollHeight, 120) + "px";
+            }}
+            placeholder="输入指令..."
+            rows={1}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" || event.altKey || event.nativeEvent.isComposing) {
+                return;
+              }
+              event.preventDefault();
+              sendCommand();
+            }}
+          />
+          <button
+            className="send-btn"
+            onClick={sendCommand}
+            disabled={!draft.prompt.trim()}
+          >
+            ▲
+          </button>
+        </div>
+      </div>
 
       <div className="workspace-panel">
         {activePage === "monitor" ? (

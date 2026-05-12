@@ -1,4 +1,6 @@
+import os from "node:os";
 import path from "node:path";
+import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyInstance } from "fastify";
 import swagger from "@fastify/swagger";
@@ -13,10 +15,11 @@ import {
   type ServerToLeaderMessage,
   type StateSnapshot,
 } from "@ai-teams/shared";
-import { type ServerState, createDatabaseFromEnv, initDb, hydrateState, type Database, queryTasks, getTaskById, deleteTask, updateTaskFields, dbRowToTask } from "./db.js";
-import { type RestTaskRequest, errorResponseSchema, snapshotSchema, sessionHistorySchema, restTaskRequestSchema, restTaskAcceptedSchema, taskListResponseSchema, taskRecordSchema, taskPatchSchema, parseRestTaskRequest } from "./schemas.js";
+import { createDatabaseFromEnv, initDb, hydrateState, type Database, queryTasks, getTaskById, deleteTask, updateTaskFields, dbRowToTask } from "./db.js";
+import { type RestTaskRequest, errorResponseSchema, snapshotSchema, sessionHistorySchema, restTaskRequestSchema, restTaskAcceptedSchema, taskListResponseSchema, taskRecordSchema, taskPatchSchema, parseRestTaskRequest, claudeSessionsResponseSchema } from "./schemas.js";
 import { createDispatch, nowIso, sendJson } from "./dispatch.js";
 import type { DispatchContext } from "./dispatch.js";
+import { createInMemoryStateStore } from "./state-store.js";
 
 const DEFAULT_PORT = 3789;
 
@@ -30,6 +33,8 @@ export type AiTeamsServerOptions = {
   disconnectGraceMs?: number;
   maxLogChunksPerTask?: number;
   logger?: boolean;
+  logLevel?: string;
+  logDir?: string;
 };
 
 export type AiTeamsServer = {
@@ -56,21 +61,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
   const dataDir = options.dataDir ?? path.join(process.cwd(), "data");
   const dbPath = options.dbPath ?? path.join(dataDir, "ai-teams.db");
   let closing = false;
-  const state: ServerState = {
-    agentSockets: new Map(),
-    leaderSockets: new Set(),
-    employees: new Map(),
-    tasks: new Map(),
-    taskLogs: new Map(),
-    taskWebhooks: new Map(),
-    socketToEmployeeId: new WeakMap(),
-    taskTimeouts: new Map(),
-    disconnectTimers: new Map(),
-    taskQueues: new Map(),
-    mainTaskQueues: new Map(),
-    sharedTaskQueue: [],
-    sharedQueueCursor: 0,
-  };
+  const state = createInMemoryStateStore();
 
   const db = await createDatabaseFromEnv({
     AI_TEAMS_AUTH_TOKEN: options.authToken,
@@ -81,7 +72,25 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
   await initDb(db);
   await hydrateState(db, state, defaultTimeoutSec, maxLogChunksPerTask);
 
-  const app = Fastify({ logger: options.logger ?? true });
+  const logLevel = options.logLevel || process.env.LOG_LEVEL || "info";
+  const logDir = options.logDir || process.env.LOG_DIR;
+
+  let loggerConfig: boolean | { level: string; transport?: unknown } = { level: logLevel };
+
+  if (logDir && options.logger !== false) {
+    fs.mkdirSync(logDir, { recursive: true });
+    loggerConfig = {
+      level: logLevel,
+      transport: {
+        targets: [
+          { target: "pino/file", options: { destination: 1 }, level: logLevel },
+          { target: "pino/file", options: { destination: path.join(logDir, "server.log") }, level: logLevel },
+        ],
+      },
+    };
+  }
+
+  const app = Fastify({ logger: options.logger === false ? false : loggerConfig });
   await app.register(websocket);
   await app.register(swagger, {
     openapi: {
@@ -119,7 +128,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     maxLogChunksPerTask,
     disconnectGraceMs,
   };
-  const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage } = createDispatch(dispatchCtx);
+  const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage, cancelTaskById } = createDispatch(dispatchCtx);
 
   function buildSnapshot(): StateSnapshot {
     return {
@@ -175,11 +184,82 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     return { sessionId, tasks, messages };
   }
 
+  function extractUserMessage(line: string): string | null {
+    try {
+      const obj = JSON.parse(line);
+      if (obj.type === "human" || obj.role === "user" || obj.message?.role === "user") {
+        const content = obj.message?.content ?? obj.content;
+        if (typeof content === "string") return content.slice(0, 200);
+        if (Array.isArray(content)) {
+          const text = content.filter((c: Record<string, unknown>) => typeof c.text === "string").map((c: { text: string }) => c.text).join("\n");
+          return text.slice(0, 200) || null;
+        }
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  function buildClaudeSessions(employeeId: string) {
+    const employee = state.employees.get(employeeId);
+    const workspace = [...state.tasks.values()]
+      .filter((t) => t.employeeId === employeeId && t.workspace)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]?.workspace ?? null;
+
+    if (!workspace) {
+      return { employeeId, workspace: null, activeSessionId: null, sessions: [] };
+    }
+
+    const encodedPath = workspace.replace(/\//g, "-");
+    const claudeProjectsDir = path.join(os.homedir(), ".claude", "projects", encodedPath);
+
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(claudeProjectsDir, { withFileTypes: true });
+    } catch {
+      return { employeeId, workspace, activeSessionId: null, sessions: [] };
+    }
+
+    const jsonlFiles = entries
+      .filter((e) => e.isFile() && e.name.endsWith(".jsonl"))
+      .sort((a, b) => b.name.localeCompare(a.name));
+
+    const sessions = jsonlFiles.map((entry) => {
+      const filePath = path.join(claudeProjectsDir, entry.name);
+      const stat = fs.statSync(filePath);
+      const sessionId = entry.name.replace(/\.jsonl$/, "");
+      const content = fs.readFileSync(filePath, "utf8");
+      const lines = content.split("\n").filter(Boolean);
+      const lineCount = lines.length;
+
+      let firstUserMessage: string | null = null;
+      let latestUserMessage: string | null = null;
+      for (const line of lines) {
+        const msg = extractUserMessage(line);
+        if (msg && !firstUserMessage) firstUserMessage = msg;
+        if (msg) latestUserMessage = msg;
+      }
+
+      return { id: sessionId, sizeBytes: stat.size, modifiedAt: stat.mtime.toISOString(), lineCount, firstUserMessage, latestUserMessage };
+    });
+
+    let activeSessionId: string | null = null;
+    const agentStatePath = path.join(workspace, ".ai-teams", "agents", employeeId, "session-state.json");
+    try {
+      const raw = fs.readFileSync(agentStatePath, "utf8");
+      activeSessionId = JSON.parse(raw).claudeSessionId ?? null;
+    } catch { /* ignore */ }
+
+    return { employeeId, workspace, activeSessionId, sessions };
+  }
+
   app.addHook("preHandler", async (request, reply) => {
     if (request.url.startsWith("/ws/") || request.url.startsWith("/docs")) {
       return;
     }
     if (!isAuthorized(options.authToken, request.url, request.headers)) {
+      app.log.warn({ url: request.url, ip: request.ip }, "Unauthorized request");
       await reply.code(401).send({ error: "unauthorized" });
     }
   });
@@ -254,6 +334,33 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
       },
     },
     async (request) => buildSessionHistory(request.params.sessionId),
+  );
+
+  app.get<{ Params: { employeeId: string } }>(
+    "/api/employees/:employeeId/claude-sessions",
+    {
+      schema: {
+        tags: ["employees"],
+        summary: "List local Claude Code sessions for an agent's workspace",
+        params: {
+          type: "object",
+          required: ["employeeId"],
+          properties: { employeeId: { type: "string", minLength: 1 } },
+        },
+        response: {
+          200: claudeSessionsResponseSchema,
+          404: errorResponseSchema,
+          401: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const employee = state.employees.get(request.params.employeeId);
+      if (!employee) {
+        return reply.code(404).send({ error: "Employee not found." });
+      }
+      return buildClaudeSessions(request.params.employeeId);
+    },
   );
 
   app.post<{ Body: RestTaskRequest }>(
@@ -400,6 +507,36 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     },
   );
 
+  app.post<{ Params: { taskId: string } }>(
+    "/api/tasks/:taskId/cancel",
+    {
+      schema: {
+        tags: ["tasks"],
+        summary: "Cancel a task",
+        description: "Cancel a queued or running task. For running tasks, notifies the agent to terminate the claude process.",
+        params: {
+          type: "object",
+          required: ["taskId"],
+          properties: { taskId: { type: "string", minLength: 1 } },
+        },
+        response: {
+          200: taskRecordSchema,
+          404: errorResponseSchema,
+          409: errorResponseSchema,
+          401: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const result = cancelTaskById(request.params.taskId);
+      if (!result.ok) {
+        const code = result.code === "not_found" ? 404 : 409;
+        return reply.code(code).send({ error: result.message });
+      }
+      return result.task;
+    },
+  );
+
   app.delete<{ Params: { taskId: string } }>(
     "/api/tasks/:taskId",
     {
@@ -458,6 +595,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
         return;
       }
       state.agentSockets.delete(employeeId);
+      state.socketToEmployeeId.delete(socket);
       const employee = state.employees.get(employeeId);
       if (employee) {
         employee.status = "offline";
@@ -465,25 +603,8 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
         for (const leaderSocket of state.leaderSockets) {
           sendJson(leaderSocket, { type: "employee.upsert", employee });
         }
-        if (employee.mainTaskId || employee.queueTaskId) {
-          const timer = setTimeout(() => {
-            const current = state.employees.get(employeeId);
-            if (current) {
-              const stillRunning = [current.mainTaskId, current.queueTaskId].filter(Boolean) as string[];
-              if (stillRunning.length > 0) {
-                const freshDispatch = createDispatch(dispatchCtx);
-                for (const taskId of stillRunning) {
-                  freshDispatch.handleAgentMessage(
-                    { type: "task.failed", taskId, error: "员工连接中断且未在宽限期内恢复。" },
-                    socket,
-                  );
-                }
-              }
-            }
-            state.disconnectTimers.delete(employeeId);
-          }, disconnectGraceMs);
-          state.disconnectTimers.set(employeeId, timer);
-        }
+        // Don't fail tasks on disconnect — agent may still be running locally.
+        // Tasks will only stop via timeout or agent reporting back on reconnect.
       }
       app.log.info({ employeeId }, "Agent disconnected");
     });
@@ -545,6 +666,8 @@ export function readOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): AiTeam
     defaultTimeoutSec: Number(env.DEFAULT_TIMEOUT_SEC) || 1800,
     disconnectGraceMs: Number(env.DISCONNECT_GRACE_MS) || 15000,
     maxLogChunksPerTask: Number(env.MAX_LOG_CHUNKS_PER_TASK) || 400,
+    logLevel: env.LOG_LEVEL,
+    logDir: env.LOG_DIR,
   };
 }
 
@@ -556,7 +679,49 @@ export async function startServer(options = readOptionsFromEnv()) {
 
 const isCli = process.argv[1] === fileURLToPath(import.meta.url);
 if (isCli) {
-  startServer().catch((error) => {
+  const args = process.argv.slice(2);
+  function getArgValue(name: string): string | undefined {
+    const idx = args.indexOf(name);
+    if (idx === -1) return undefined;
+    return args[idx + 1];
+  }
+  if (args.includes("--help") || args.includes("-h")) {
+    console.log(`ai-teams-server — AI Teams 中央服务器
+
+用法: ai-teams-server [选项]
+
+选项:
+  --token <token>       认证 Token (必填，或设 AI_TEAMS_AUTH_TOKEN)
+  --port <port>         服务端口 (默认 3789)
+  --host <host>         绑定地址 (默认 0.0.0.0)
+  --data-dir <dir>      数据目录
+  --db-path <path>      数据库路径
+  --log-level <level>   日志级别 trace/debug/info/warn/error (默认 info)
+  --log-dir <dir>       日志文件目录 (不设则仅输出到 stdout)
+  -h, --help            显示帮助
+`);
+    process.exit(0);
+  }
+  const cliToken = getArgValue("--token");
+  const cliPort = getArgValue("--port");
+  const cliHost = getArgValue("--host");
+  const cliDataDir = getArgValue("--data-dir");
+  const cliDbPath = getArgValue("--db-path");
+  const cliLogLevel = getArgValue("--log-level");
+  const cliLogDir = getArgValue("--log-dir");
+  if (cliToken) process.env.AI_TEAMS_AUTH_TOKEN = cliToken;
+  if (cliPort) process.env.AI_TEAMS_SERVER_PORT = cliPort;
+  if (cliHost) process.env.HOST = cliHost;
+  if (cliDataDir) process.env.DATA_DIR = cliDataDir;
+  if (cliDbPath) process.env.DB_PATH = cliDbPath;
+  if (cliLogLevel) process.env.LOG_LEVEL = cliLogLevel;
+  if (cliLogDir) process.env.LOG_DIR = cliLogDir;
+  const options = readOptionsFromEnv();
+  if (!options.authToken) {
+    console.error("错误: 需要认证 Token。使用 --token <token> 或设置 AI_TEAMS_AUTH_TOKEN 环境变量。");
+    process.exit(1);
+  }
+  startServer(options).catch((error) => {
     console.error(error);
     process.exit(1);
   });

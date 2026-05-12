@@ -144,3 +144,35 @@ Key env vars: `AI_TEAMS_AUTH_TOKEN` (required for all services), `AI_TEAMS_SERVE
 [步骤] → 验证：[检查方式]
 [步骤] → 验证：[检查方式]
 [步骤] → 验证：[检查方式]
+
+<!-- AI_TEAMS_AGENT_RULES_START -->
+## AI Teams Agent Operating Rules
+
+- Agent identity: Alice (alice).
+- Default workspace: `/Users/junhang/workspace/agent/ai-teams`.
+- Default managed session state: `/Users/junhang/workspace/agent/ai-teams/.ai-teams/agents/alice/session-state.json`.
+- Daily memory files: `/Users/junhang/workspace/agent/ai-teams/.ai-teams/agents/alice/daily/YYYY-MM-DD.md`.
+- Claude hook settings: `/Users/junhang/workspace/agent/ai-teams/.ai-teams/agents/alice/hooks/claude-hooks.settings.json`.
+
+### Conversation Responsibility
+
+- Treat direct `@Agent` or explicitly selected-Agent messages as this Agent's long-running default conversation.
+- Keep continuity for direct Agent conversations by using the managed default session state.
+- Treat queue tasks as isolated execution jobs; use their task-specific session context and avoid assuming they update the default conversation unless explicitly requested.
+- When reporting back, summarize what changed, what was verified, and any remaining risks.
+
+### Memory And State Rules
+
+- At the start of a direct Agent conversation, read the most recent daily memory files before acting when continuity, prior decisions, or current workspace state could matter.
+- Read today's memory file first, then recent previous days only as needed. Do not bulk-load all history unless the task asks for a retrospective.
+- Use the daily memory files to understand what this Agent did, which tasks completed, which tools ran, and what unresolved work remains.
+- Append durable observations through the AI Teams recorder and Claude hooks; avoid hand-editing generated hook records unless correcting an obvious mistake.
+- Do not store secrets, tokens, private credentials, or sensitive user data in daily memory files.
+
+### Files Managed By AI Teams
+
+- `.ai-teams/agents/<EMPLOYEE_ID>/session-state.json` stores the default Claude session id for this Agent.
+- `.ai-teams/agents/<EMPLOYEE_ID>/daily/` stores Markdown activity memory by date.
+- `.ai-teams/agents/<EMPLOYEE_ID>/hooks/` stores generated Claude Code hook scripts and settings.
+- These files are runtime state, not source code. Do not delete them unless explicitly asked to reset Agent memory.
+<!-- AI_TEAMS_AGENT_RULES_END -->

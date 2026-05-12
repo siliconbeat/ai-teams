@@ -1,0 +1,36 @@
+import type { EmployeeSnapshot, TaskOutputChunk, TaskRecord } from "@ai-teams/shared";
+import type WebSocket from "ws";
+
+export interface StateStore {
+  agentSockets: Map<string, WebSocket>;
+  leaderSockets: Set<WebSocket>;
+  employees: Map<string, EmployeeSnapshot>;
+  tasks: Map<string, TaskRecord>;
+  taskLogs: Map<string, TaskOutputChunk[]>;
+  taskWebhooks: Map<string, string>;
+  socketToEmployeeId: WeakMap<WebSocket, string>;
+  taskTimeouts: Map<string, NodeJS.Timeout>;
+  disconnectTimers: Map<string, NodeJS.Timeout>;
+  taskQueues: Map<string, string[]>;
+  mainTaskQueues: Map<string, string[]>;
+  sharedTaskQueue: string[];
+  sharedQueueCursor: number;
+}
+
+export function createInMemoryStateStore(): StateStore {
+  return {
+    agentSockets: new Map(),
+    leaderSockets: new Set(),
+    employees: new Map(),
+    tasks: new Map(),
+    taskLogs: new Map(),
+    taskWebhooks: new Map(),
+    socketToEmployeeId: new WeakMap(),
+    taskTimeouts: new Map(),
+    disconnectTimers: new Map(),
+    taskQueues: new Map(),
+    mainTaskQueues: new Map(),
+    sharedTaskQueue: [],
+    sharedQueueCursor: 0,
+  };
+}

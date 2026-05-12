@@ -259,6 +259,30 @@ export const taskPatchSchema = {
   },
 } as const;
 
+export const claudeSessionItemSchema = {
+  type: "object",
+  required: ["id", "sizeBytes", "modifiedAt", "lineCount"],
+  properties: {
+    id: { type: "string" },
+    sizeBytes: { type: "number" },
+    modifiedAt: { type: "string", format: "date-time" },
+    lineCount: { type: "number" },
+    firstUserMessage: nullableString,
+    latestUserMessage: nullableString,
+  },
+} as const;
+
+export const claudeSessionsResponseSchema = {
+  type: "object",
+  required: ["employeeId", "workspace", "sessions"],
+  properties: {
+    employeeId: { type: "string" },
+    workspace: nullableString,
+    activeSessionId: nullableString,
+    sessions: { type: "array", items: claudeSessionItemSchema },
+  },
+} as const;
+
 export function parseRestTaskRequest(body: unknown) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw new Error("Request body must be a JSON object.");

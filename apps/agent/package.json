@@ -1,21 +1,28 @@
 {
-  "name": "@ai-teams/agent",
+  "name": "@csdwd/ai-teams-agent",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
+  "bin": {
+    "ai-teams-agent": "./dist/index.js"
+  },
+  "files": ["dist"],
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
-    "start": "node dist/index.js"
+    "build": "node ../../scripts/build-bundle.js agent",
+    "start": "node dist/index.js",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@ai-teams/shared": "workspace:*",
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@ai-teams/shared": "workspace:*",
     "@types/node": "^24.5.2",
     "@types/ws": "^8.5.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

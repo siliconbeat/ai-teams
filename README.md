@@ -1,285 +1,447 @@
 # AI Teams
 
-一个基于 `Claude CLI` 的三端协作系统：
+基于 Claude CLI 的多 Agent 协作系统。人类 Leader 通过中心服务器向 AI 员工（Agent）分发任务，所有通信通过 WebSocket 实时传输。
 
-- `apps/server`：服务端，负责员工注册、任务分发、事件汇总
-- `apps/agent`：AI 员工端，负责连接服务端并执行 `claude -p`
-- `apps/web`：Leader 控制端，负责监控员工并下发任务
+## 系统架构
 
-## 当前状态
+```
+┌──────────┐   WebSocket    ┌──────────┐   WebSocket    ┌──────────┐
+│  Leader   │◄─────────────►│  Server  │◄─────────────►│  Agent   │
+│  (Web UI) │   /ws/leader  │ (Fastify)│   /ws/agent   │(claude -p)│
+└──────────┘                └──────────┘                └──────────┘
+                                │
+                            REST API
+                                │
+                          ┌──────────┐
+                          │ 外部调用方 │
+                          └──────────┘
+```
 
-当前仓库已经具备一个可运行的 MVP：
+三个应用 + 一个共享包：
 
-- 控制端可以查看接入员工
-- 控制端可以向单个员工或所有员工发送任务
-- 员工端可以使用真实 `claude -p` 执行任务
-- 员工端支持 `--resume` 复用 Claude 会话
-- 服务端会把任务状态和日志实时广播到控制端
-- 服务端会把员工、任务和任务日志持久化到 SQLite
-- 服务端会按任务 `timeoutSec` 自动超时并取消员工端任务
-- 服务端、员工端和控制端 WebSocket 已加入共享 token 鉴权
-- 控制端支持独立选择 `all` 或多个员工，也支持在输入中使用 `@Alice`
+| 组件 | 职责 |
+|------|------|
+| `apps/server` | Fastify HTTP + WebSocket 服务器，管理员工注册、任务调度、超时、持久化 |
+| `apps/agent` | 连接服务器，生成 `claude -p` 子进程执行任务 |
+| `apps/web` | React 单页控制台，监控员工、查看输出、下发任务 |
+| `packages/shared` | 协议类型、消息解析校验、`@mention` 解析 |
 
 ## 环境要求
 
 - Node.js `>=22`
 - pnpm `>=9`
 
-服务端使用 Node.js 内置 `node:sqlite`，在当前 Node 版本下仍可能输出 experimental warning。
-
-## 安装
+## 快速开始
 
 ```bash
+# 安装依赖
 pnpm install
+
+# 开发模式（内置 dev-token 认证）
+pnpm dev:all
 ```
 
-## 启动方式
+`dev:all` 会同时启动：
+- Server — `http://localhost:3789`
+- Agent (alice) — 连接 Server，RUNNER_MODE=claude
+- Web — `http://localhost:5173`
 
-开发模式使用 `tsx watch` / `vite`，适合本地开发。仓库内置的 `dev:*` 脚本会自动使用本地 token `dev-token`。
+## 任务调度模式
 
-构建产物模式先执行：
+任务有三种目标模式：
 
-```bash
-pnpm build
+| 模式 | 说明 | 会话策略 |
+|------|------|----------|
+| **queue** | 共享 FIFO 队列，轮询分配给空闲 Agent | 每次新建独立 Claude 会话 |
+| **direct** | 指定 Agent 执行 | 使用 Agent 持久 Claude 会话（`--resume`） |
+| **broadcast** | 发给所有在线 Agent | 每个 Agent 各自持久会话 |
+
+### 任务生命周期
+
+```
+queued → dispatched → accepted → running → completed | failed | cancelled | timeout
 ```
 
-然后使用 `start:*` 脚本启动。
+- 终态（completed/failed/cancelled/timeout）不可变，后续事件被忽略
+- Server 通过 `setTimeout` 自动超时控制
+- Agent 断连后有 15s 宽限期，重连可恢复活跃任务
 
-生产或构建产物模式需要显式设置共享 token：
+### 双槽位并行
 
-```bash
-export AI_TEAMS_AUTH_TOKEN=replace-with-a-secret
+每个 Agent 有两个任务槽，可同时运行：
+- **main 槽** — direct/broadcast 任务，使用持久 Claude 会话
+- **queue 槽** — queue 任务，使用独立会话
+
+---
+
+## REST API
+
+所有接口需要 Bearer Token 认证（Header `Authorization: Bearer <token>`）。
+Swagger UI 地址：`http://localhost:3789/docs`
+
+### 健康检查
+
+```
+GET /health
 ```
 
-### 1. 启动服务端
-
-开发模式：
-
-```bash
-pnpm dev:server
+```json
+{
+  "status": "ok",
+  "timestamp": "2026-04-28T12:00:00.000Z",
+  "dbPath": "data/ai-teams.db",
+  "employees": 1,
+  "leaders": 0,
+  "tasks": 3
+}
 ```
 
-构建产物模式：
+### 获取完整快照
 
-```bash
-AI_TEAMS_AUTH_TOKEN=replace-with-a-secret \
-pnpm start:server
+```
+GET /api/snapshot
 ```
 
-默认地址：
+返回所有员工、任务和任务日志。
 
-- HTTP: `http://localhost:3789/health`
-- Swagger UI: `http://localhost:3789/docs`
-- OpenAPI JSON: `http://localhost:3789/docs/json`
-- WebSocket:
-  - `ws://localhost:3789/ws/agent`
-  - `ws://localhost:3789/ws/leader`
+### 提交任务
 
-默认 SQLite 数据库：
-
-- `data/ai-teams.db`
-
-REST 发任务接口：
-
-```bash
-curl -X POST http://localhost:3789/api/tasks \
-  -H "Authorization: Bearer dev-token" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "atAgents": "queue",
-    "prompt": "帮我分析当前项目",
-    "workspace": "/Users/junhang/workspace/project",
-    "webhook": "http://localhost:9000/ai-teams-webhook"
-  }'
+```
+POST /api/tasks
 ```
 
-请求成功后立即返回：
+**请求体：**
+
+```json
+{
+  "prompt": "帮我分析当前项目的依赖关系",
+  "atAgents": "queue",
+  "workspace": "/path/to/project",
+  "timeoutSec": 600,
+  "cliConfig": {
+    "model": "claude-sonnet-4-6",
+    "permissionMode": "default",
+    "maxTurns": 10,
+    "appendSystemPrompt": "请用中文回答"
+  },
+  "webhook": "https://example.com/callback"
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `prompt` | string | 是 | 任务提示词 |
+| `atAgents` | `"queue"` \| `"all"` \| `string[]` | 否 | 目标，默认 `"queue"` |
+| `workspace` | string | 否 | 工作目录 |
+| `timeoutSec` | number | 否 | 超时秒数，默认 1800 |
+| `cliConfig` | object | 否 | Claude CLI 配置 |
+| `webhook` | string \| object | 否 | 回调 URL |
+
+**cliConfig 支持的字段：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `model` | string | 模型名称 |
+| `permissionMode` | string | 权限模式 |
+| `maxTurns` | number | 最大对话轮次 |
+| `systemPrompt` | string | 系统提示词（覆盖） |
+| `appendSystemPrompt` | string | 追加系统提示词 |
+| `allowedTools` | string[] | 允许的工具列表 |
+| `disallowedTools` | string[] | 禁用的工具列表 |
+| `extraArgs` | string[] | 额外 CLI 参数 |
+
+**响应 `202`：**
 
 ```json
 {
   "status": "accepted",
-  "leaderCommandId": "...",
-  "tasks": [{ "id": "...", "status": "queued" }]
+  "leaderCommandId": "uuid",
+  "tasks": [{ "id": "uuid", "status": "queued", ... }]
 }
 ```
 
-`atAgents` 支持 `"queue"`、`"all"` 或 `["alice", "bob"]`。`webhook` 可选，也可以写成 `webhookUrl` 或 `{ "url": "..." }`；服务端会用 `POST` 回调 `task.started`、`task.output` 和 `task.completed` / `task.failed` / `task.cancelled` / `task.timeout` 事件。
-
-按 Claude session id 获取会话历史：
+**curl 示例：**
 
 ```bash
-curl http://localhost:3789/api/sessions/<SESSION_ID>/history \
+# 队列任务
+curl -X POST http://localhost:3789/api/tasks \
+  -H "Authorization: Bearer dev-token" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "帮我分析当前项目", "atAgents": "queue"}'
+
+# 指定员工
+curl -X POST http://localhost:3789/api/tasks \
+  -H "Authorization: Bearer dev-token" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "修复登录bug", "atAgents": ["alice"]}'
+
+# 广播所有员工
+curl -X POST http://localhost:3789/api/tasks \
+  -H "Authorization: Bearer dev-token" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "各自汇报当前进度", "atAgents": "all"}'
+```
+
+### 查询任务列表
+
+```
+GET /api/tasks?status=running&employeeId=alice&limit=20&offset=0
+```
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `status` | string | 按状态过滤 |
+| `employeeId` | string | 按员工过滤 |
+| `limit` | number | 每页条数（1-100） |
+| `offset` | number | 偏移量 |
+
+**响应：**
+
+```json
+{
+  "tasks": [{ "id": "uuid", "status": "running", ... }]
+}
+```
+
+### 查询单个任务
+
+```
+GET /api/tasks/:taskId
+```
+
+### 取消/终止任务
+
+```
+POST /api/tasks/:taskId/cancel
+```
+
+完整取消流程：
+1. 排队中的任务 — 从队列移除，标记 `cancelled`
+2. 运行中的任务 — 通知 Agent 终止 claude 子进程
+3. Agent 离线 — 标记任务 `failed`
+
+**响应 `200`：** 返回当前任务记录
+
+**错误响应：**
+- `404` — 任务不存在
+- `409` — 任务已处于终态
+
+```bash
+curl -X POST http://localhost:3789/api/tasks/TASK_ID/cancel \
   -H "Authorization: Bearer dev-token"
 ```
 
-返回内容包含该 session 下的任务列表，以及可直接渲染的 `messages`：
+### 更新任务
+
+```
+PATCH /api/tasks/:taskId
+```
+
+```json
+{
+  "status": "cancelled",
+  "timeoutSec": 3600,
+  "cliConfig": { "maxTurns": 5 }
+}
+```
+
+> 注意：`PATCH` 直接更新数据库字段，不会通知 Agent 终止进程。如需完整取消流程请使用 `POST /api/tasks/:taskId/cancel`。
+
+### 删除任务
+
+```
+DELETE /api/tasks/:taskId
+```
+
+仅限终态任务（completed/failed/cancelled/timeout）。
+
+### 获取会话历史
+
+```
+GET /api/sessions/:sessionId/history
+```
+
+返回该 Claude 会话下的所有任务提示词、输出和摘要，可直接渲染为对话。
 
 ```json
 {
   "sessionId": "...",
   "tasks": [],
   "messages": [
-    { "type": "task.prompt", "role": "user", "content": "..." },
-    { "type": "task.output", "role": "assistant", "content": "..." },
-    { "type": "task.result", "role": "assistant", "content": "..." }
+    { "type": "task.prompt", "role": "user", "taskId": "...", "content": "..." },
+    { "type": "task.output", "role": "assistant", "taskId": "...", "content": "..." },
+    { "type": "task.result", "role": "assistant", "taskId": "...", "content": "..." }
   ]
 }
 ```
 
-可通过环境变量覆盖：
+### Webhook 回调
+
+提交任务时可指定 `webhook` URL，Server 会 POST 以下事件：
+
+| 事件 | 触发时机 |
+|------|----------|
+| `task.started` | Agent 开始执行 |
+| `task.output` | 每条流式输出 |
+| `task.completed` | 任务成功完成 |
+| `task.failed` | 任务失败 |
+| `task.cancelled` | 任务取消 |
+| `task.timeout` | 任务超时 |
+
+每个回调包含 `x-ai-teams-signature` Header（HMAC-SHA256 签名），可用共享 Token 验证。
+
+---
+
+## 启动方式
+
+### 开发模式
 
 ```bash
-AI_TEAMS_AUTH_TOKEN=replace-with-a-secret \
-DB_PATH=/tmp/ai-teams.db pnpm start:server
+pnpm dev:server          # Server on :3789
+pnpm dev:agent:alice     # Agent with EMPLOYEE_ID=alice
+pnpm dev:web             # Web on :5173
+pnpm dev:all             # 全部启动
 ```
 
-默认服务端端口是 `3789`，比 `3000` 更不容易和常见 Web 服务冲突。需要修改时可以设置：
+开发模式自动使用 `dev-token`。
+
+### 生产模式
 
 ```bash
-AI_TEAMS_SERVER_PORT=4389 AI_TEAMS_AUTH_TOKEN=replace-with-a-secret pnpm start:server
-```
-
-### 2. 启动一个员工端
-
-真实 Claude 模式：
-
-```bash
-EMPLOYEE_ID=alice \
-EMPLOYEE_NAME=Alice \
-DEFAULT_WORKSPACE=/Users/junhang/IdeaProjects/cfhy/agent/ai-teams \
-RUNNER_MODE=claude \
-pnpm dev:agent
-```
-
-已内置 Alice 员工脚本，等价于上面的长命令：
-
-```bash
-pnpm dev:agent:alice
-```
-
-构建产物模式：
-
-```bash
-EMPLOYEE_ID=alice \
-EMPLOYEE_NAME=Alice \
-RUNNER_MODE=claude \
-AI_TEAMS_AUTH_TOKEN=replace-with-a-secret \
-pnpm start:agent
-```
-
-构建产物模式也可以直接使用：
-
-```bash
-pnpm start:agent:alice
-```
-
-假任务模式：
-
-```bash
-EMPLOYEE_ID=alice \
-EMPLOYEE_NAME=Alice \
-RUNNER_MODE=fake \
-pnpm dev:agent
-```
-
-可选环境变量：
-
-- `AI_TEAMS_AUTH_TOKEN`，服务端和员工端共享 token；`start:*` 模式必填
-- `AI_TEAMS_SERVER_PORT`，默认 `3789`
-- `SERVER_URL`，默认 `ws://localhost:3789`
-- `EMPLOYEE_LABELS`，逗号分隔，例如 `frontend,react`
-- `AGENT_STATE_FILE`，默认 `DEFAULT_WORKSPACE/.ai-teams/agents/<EMPLOYEE_ID>/session-state.json`
-- `CLAUDE_PERMISSION_MODE`，默认 `default`；如需绕过权限需显式设置
-- `DEFAULT_WORKSPACE`，默认当前目录
-- `AGENT_RECORDS_DIR`，默认 `DEFAULT_WORKSPACE/.ai-teams/agents/<EMPLOYEE_ID>`，每日 Markdown 记录会写入 `daily/YYYY-MM-DD.md`
-- `CLAUDE_HOOKS_ENABLED`，默认开启；设为 `false` 可关闭注入 Claude Code CLI 的会话记录 hooks
-
-Agent 记录规则：
-
-- 不传 `workspace` 时，Claude CLI 在 `DEFAULT_WORKSPACE` 下执行。
-- 默认会话状态、每日 Markdown、Claude hook 配置都保存在 `DEFAULT_WORKSPACE/.ai-teams/agents/<EMPLOYEE_ID>/` 子目录下。
-- `@Agent` 和选择具体 Agent 的任务使用该 Agent 默认 Claude session，适合作为长期会话管理。
-- 非 `@` 消息进入共享任务队列，由空闲 Agent 消费执行，每个队列任务使用独立 Claude session。
-- Agent 自身会记录任务开始/结束；Claude Code CLI hooks 会记录 SessionStart、UserPromptSubmit、PostToolUse、Stop、SessionEnd 等事件。
-
-任务超时默认由服务端控制：
-
-- `DEFAULT_TIMEOUT_SEC`，默认 `1800`
-
-### 3. 启动控制端
-
-开发模式：
-
-```bash
-pnpm dev:web
-```
-
-构建产物预览：
-
-```bash
-VITE_AI_TEAMS_AUTH_TOKEN=replace-with-a-secret \
-pnpm start:web
-```
-
-默认地址：
-
-- `http://localhost:5173`
-
-### 4. 一键启动
-
-开发模式：
-
-```bash
-pnpm dev:all
-```
-
-这会默认启动 Alice 员工，员工配置为：
-
-- `EMPLOYEE_ID=alice`
-- `EMPLOYEE_NAME=Alice`
-- `RUNNER_MODE=claude`
-- `DEFAULT_WORKSPACE=/Users/junhang/IdeaProjects/cfhy/agent/ai-teams`
-
-构建产物模式：
-
-```bash
+export AI_TEAMS_AUTH_TOKEN=your-secret-token
 pnpm build
 pnpm start:all
 ```
 
-这会同时启动：
-
-- 服务端
-- 一个默认员工端
-- 控制端
-
-构建产物模式下需要在 shell 中提前设置 `AI_TEAMS_AUTH_TOKEN`，控制端可以通过 `VITE_AI_TEAMS_AUTH_TOKEN` 预置 token，也可以在页面中手动输入 token。
-
-## 多员工模拟
-
-你可以开多个终端分别启动员工端，例如：
+### 多员工
 
 ```bash
 AI_TEAMS_AUTH_TOKEN=dev-token EMPLOYEE_ID=alice EMPLOYEE_NAME=Alice RUNNER_MODE=claude pnpm --filter @ai-teams/agent dev
 AI_TEAMS_AUTH_TOKEN=dev-token EMPLOYEE_ID=bob EMPLOYEE_NAME=Bob RUNNER_MODE=fake pnpm --filter @ai-teams/agent dev
-AI_TEAMS_AUTH_TOKEN=dev-token EMPLOYEE_ID=carol EMPLOYEE_NAME=Carol RUNNER_MODE=claude pnpm --filter @ai-teams/agent dev
 ```
+
+### 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `AI_TEAMS_AUTH_TOKEN` | — | 共享认证 Token（生产必填） |
+| `AI_TEAMS_SERVER_PORT` | `3789` | 服务端口 |
+| `SERVER_URL` | `ws://localhost:3789` | Agent 连接地址 |
+| `EMPLOYEE_ID` | `emp_local` | 员工 ID |
+| `EMPLOYEE_NAME` | `Local Agent` | 员工名称 |
+| `EMPLOYEE_LABELS` | — | 逗号分隔标签 |
+| `RUNNER_MODE` | `claude` | `claude` 或 `fake`（测试用） |
+| `DEFAULT_WORKSPACE` | 当前目录 | 默认工作目录 |
+| `DEFAULT_TIMEOUT_SEC` | `1800` | 任务超时秒数 |
+| `DISCONNECT_GRACE_MS` | `15000` | 断线恢复宽限期 |
+| `DATABASE_URL` | — | PostgreSQL 连接串（见下方说明） |
+| `DB_PATH` | `data/ai-teams.db` | SQLite 数据库路径（不设 `DATABASE_URL` 时使用） |
+| `LOG_LEVEL` | `info` | 日志级别：`trace` / `debug` / `info` / `warn` / `error` |
+| `LOG_DIR` | — | 日志文件目录（不设则仅输出到 stdout） |
+
+---
+
+## 数据库
+
+默认使用 **SQLite**（`data/ai-teams.db`），开箱即用，无需额外配置。
+
+### 使用 PostgreSQL
+
+设置 `DATABASE_URL` 环境变量即可切换到 PostgreSQL：
+
+```bash
+# 标准连接串格式
+export DATABASE_URL="postgresql://user:password@localhost:5432/ai_teams"
+
+# 带完整参数
+export DATABASE_URL="postgresql://user:password@db.example.com:5432/ai_teams?sslmode=require"
+```
+
+```bash
+DATABASE_URL="postgresql://user:password@localhost:5432/ai_teams" \
+AI_TEAMS_AUTH_TOKEN=your-secret \
+ai-teams-server
+```
+
+**切换规则：** `DATABASE_URL` 有值时使用 PostgreSQL，否则使用 SQLite。两者表结构一致，Server 启动时自动建表。
+
+---
+
+## 日志
+
+Server 使用 Pino 结构化 JSON 日志，默认输出到 stdout。
+
+### 输出到文件
+
+```bash
+# 同时输出到 stdout 和文件
+ai-teams-server --token xxx --log-dir ./logs
+
+# 环境变量方式
+LOG_DIR=./logs AI_TEAMS_AUTH_TOKEN=xxx ai-teams-server
+```
+
+日志文件：`$LOG_DIR/server.log`
+
+### 调整日志级别
+
+```bash
+ai-teams-server --token xxx --log-level debug
+
+# 或环境变量
+LOG_LEVEL=debug AI_TEAMS_AUTH_TOKEN=xxx ai-teams-server
+```
+
+### 查看日志
+
+```bash
+# 直接查看 JSON 日志
+tail -f logs/server.log
+
+# 格式化输出（需安装 pino-pretty）
+tail -f logs/server.log | npx pino-pretty
+```
+
+### 日志覆盖的事件
+
+| 事件 | 级别 | 说明 |
+|------|------|------|
+| 任务创建/分发/接受/开始/完成/取消 | `info` | 任务全生命周期 |
+| 任务失败 | `warn` | 含错误原因 |
+| 任务超时 | `warn` | 含超时秒数 |
+| 认证失败 | `warn` | 含请求 URL 和 IP |
+| 数据库写入失败 | `error` | 持久化异常 |
+| Webhook 投递失败 | `warn` | 含重试次数 |
+| HTTP 请求 | `info` | Fastify 自动记录（方法、路径、状态码、耗时） |
+
+---
+
+## API 文档
+
+Server 启动后可访问 Swagger UI：
+
+```
+http://localhost:3789/docs
+```
+
+OpenAPI JSON：
+
+```
+http://localhost:3789/docs/json
+```
+
+---
 
 ## 构建与测试
 
 ```bash
-pnpm test
-pnpm typecheck
-pnpm build
+pnpm build       # 构建（shared 必须先编译）
+pnpm test        # 运行所有测试
+pnpm typecheck   # 类型检查
 ```
 
-## 关键实现说明
+运行单个测试文件：
 
-- 员工端默认单任务串行执行
-- 员工端执行真实 Claude 时，会使用 `stream-json` 读取流式输出
-- 员工端会将 `Claude` 的会话 ID 保存到本地文件，并在后续任务中使用 `--resume`
-- 服务端内存中保留实时状态，同时把员工、任务、任务日志同步写入 SQLite
-- 服务端会为已分发任务设置超时计时器，超时后发送取消指令并释放员工槽位
-- 服务端会在员工断线后保留短暂恢复窗口，员工重连并上报当前任务后可继续执行
-- 任务进入 `completed` / `failed` / `cancelled` / `timeout` 后，迟到的输出和完成事件会被忽略
-- SQLite 会维护轻量 schema version，并按任务裁剪持久化日志，默认保留最近 400 条
+```bash
+pnpm vitest run apps/server/src/index.test.ts
+```

@@ -13,7 +13,8 @@ import {
   type TaskStatus,
   type TaskTargetMode,
 } from "@ai-teams/shared";
-import type { Database, ServerState } from "./db.js";
+import type { Database } from "./db.js";
+import type { StateStore } from "./state-store.js";
 import { persistEmployee, persistTask, persistTaskLog, persistTaskWebhook, persistSharedQueueCursor } from "./db.js";
 import type { WebhookEventType } from "./schemas.js";
 
@@ -35,7 +36,7 @@ function extractDoneSessionId(content: string) {
 }
 
 export type DispatchContext = {
-  state: ServerState;
+  state: StateStore;
   authToken: string;
   defaultTimeoutSec: number;
   maxLogChunksPerTask: number;
@@ -55,13 +56,13 @@ export function createDispatch(ctx: DispatchContext) {
 
   function upsertEmployee(employee: EmployeeSnapshot) {
     state.employees.set(employee.id, employee);
-    void persistEmployee(db, employee);
+    persistEmployee(db, employee).catch((error) => log.error({ error, employeeId: employee.id }, "Failed to persist employee"));
     broadcastToLeaders({ type: "employee.upsert", employee });
   }
 
   function upsertTask(task: TaskRecord) {
     state.tasks.set(task.id, task);
-    void persistTask(db, task);
+    persistTask(db, task).catch((error) => log.error({ error, taskId: task.id }, "Failed to persist task"));
     broadcastToLeaders({ type: "task.upsert", task });
   }
 
@@ -93,6 +94,8 @@ export function createDispatch(ctx: DispatchContext) {
       }
       if (!response.ok) {
         log.warn({ taskId, webhookUrl, status: response.status, attempt }, "Task webhook returned non-2xx after retries");
+      } else if (attempt > 1) {
+        log.info({ taskId, webhookUrl, attempt }, "Task webhook succeeded on retry");
       }
     } catch (error) {
       if (attempt < 3) {
@@ -160,6 +163,7 @@ export function createDispatch(ctx: DispatchContext) {
     task.error = error;
     task.summary = task.summary ?? error;
     task.finishedAt = nowIso();
+    log.warn({ taskId, employeeId: task.employeeId, error }, "Task failed");
     upsertTask(task);
     postTaskWebhook(task, "task.failed");
     if (task.employeeId) {
@@ -194,7 +198,7 @@ export function createDispatch(ctx: DispatchContext) {
       history.splice(0, history.length - ctx.maxLogChunksPerTask);
     }
     state.taskLogs.set(chunk.taskId, history);
-    void persistTaskLog(db, chunk, ctx.maxLogChunksPerTask);
+    persistTaskLog(db, chunk, ctx.maxLogChunksPerTask).catch((error) => log.error({ error, taskId: chunk.taskId, seq: chunk.seq }, "Failed to persist task log"));
     broadcastToLeaders({ type: "task.output", chunk });
     postTaskWebhook(task, "task.output", { chunk });
   }
@@ -211,6 +215,7 @@ export function createDispatch(ctx: DispatchContext) {
     current.status = "timeout";
     current.finishedAt = nowIso();
     current.error = `任务超过 ${task.timeoutSec} 秒未完成，已超时。`;
+    log.warn({ taskId: task.id, employeeId: task.employeeId, timeoutSec: task.timeoutSec }, "Task timed out");
     current.summary = current.error;
     upsertTask(current);
     postTaskWebhook(current, "task.timeout");
@@ -331,6 +336,7 @@ export function createDispatch(ctx: DispatchContext) {
 
     task.employeeId = assignedEmployeeId;
     task.status = "dispatched";
+    log.info({ taskId: task.id, employeeId: assignedEmployeeId, targetMode: task.targetMode, prompt: task.prompt.slice(0, 80) }, "Task dispatched");
     upsertTask(task);
     if (isQueueSlot) {
       setQueueTask(assignedEmployeeId, task.id, task.prompt);
@@ -438,9 +444,10 @@ export function createDispatch(ctx: DispatchContext) {
 
     if (webhookUrl) {
       state.taskWebhooks.set(task.id, webhookUrl);
-      void persistTaskWebhook(db, task.id, webhookUrl);
+      persistTaskWebhook(db, task.id, webhookUrl).catch((error) => log.error({ error, taskId: task.id }, "Failed to persist task webhook"));
     }
     upsertTask(task);
+    log.info({ taskId: task.id, targetMode, employeeId, prompt: prompt.slice(0, 80) }, "Task created");
     if (targetMode === "queue") {
       enqueueSharedTask(task.id);
       dispatchSharedQueuedTasks();
@@ -621,6 +628,7 @@ export function createDispatch(ctx: DispatchContext) {
       case "task.accepted":
         task.status = "accepted";
         upsertTask(task);
+        log.info({ taskId: task.id, employeeId: socketEmployeeId }, "Task accepted");
         break;
       case "task.started":
         task.status = "running";
@@ -628,6 +636,7 @@ export function createDispatch(ctx: DispatchContext) {
         task.startedAt = task.startedAt ?? nowIso();
         upsertTask(task);
         postTaskWebhook(task, "task.started");
+        log.info({ taskId: task.id, employeeId: socketEmployeeId, sessionId: task.sessionId, pid: message.pid }, "Task started");
         break;
       case "task.output":
         if (!task.employeeId) {
@@ -659,6 +668,7 @@ export function createDispatch(ctx: DispatchContext) {
         task.usageCacheCreationTokens = message.usageCacheCreationTokens ?? task.usageCacheCreationTokens;
         upsertTask(task);
         postTaskWebhook(task, "task.completed");
+        log.info({ taskId: task.id, employeeId: task.employeeId, exitCode: task.exitCode, durationMs: task.durationMs, numTurns: task.numTurns, totalCostUsd: task.totalCostUsd }, "Task completed");
         if (task.employeeId) {
           const isMainSlot = task.targetMode !== "queue";
           if (isMainSlot) {
@@ -678,6 +688,7 @@ export function createDispatch(ctx: DispatchContext) {
         clearTaskTimeout(task.id);
         task.finishedAt = nowIso();
         task.summary = "任务已取消。";
+        log.info({ taskId: task.id, employeeId: task.employeeId }, "Task cancelled");
         upsertTask(task);
         postTaskWebhook(task, "task.cancelled");
         if (task.employeeId) {
@@ -692,6 +703,51 @@ export function createDispatch(ctx: DispatchContext) {
         }
         break;
     }
+  }
+
+  function cancelTaskById(taskId: string): { ok: true; task: TaskRecord } | { ok: false; code: string; message: string } {
+    const task = state.tasks.get(taskId);
+    if (!task) {
+      return { ok: false, code: "not_found", message: "任务不存在。" };
+    }
+    if (TERMINAL_STATUSES.has(task.status)) {
+      return { ok: false, code: "already_terminal", message: `任务已处于终态 ${task.status}，无法取消。` };
+    }
+    if (task.status === "queued") {
+      if (task.employeeId) {
+        const isMainSlot = task.targetMode !== "queue";
+        const queueMap = isMainSlot ? state.mainTaskQueues : state.taskQueues;
+        const queue = queueMap.get(task.employeeId);
+        if (queue) {
+          const idx = queue.indexOf(task.id);
+          if (idx !== -1) {
+            queue.splice(idx, 1);
+          }
+          if (queue.length === 0) {
+            queueMap.delete(task.employeeId);
+          }
+        }
+      } else {
+        removeFromSharedQueue(task.id);
+      }
+      task.status = "cancelled";
+      task.finishedAt = nowIso();
+      task.summary = "任务已取消。";
+      upsertTask(task);
+      postTaskWebhook(task, "task.cancelled");
+      return { ok: true, task };
+    }
+    if (!task.employeeId) {
+      markTaskFailed(task.id, "任务尚未分配给员工，无法取消运行中的进程。");
+      return { ok: true, task: state.tasks.get(task.id)! };
+    }
+    const agentSocket = state.agentSockets.get(task.employeeId);
+    if (!agentSocket) {
+      markTaskFailed(task.id, "员工已离线，无法取消运行中的进程。");
+      return { ok: true, task: state.tasks.get(task.id)! };
+    }
+    sendJson<ServerToEmployeeMessage>(agentSocket, { type: "task.cancel", taskId: task.id });
+    return { ok: true, task };
   }
 
   function handleLeaderMessage(message: LeaderToServerMessage, socket: WebSocket) {
@@ -722,47 +778,9 @@ export function createDispatch(ctx: DispatchContext) {
           socket,
         );
         break;
-      case "task.cancel": {
-        const task = state.tasks.get(message.taskId);
-        if (!task || TERMINAL_STATUSES.has(task.status)) {
-          return;
-        }
-        if (task.status === "queued") {
-          if (task.employeeId) {
-            const isMainSlot = task.targetMode !== "queue";
-            const queueMap = isMainSlot ? state.mainTaskQueues : state.taskQueues;
-            const queue = queueMap.get(task.employeeId);
-            if (queue) {
-              const idx = queue.indexOf(task.id);
-              if (idx !== -1) {
-                queue.splice(idx, 1);
-              }
-              if (queue.length === 0) {
-                queueMap.delete(task.employeeId);
-              }
-            }
-          } else {
-            removeFromSharedQueue(task.id);
-          }
-          task.status = "cancelled";
-          task.finishedAt = nowIso();
-          task.summary = "任务已取消。";
-          upsertTask(task);
-          postTaskWebhook(task, "task.cancelled");
-          return;
-        }
-        if (!task.employeeId) {
-          markTaskFailed(task.id, "任务尚未分配给员工，无法取消运行中的进程。");
-          return;
-        }
-        const agentSocket = state.agentSockets.get(task.employeeId);
-        if (!agentSocket) {
-          markTaskFailed(task.id, "员工已离线，无法取消运行中的进程。");
-          return;
-        }
-        sendJson<ServerToEmployeeMessage>(agentSocket, { type: "task.cancel", taskId: task.id });
+      case "task.cancel":
+        cancelTaskById(message.taskId);
         break;
-      }
     }
   }
 
@@ -770,5 +788,6 @@ export function createDispatch(ctx: DispatchContext) {
     dispatchLeaderCommand,
     handleAgentMessage,
     handleLeaderMessage,
+    cancelTaskById,
   };
 }

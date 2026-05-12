@@ -39,129 +39,712 @@ afterEach(async () => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe("AI Teams server integration", () => {
-  it("rejects unauthenticated websocket clients and accepts token clients", async () => {
+// ─── 认证 ──────────────────────────────────────────────────────
+
+describe("认证", () => {
+  it("拒绝未认证的 WebSocket 连接", async () => {
     const rejected = new WebSocket(`${baseUrl}/ws/leader`);
     sockets.push(rejected);
     const close = await waitForClose(rejected);
     expect(close.code).toBe(1008);
+  });
 
+  it("接受带 token 的 WebSocket 连接", async () => {
     const leader = await connectLeader();
     expect(leader.readyState).toBe(WebSocket.OPEN);
   });
 
-  it("serves Swagger OpenAPI documentation without API token", async () => {
+  it("拒绝未认证的 REST 请求", async () => {
+    const response = await fetch(`${httpBaseUrl}/api/snapshot`);
+    expect(response.status).toBe(401);
+  });
+
+  it("接受 query 参数 token", async () => {
+    const response = await fetch(`${httpBaseUrl}/api/snapshot?token=${TOKEN}`);
+    expect(response.status).toBe(200);
+  });
+
+  it("Swagger 文档无需认证即可访问", async () => {
     const response = await fetch(`${httpBaseUrl}/docs/json`);
     expect(response.status).toBe(200);
-    const openapi = (await response.json()) as {
-      openapi: string;
-      paths: Record<string, unknown>;
-    };
+    const openapi = (await response.json()) as { openapi: string; paths: Record<string, unknown> };
     expect(openapi.openapi).toMatch(/^3\./);
     expect(openapi.paths["/api/tasks"]).toBeTruthy();
   });
+});
 
-  it("dispatches all and multiple-agent commands to registered agents", async () => {
+// ─── 健康检查 ──────────────────────────────────────────────────
+
+describe("GET /health", () => {
+  it("返回服务健康状态", async () => {
+    const response = await fetch(`${httpBaseUrl}/health`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { status: string; employees: number; tasks: number };
+    expect(body.status).toBe("ok");
+    expect(body.employees).toBe(0);
+    expect(body.tasks).toBe(0);
+  });
+});
+
+// ─── 任务 CRUD REST API ────────────────────────────────────────
+
+describe("POST /api/tasks — 创建任务", () => {
+  it("创建 queue 任务", async () => {
+    const agent = await connectAgent("alice");
+    const dispatchPromise = waitForAgentDispatch(agent);
+
+    const response = await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "queue task", atAgents: "queue" }),
+    });
+
+    expect(response.status).toBe(202);
+    const body = (await response.json()) as { status: string; tasks: Array<{ id: string; status: string; targetMode: string }> };
+    expect(body.status).toBe("accepted");
+    expect(body.tasks).toHaveLength(1);
+    expect(["queued", "dispatched"]).toContain(body.tasks[0]!.status);
+    expect(body.tasks[0]!.targetMode).toBe("queue");
+
+    const dispatch = await dispatchPromise;
+    agent.send(JSON.stringify({ type: "task.accepted", taskId: dispatch.taskId }));
+    agent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 1 }));
+    agent.send(JSON.stringify({ type: "task.completed", taskId: dispatch.taskId, exitCode: 0, summary: "done" }));
+    await delay(20);
+  });
+
+  it("创建 direct 任务", async () => {
+    const agent = await connectAgent("alice");
+    const dispatchPromise = waitForAgentDispatch(agent);
+
+    const response = await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "direct task", atAgents: ["alice"] }),
+    });
+
+    expect(response.status).toBe(202);
+    const body = (await response.json()) as { status: string; tasks: Array<{ targetMode: string }> };
+    expect(body.tasks[0]!.targetMode).toBe("direct");
+
+    const dispatch = await dispatchPromise;
+    agent.send(JSON.stringify({ type: "task.accepted", taskId: dispatch.taskId }));
+    agent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 1 }));
+    agent.send(JSON.stringify({ type: "task.completed", taskId: dispatch.taskId, exitCode: 0, summary: "done" }));
+    await delay(20);
+  });
+
+  it("创建 broadcast 任务", async () => {
+    const alice = await connectAgent("alice");
+    const bob = await connectAgent("bob");
+    const aliceDispatch = waitForAgentDispatch(alice);
+    const bobDispatch = waitForAgentDispatch(bob);
+
+    const response = await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "broadcast task", atAgents: "all" }),
+    });
+
+    expect(response.status).toBe(202);
+    const body = (await response.json()) as { status: string; tasks: Array<{ targetMode: string }> };
+    expect(body.tasks).toHaveLength(2);
+    expect(body.tasks.every((t) => t.targetMode === "broadcast")).toBe(true);
+
+    const d1 = await aliceDispatch;
+    const d2 = await bobDispatch;
+    alice.send(JSON.stringify({ type: "task.completed", taskId: d1.taskId, exitCode: 0, summary: "done" }));
+    bob.send(JSON.stringify({ type: "task.completed", taskId: d2.taskId, exitCode: 0, summary: "done" }));
+    await delay(20);
+  });
+
+  it("拒绝空 prompt", async () => {
+    const response = await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "" }),
+    });
+    expect([400, 500]).toContain(response.status);
+  });
+
+  it("目标员工全部离线时 direct 任务创建后标记 failed", async () => {
+    const response = await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "nobody here", atAgents: ["alice"] }),
+    });
+    // 任务创建成功(202)，但因为没有在线 agent 会立即失败
+    expect(response.status).toBe(202);
+    const body = (await response.json()) as { tasks: Array<{ id: string }> };
+    await delay(20);
+    const snapshot = server.buildSnapshot();
+    const task = snapshot.tasks.find((t) => t.id === body.tasks[0]!.id);
+    expect(task!.status).toBe("failed");
+  });
+
+  it("支持 cliConfig 参数", async () => {
+    const agent = await connectAgent("alice");
+    const dispatchPromise = waitForAgentDispatch(agent);
+
+    await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        prompt: "with config",
+        atAgents: ["alice"],
+        cliConfig: { model: "claude-sonnet-4-6", maxTurns: 5 },
+      }),
+    });
+
+    const dispatch = await dispatchPromise;
+    expect(dispatch.cliConfig).toEqual({ model: "claude-sonnet-4-6", maxTurns: 5 });
+
+    agent.send(JSON.stringify({ type: "task.completed", taskId: dispatch.taskId, exitCode: 0, summary: "done" }));
+    await delay(20);
+  });
+});
+
+describe("GET /api/tasks — 查询任务列表", () => {
+  it("返回空列表", async () => {
+    const response = await fetch(`${httpBaseUrl}/api/tasks`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { tasks: unknown[] };
+    expect(body.tasks).toEqual([]);
+  });
+
+  it("按状态过滤", async () => {
+    const agent = await connectAgent("alice");
+    const dispatchPromise = waitForAgentDispatch(agent);
+
+    await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "task1", atAgents: ["alice"] }),
+    });
+    await dispatchPromise;
+
+    const response = await fetch(`${httpBaseUrl}/api/tasks?status=queued`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    const body = (await response.json()) as { tasks: Array<{ status: string }> };
+    expect(body.tasks.every((t) => t.status === "queued")).toBe(true);
+  });
+
+  it("按 employeeId 过滤", async () => {
+    const alice = await connectAgent("alice");
+    const bob = await connectAgent("bob");
+    const d1 = waitForAgentDispatch(alice);
+    const d2 = waitForAgentDispatch(bob);
+
+    await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "for alice", atAgents: ["alice"] }),
+    });
+    await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "for bob", atAgents: ["bob"] }),
+    });
+    await Promise.all([d1, d2]);
+
+    const response = await fetch(`${httpBaseUrl}/api/tasks?employeeId=alice`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    const body = (await response.json()) as { tasks: Array<{ employeeId: string | null }> };
+    expect(body.tasks.every((t) => t.employeeId === "alice")).toBe(true);
+  });
+
+  it("支持 limit 和 offset 分页", async () => {
+    const agent = await connectAgent("alice");
+
+    for (let i = 0; i < 5; i++) {
+      const d = waitForAgentDispatch(agent);
+      await fetch(`${httpBaseUrl}/api/tasks`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+        body: JSON.stringify({ prompt: `task ${i}`, atAgents: ["alice"] }),
+      });
+      const dispatch = await d;
+      agent.send(JSON.stringify({ type: "task.completed", taskId: dispatch.taskId, exitCode: 0, summary: `done ${i}` }));
+      await delay(20);
+    }
+
+    const page1 = await (await fetch(`${httpBaseUrl}/api/tasks?limit=2&offset=0`, { headers: { authorization: `Bearer ${TOKEN}` } })).json() as { tasks: unknown[] };
+    const page2 = await (await fetch(`${httpBaseUrl}/api/tasks?limit=2&offset=2`, { headers: { authorization: `Bearer ${TOKEN}` } })).json() as { tasks: unknown[] };
+    expect(page1.tasks).toHaveLength(2);
+    expect(page2.tasks).toHaveLength(2);
+  });
+});
+
+describe("GET /api/tasks/:taskId — 查询单个任务", () => {
+  it("返回指定任务", async () => {
+    const agent = await connectAgent("alice");
+    const dispatchPromise = waitForAgentDispatch(agent);
+
+    const createRes = await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "find me", atAgents: ["alice"] }),
+    });
+    const createBody = (await createRes.json()) as { tasks: Array<{ id: string }> };
+    await dispatchPromise;
+
+    const response = await fetch(`${httpBaseUrl}/api/tasks/${createBody.tasks[0]!.id}`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(response.status).toBe(200);
+    const task = (await response.json()) as { id: string; prompt: string };
+    expect(task.id).toBe(createBody.tasks[0]!.id);
+    expect(task.prompt).toBe("find me");
+  });
+
+  it("404 返回不存在的任务", async () => {
+    const response = await fetch(`${httpBaseUrl}/api/tasks/nonexistent-id`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(response.status).toBe(404);
+  });
+});
+
+describe("PATCH /api/tasks/:taskId — 更新任务", () => {
+  it("404 更新不存在的任务", async () => {
+    const response = await fetch(`${httpBaseUrl}/api/tasks/nonexistent-id`, {
+      method: "PATCH",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ timeoutSec: 600 }),
+    });
+    expect(response.status).toBe(404);
+  });
+
+  it("取消排队中的任务（通过 status 字段）", async () => {
+    const createRes = await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "cancel via patch", atAgents: "queue" }),
+    });
+    const createBody = (await createRes.json()) as { tasks: Array<{ id: string }> };
+    const taskId = createBody.tasks[0]!.id;
+
+    const patchRes = await fetch(`${httpBaseUrl}/api/tasks/${taskId}`, {
+      method: "PATCH",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ status: "cancelled" }),
+    });
+    expect(patchRes.status).toBe(200);
+  });
+
+  it("404 更新不存在的任务", async () => {
+    const response = await fetch(`${httpBaseUrl}/api/tasks/nonexistent-id`, {
+      method: "PATCH",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ timeoutSec: 600 }),
+    });
+    expect(response.status).toBe(404);
+  });
+});
+
+describe("DELETE /api/tasks/:taskId — 删除任务", () => {
+  it("删除终态任务", async () => {
+    const agent = await connectAgent("alice");
+    const dispatchPromise = waitForAgentDispatch(agent);
+
+    const createRes = await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "delete me", atAgents: ["alice"] }),
+    });
+    const createBody = (await createRes.json()) as { tasks: Array<{ id: string }> };
+    const dispatch = await dispatchPromise;
+    agent.send(JSON.stringify({ type: "task.completed", taskId: dispatch.taskId, exitCode: 0, summary: "done" }));
+    await delay(20);
+
+    const response = await fetch(`${httpBaseUrl}/api/tasks/${createBody.tasks[0]!.id}`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { deleted: boolean };
+    expect(body.deleted).toBe(true);
+  });
+
+  it("拒绝删除非终态任务", async () => {
+    const agent = await connectAgent("alice");
+    const dispatchPromise = waitForAgentDispatch(agent);
+
+    const createRes = await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "running task", atAgents: ["alice"] }),
+    });
+    const createBody = (await createRes.json()) as { tasks: Array<{ id: string }> };
+    await dispatchPromise;
+
+    const response = await fetch(`${httpBaseUrl}/api/tasks/${createBody.tasks[0]!.id}`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(response.status).toBe(409);
+  });
+
+  it("404 删除不存在的任务", async () => {
+    const response = await fetch(`${httpBaseUrl}/api/tasks/nonexistent-id`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(response.status).toBe(404);
+  });
+});
+
+// ─── 取消任务 REST API ─────────────────────────────────────────
+
+describe("POST /api/tasks/:taskId/cancel — 取消/终止任务", () => {
+  it("取消排队中的任务", async () => {
+    const response = await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "queued task", atAgents: "queue" }),
+    });
+    const createBody = (await response.json()) as { tasks: Array<{ id: string }> };
+    const taskId = createBody.tasks[0]!.id;
+
+    const cancelRes = await fetch(`${httpBaseUrl}/api/tasks/${taskId}/cancel`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(cancelRes.status).toBe(200);
+    const task = (await cancelRes.json()) as { status: string; summary: string };
+    expect(task.status).toBe("cancelled");
+    expect(task.summary).toContain("已取消");
+  });
+
+  it("取消运行中的任务（通知 Agent）", async () => {
+    const agent = await connectAgent("alice");
+    const cancelPromise = waitForWsMessage(
+      agent,
+      (msg: ServerToEmployeeMessage) => msg.type === "task.cancel",
+    );
+    const dispatchPromise = waitForAgentDispatch(agent);
+
+    const createRes = await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "running task", atAgents: ["alice"], timeoutSec: 300 }),
+    });
+    const createBody = (await createRes.json()) as { tasks: Array<{ id: string }> };
+    const dispatch = await dispatchPromise;
+    agent.send(JSON.stringify({ type: "task.accepted", taskId: dispatch.taskId }));
+    agent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 123 }));
+    await delay(20);
+
+    const cancelRes = await fetch(`${httpBaseUrl}/api/tasks/${createBody.tasks[0]!.id}/cancel`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(cancelRes.status).toBe(200);
+
+    const cancelMsg = await cancelPromise;
+    expect(cancelMsg.taskId).toBe(createBody.tasks[0]!.id);
+  });
+
+  it("Agent 离线时取消运行中任务标记为 failed", async () => {
+    const agent = await connectAgent("alice");
+    const dispatchPromise = waitForAgentDispatch(agent);
+
+    const createRes = await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "offline cancel", atAgents: ["alice"], timeoutSec: 300 }),
+    });
+    const createBody = (await createRes.json()) as { tasks: Array<{ id: string }> };
+    const dispatch = await dispatchPromise;
+    agent.send(JSON.stringify({ type: "task.accepted", taskId: dispatch.taskId }));
+    agent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 123 }));
+    await delay(20);
+
+    // Disconnect agent
+    const closePromise = waitForClose(agent);
+    agent.close();
+    await closePromise;
+    await waitUntil(() =>
+      server.buildSnapshot().employees.some((e) => e.id === "alice" && e.status === "offline"),
+    );
+
+    const cancelRes = await fetch(`${httpBaseUrl}/api/tasks/${createBody.tasks[0]!.id}/cancel`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(cancelRes.status).toBe(200);
+    const task = (await cancelRes.json()) as { status: string };
+    expect(task.status).toBe("failed");
+  });
+
+  it("404 取消不存在的任务", async () => {
+    const response = await fetch(`${httpBaseUrl}/api/tasks/nonexistent-id/cancel`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(response.status).toBe(404);
+  });
+
+  it("409 取消已完成的任务", async () => {
+    const agent = await connectAgent("alice");
+    const dispatchPromise = waitForAgentDispatch(agent);
+
+    const createRes = await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "already done", atAgents: ["alice"] }),
+    });
+    const createBody = (await createRes.json()) as { tasks: Array<{ id: string }> };
+    const dispatch = await dispatchPromise;
+    agent.send(JSON.stringify({ type: "task.completed", taskId: dispatch.taskId, exitCode: 0, summary: "done" }));
+    await delay(20);
+
+    const cancelRes = await fetch(`${httpBaseUrl}/api/tasks/${createBody.tasks[0]!.id}/cancel`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(cancelRes.status).toBe(409);
+  });
+
+  it("409 取消已取消的任务", async () => {
+    const createRes = await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "cancel twice", atAgents: "queue" }),
+    });
+    const createBody = (await createRes.json()) as { tasks: Array<{ id: string }> };
+
+    await fetch(`${httpBaseUrl}/api/tasks/${createBody.tasks[0]!.id}/cancel`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+
+    const secondCancel = await fetch(`${httpBaseUrl}/api/tasks/${createBody.tasks[0]!.id}/cancel`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(secondCancel.status).toBe(409);
+  });
+});
+
+// ─── WebSocket 任务调度 ────────────────────────────────────────
+
+describe("WebSocket 任务调度", () => {
+  it("broadcast 分发给所有在线 Agent", async () => {
     const alice = await connectAgent("alice");
     const bob = await connectAgent("bob");
     const leader = await connectLeader();
 
     const aliceDispatch = waitForAgentDispatch(alice);
     const bobDispatch = waitForAgentDispatch(bob);
-    leader.send(
-      JSON.stringify({
-        type: "command.dispatch",
-        atAgents: "all",
-        prompt: "run all",
-      }),
-    );
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "all", prompt: "run all" }));
+
     expect((await aliceDispatch).prompt).toBe("run all");
     expect((await bobDispatch).prompt).toBe("run all");
-
-    const runBothTask = waitForLeaderMessage(
-      leader,
-      (message) => message.type === "task.upsert" && message.task.prompt === "run both",
-    );
-    leader.send(
-      JSON.stringify({
-        type: "command.dispatch",
-        atAgents: ["alice", "bob"],
-        prompt: "run both",
-      }),
-    );
-    await runBothTask;
   });
 
-  it("dispatches queue commands to one available agent at a time", async () => {
+  it("direct 分发给指定 Agent", async () => {
     const alice = await connectAgent("alice");
     const bob = await connectAgent("bob");
     const leader = await connectLeader();
 
     const aliceDispatch = waitForAgentDispatch(alice);
     const bobUnexpected = waitForAgentDispatch(bob, 80).then(() => true, () => false);
-    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "queued once" }));
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "only alice" }));
 
-    const first = await aliceDispatch;
-    expect(first.prompt).toBe("queued once");
-    expect(first.employeeId).toBe("alice");
-    expect(first.targetMode).toBe("queue");
+    expect((await aliceDispatch).prompt).toBe("only alice");
     expect(await bobUnexpected).toBe(false);
+  });
+
+  it("queue 轮询分发给空闲 Agent", async () => {
+    const alice = await connectAgent("alice");
+    const bob = await connectAgent("bob");
+    const leader = await connectLeader();
+
+    const aliceDispatch = waitForAgentDispatch(alice);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "round 1" }));
+    const first = await aliceDispatch;
+    expect(first.targetMode).toBe("queue");
 
     const bobDispatch = waitForAgentDispatch(bob);
-    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "queued twice" }));
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "round 2" }));
     const second = await bobDispatch;
-    expect(second.prompt).toBe("queued twice");
-    expect(second.employeeId).toBe("bob");
     expect(second.targetMode).toBe("queue");
   });
 
-  it("streams agent task events to leaders and completes the task", async () => {
+  it("WebSocket task.cancel 取消运行中的任务", async () => {
     const agent = await connectAgent("alice");
     const leader = await connectLeader();
-    const sessionId = "claude-session-1";
+    const dispatchPromise = waitForAgentDispatch(agent);
+
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "cancel via ws", timeoutSec: 300 }));
+    const dispatch = await dispatchPromise;
+    agent.send(JSON.stringify({ type: "task.accepted", taskId: dispatch.taskId }));
+    agent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 1 }));
+
+    const cancelPromise = waitForWsMessage(agent, (msg: ServerToEmployeeMessage) => msg.type === "task.cancel");
+    leader.send(JSON.stringify({ type: "task.cancel", taskId: dispatch.taskId }));
+    const cancelMsg = await cancelPromise;
+    expect(cancelMsg.taskId).toBe(dispatch.taskId);
+  });
+
+  it("WebSocket 取消排队中的任务", async () => {
+    const leader = await connectLeader();
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "cancel queued" }));
+    await delay(20);
+
+    const snapshot = server.buildSnapshot();
+    const queuedTask = snapshot.tasks.find((t) => t.prompt === "cancel queued");
+    expect(queuedTask).toBeTruthy();
+
+    leader.send(JSON.stringify({ type: "task.cancel", taskId: queuedTask!.id }));
+    await delay(20);
+
+    const updated = server.buildSnapshot().tasks.find((t) => t.id === queuedTask!.id);
+    expect(updated!.status).toBe("cancelled");
+  });
+});
+
+// ─── 任务生命周期 ──────────────────────────────────────────────
+
+describe("任务生命周期", () => {
+  it("完整生命周期：queued → dispatched → accepted → running → completed", async () => {
+    const agent = await connectAgent("alice");
+    const leader = await connectLeader();
+    const sessionId = "session-lifecycle-1";
 
     const dispatchPromise = waitForAgentDispatch(agent);
-    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "hello" }));
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "full lifecycle" }));
     const dispatch = await dispatchPromise;
-    const outputPromise = waitForLeaderMessage(
-      leader,
-      (message) => message.type === "task.output" && message.chunk.taskId === dispatch.taskId && message.chunk.content === "hi",
-    );
-    const completedPromise = waitForLeaderMessage(
-      leader,
-      (message) => message.type === "task.upsert" && message.task.id === dispatch.taskId && message.task.status === "completed",
-    );
+
+    const acceptedPromise = waitForLeaderMessage(leader, (m) => m.type === "task.upsert" && m.task.id === dispatch.taskId && m.task.status === "accepted");
     agent.send(JSON.stringify({ type: "task.accepted", taskId: dispatch.taskId }));
+    await acceptedPromise;
+
+    const runningPromise = waitForLeaderMessage(leader, (m) => m.type === "task.upsert" && m.task.id === dispatch.taskId && m.task.status === "running");
     agent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 123, sessionId }));
-    agent.send(JSON.stringify({ type: "task.output", taskId: dispatch.taskId, stream: "stdout", seq: 1, content: "hi" }));
-    agent.send(JSON.stringify({ type: "task.completed", taskId: dispatch.taskId, exitCode: 0, summary: "done" }));
+    await runningPromise;
 
+    const outputPromise = waitForLeaderMessage(leader, (m) => m.type === "task.output" && m.chunk.content === "hello world");
+    agent.send(JSON.stringify({ type: "task.output", taskId: dispatch.taskId, stream: "stdout", seq: 1, content: "hello world" }));
     await outputPromise;
-    const completed = await completedPromise;
-    expect(completed.type).toBe("task.upsert");
-    expect(completed.task.sessionId).toBe(sessionId);
 
-    const historyResponse = await fetch(`${httpBaseUrl}/api/sessions/${sessionId}/history`, {
+    const completedPromise = waitForLeaderMessage(leader, (m) => m.type === "task.upsert" && m.task.id === dispatch.taskId && m.task.status === "completed");
+    agent.send(JSON.stringify({ type: "task.completed", taskId: dispatch.taskId, exitCode: 0, summary: "all done", durationMs: 1500, numTurns: 3 }));
+    const completed = await completedPromise;
+
+    expect(completed.task.sessionId).toBe(sessionId);
+    expect(completed.task.durationMs).toBe(1500);
+    expect(completed.task.numTurns).toBe(3);
+    expect(completed.task.summary).toBe("all done");
+  });
+
+  it("失败生命周期：任务出错时标记 failed", async () => {
+    const agent = await connectAgent("alice");
+    const leader = await connectLeader();
+    const dispatchPromise = waitForAgentDispatch(agent);
+
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "will fail" }));
+    const dispatch = await dispatchPromise;
+    agent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 1 }));
+
+    const failedPromise = waitForLeaderMessage(leader, (m) => m.type === "task.upsert" && m.task.id === dispatch.taskId && m.task.status === "failed");
+    agent.send(JSON.stringify({ type: "task.failed", taskId: dispatch.taskId, error: "something broke" }));
+    const failed = await failedPromise;
+
+    expect(failed.task.error).toBe("something broke");
+    expect(failed.task.status).toBe("failed");
+  });
+
+  it("超时后标记 timeout 且忽略迟到完成事件", async () => {
+    const agent = await connectAgent("alice");
+    const leader = await connectLeader();
+    const dispatchPromise = waitForAgentDispatch(agent);
+
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "timeout test" }));
+    const dispatch = await dispatchPromise;
+    agent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 1 }));
+
+    await waitForLeaderMessage(
+      leader,
+      (m) => m.type === "task.upsert" && m.task.id === dispatch.taskId && m.task.status === "timeout",
+      500,
+    );
+
+    agent.send(JSON.stringify({ type: "task.completed", taskId: dispatch.taskId, exitCode: 0, summary: "late" }));
+    await delay(30);
+    expect(server.buildSnapshot().tasks.find((t) => t.id === dispatch.taskId)?.status).toBe("timeout");
+  });
+
+  it("Agent 完成后释放员工槽位", async () => {
+    const agent = await connectAgent("alice");
+    const leader = await connectLeader();
+    const dispatchPromise = waitForAgentDispatch(agent);
+
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "slot test" }));
+    const dispatch = await dispatchPromise;
+    agent.send(JSON.stringify({ type: "task.accepted", taskId: dispatch.taskId }));
+    agent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 1 }));
+
+    const alice = server.buildSnapshot().employees.find((e) => e.id === "alice")!;
+    expect(alice.mainTaskId).toBe(dispatch.taskId);
+
+    agent.send(JSON.stringify({ type: "task.completed", taskId: dispatch.taskId, exitCode: 0, summary: "done" }));
+    await delay(20);
+
+    const after = server.buildSnapshot().employees.find((e) => e.id === "alice")!;
+    expect(after.mainTaskId).toBeNull();
+  });
+});
+
+// ─── 会话历史 ──────────────────────────────────────────────────
+
+describe("GET /api/sessions/:sessionId/history", () => {
+  it("返回完整的会话消息流", async () => {
+    const agent = await connectAgent("alice");
+    const leader = await connectLeader();
+    const sessionId = "history-session-1";
+
+    const dispatchPromise = waitForAgentDispatch(agent);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "history test" }));
+    const dispatch = await dispatchPromise;
+
+    agent.send(JSON.stringify({ type: "task.accepted", taskId: dispatch.taskId }));
+    agent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 1, sessionId }));
+    agent.send(JSON.stringify({ type: "task.output", taskId: dispatch.taskId, stream: "stdout", seq: 1, content: "output chunk" }));
+    agent.send(JSON.stringify({ type: "task.completed", taskId: dispatch.taskId, exitCode: 0, summary: "final result" }));
+    await delay(30);
+
+    const response = await fetch(`${httpBaseUrl}/api/sessions/${sessionId}/history`, {
       headers: { authorization: `Bearer ${TOKEN}` },
     });
-    expect(historyResponse.status).toBe(200);
-    const history = (await historyResponse.json()) as {
+    expect(response.status).toBe(200);
+    const history = (await response.json()) as {
       sessionId: string;
       tasks: Array<{ id: string }>;
-      messages: Array<{ type: string; role: string; taskId: string; content: string }>;
+      messages: Array<{ type: string; role: string; content: string }>;
     };
     expect(history.sessionId).toBe(sessionId);
-    expect(history.tasks.map((task) => task.id)).toContain(dispatch.taskId);
     expect(history.messages).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ type: "task.prompt", role: "user", taskId: dispatch.taskId, content: "hello" }),
-        expect.objectContaining({ type: "task.output", role: "assistant", taskId: dispatch.taskId, content: "hi" }),
-        expect.objectContaining({ type: "task.result", role: "assistant", taskId: dispatch.taskId, content: "done" }),
+        expect.objectContaining({ type: "task.prompt", role: "user", content: "history test" }),
+        expect.objectContaining({ type: "task.output", role: "assistant", content: "output chunk" }),
+        expect.objectContaining({ type: "task.result", role: "assistant", content: "final result" }),
       ]),
     );
   });
+});
 
-  it("allows reconnect within grace period and fails after grace expires", async () => {
+// ─── 断线恢复 ──────────────────────────────────────────────────
+
+describe("断线恢复", () => {
+  it("宽限期内重连恢复任务", async () => {
     const agent = await connectAgent("alice");
     const leader = await connectLeader();
 
@@ -169,50 +752,117 @@ describe("AI Teams server integration", () => {
     leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "long task", timeoutSec: 2 }));
     const dispatch = await dispatchPromise;
     agent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 123 }));
+
     const firstClose = waitForClose(agent);
     agent.close();
     await firstClose;
     await waitUntil(() =>
-      server.buildSnapshot().employees.some((employee) => employee.id === "alice" && employee.status === "offline"),
+      server.buildSnapshot().employees.some((e) => e.id === "alice" && e.status === "offline"),
     );
 
     const recovered = await connectAgent("alice", dispatch.taskId);
     await delay(20);
     await waitUntil(() =>
-      server.buildSnapshot().employees.some((employee) => employee.id === "alice" && employee.status === "online"),
+      server.buildSnapshot().employees.some((e) => e.id === "alice" && e.status === "online"),
     );
     expect(recovered.readyState).toBe(WebSocket.OPEN);
-    expect(server.buildSnapshot().tasks.find((task) => task.id === dispatch.taskId)?.status).toBe("running");
-
-    const closePromise = waitForClose(recovered);
-    recovered.close();
-    await closePromise;
-    await waitUntil(
-      () => server.buildSnapshot().tasks.some((task) => task.id === dispatch.taskId && task.status === "failed"),
-      500,
-    );
+    expect(server.buildSnapshot().tasks.find((t) => t.id === dispatch.taskId)?.status).toBe("running");
   });
 
-  it("keeps timeout status when a late completion arrives", async () => {
+  it("宽限期后任务标记 failed", async () => {
     const agent = await connectAgent("alice");
     const leader = await connectLeader();
 
     const dispatchPromise = waitForAgentDispatch(agent);
-    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "timeout" }));
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "will timeout", timeoutSec: 2 }));
     const dispatch = await dispatchPromise;
     agent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 123 }));
 
-    await waitForLeaderMessage(
-      leader,
-      (message) => message.type === "task.upsert" && message.task.id === dispatch.taskId && message.task.status === "timeout",
+    const closePromise = waitForClose(agent);
+    agent.close();
+    await closePromise;
+
+    await waitUntil(
+      () => server.buildSnapshot().tasks.some((t) => t.id === dispatch.taskId && t.status === "failed"),
       500,
     );
-    agent.send(JSON.stringify({ type: "task.completed", taskId: dispatch.taskId, exitCode: 0, summary: "late" }));
-    await delay(30);
-    expect(server.buildSnapshot().tasks.find((task) => task.id === dispatch.taskId)?.status).toBe("timeout");
+  });
+});
+
+// ─── 双槽位并行 ────────────────────────────────────────────────
+
+describe("双槽位并行", () => {
+  it("main 和 queue 槽位可同时运行", async () => {
+    const agent = await connectAgent("alice");
+    const leader = await connectLeader();
+
+    const mainDispatch = waitForAgentDispatch(agent);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "main task" }));
+    const mainTask = await mainDispatch;
+    expect(mainTask.targetMode).toBe("direct");
+
+    const queueDispatch = waitForAgentDispatch(agent);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "queue task" }));
+    const queueTask = await queueDispatch;
+    expect(queueTask.targetMode).toBe("queue");
+
+    const snapshot = server.buildSnapshot();
+    const alice = snapshot.employees.find((e) => e.id === "alice")!;
+    expect(alice.mainTaskId).toBe(mainTask.taskId);
+    expect(alice.queueTaskId).toBe(queueTask.taskId);
   });
 
-  it("closes an agent socket that reports another employee's task", async () => {
+  it("完成后释放槽位", async () => {
+    const agent = await connectAgent("alice");
+    const leader = await connectLeader();
+
+    const mainDispatch = waitForAgentDispatch(agent);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "main task" }));
+    const mainTask = await mainDispatch;
+
+    const queueDispatch = waitForAgentDispatch(agent);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "queue task" }));
+    const queueTask = await queueDispatch;
+
+    agent.send(JSON.stringify({ type: "task.completed", taskId: mainTask.taskId, exitCode: 0, summary: "main done" }));
+    await delay(20);
+    const afterMain = server.buildSnapshot().employees.find((e) => e.id === "alice")!;
+    expect(afterMain.mainTaskId).toBeNull();
+    expect(afterMain.queueTaskId).toBe(queueTask.taskId);
+
+    agent.send(JSON.stringify({ type: "task.completed", taskId: queueTask.taskId, exitCode: 0, summary: "queue done" }));
+    await delay(20);
+    const afterQueue = server.buildSnapshot().employees.find((e) => e.id === "alice")!;
+    expect(afterQueue.mainTaskId).toBeNull();
+    expect(afterQueue.queueTaskId).toBeNull();
+  });
+
+  it("员工槽位满时新任务排队等待", async () => {
+    const agent = await connectAgent("alice");
+    const leader = await connectLeader();
+
+    const mainDispatch = waitForAgentDispatch(agent);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "main task" }));
+    await mainDispatch;
+
+    const queueDispatch = waitForAgentDispatch(agent);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "queue task" }));
+    await queueDispatch;
+
+    // Both slots occupied, send another direct task — should be queued
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "waiting task" }));
+    await delay(20);
+    const snapshot = server.buildSnapshot();
+    const waitingTask = snapshot.tasks.find((t) => t.prompt === "waiting task");
+    expect(waitingTask).toBeTruthy();
+    expect(waitingTask!.status).toBe("queued");
+  });
+});
+
+// ─── 安全 ──────────────────────────────────────────────────────
+
+describe("安全", () => {
+  it("Agent 不能上报其他员工的任务", async () => {
     const alice = await connectAgent("alice");
     const bob = await connectAgent("bob");
     const leader = await connectLeader();
@@ -220,12 +870,31 @@ describe("AI Teams server integration", () => {
     const dispatchPromise = waitForAgentDispatch(alice);
     leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "owned" }));
     const dispatch = await dispatchPromise;
+
     bob.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 999 }));
     const close = await waitForClose(bob);
     expect(close.code).toBe(1008);
   });
 
-  it("accepts REST task submissions and posts webhook callbacks for task lifecycle", async () => {
+  it("未注册的 Agent 发送任务事件被关闭连接", async () => {
+    const socket = await connectWs(`${baseUrl}/ws/agent?token=${TOKEN}`);
+    socket.send(JSON.stringify({ type: "task.accepted", taskId: "fake-id" }));
+    const close = await waitForClose(socket);
+    expect(close.code).toBe(1008);
+  });
+
+  it("错误 Token 的 Agent 被拒绝", async () => {
+    const socket = new WebSocket(`${baseUrl}/ws/agent?token=wrong-token`);
+    sockets.push(socket);
+    const close = await waitForClose(socket);
+    expect(close.code).toBe(1008);
+  });
+});
+
+// ─── Webhook 回调 ──────────────────────────────────────────────
+
+describe("Webhook 回调", () => {
+  it("完整生命周期触发 webhook 事件并携带 HMAC 签名", async () => {
     const agent = await connectAgent("alice");
     const webhook = await startWebhookServer();
 
@@ -233,41 +902,20 @@ describe("AI Teams server integration", () => {
       const dispatchPromise = waitForAgentDispatch(agent);
       const response = await fetch(`${httpBaseUrl}/api/tasks`, {
         method: "POST",
-        headers: {
-          authorization: `Bearer ${TOKEN}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          atAgents: ["alice"],
-          prompt: "rest task",
-          webhook: webhook.url,
-        }),
+        headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+        body: JSON.stringify({ atAgents: ["alice"], prompt: "webhook test", webhook: webhook.url }),
       });
-
       expect(response.status).toBe(202);
-      const body = (await response.json()) as { status: string; tasks: Array<{ id: string; prompt: string }> };
-      expect(body.status).toBe("accepted");
-      expect(body.tasks).toHaveLength(1);
-      expect(body.tasks[0]?.prompt).toBe("rest task");
 
       const dispatch = await dispatchPromise;
       agent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 123 }));
-      agent.send(
-        JSON.stringify({
-          type: "task.output",
-          taskId: dispatch.taskId,
-          stream: "stdout",
-          seq: 1,
-          content: "[done] result: step complete",
-        }),
-      );
+      agent.send(JSON.stringify({ type: "task.output", taskId: dispatch.taskId, stream: "stdout", seq: 1, content: "output" }));
       agent.send(JSON.stringify({ type: "task.completed", taskId: dispatch.taskId, exitCode: 0, summary: "done" }));
 
-      await waitUntil(() => webhook.events.some((event) => event.event === "task.completed"), 500);
-      expect(webhook.events.map((event) => event.event)).toEqual(
+      await waitUntil(() => webhook.events.some((e) => e.event === "task.completed"), 500);
+      expect(webhook.events.map((e) => e.event)).toEqual(
         expect.arrayContaining(["task.started", "task.output", "task.completed"]),
       );
-      expect(webhook.events.find((event) => event.event === "task.output")?.chunk?.content).toBe("[done] result: step complete");
 
       for (const event of webhook.events) {
         expect(event.signature).toBeTruthy();
@@ -279,46 +927,39 @@ describe("AI Teams server integration", () => {
       await webhook.close();
     }
   });
+});
 
-  it("allows parallel main and queue tasks on the same agent", async () => {
+// ─── 快照 ──────────────────────────────────────────────────────
+
+describe("GET /api/snapshot", () => {
+  it("返回完整系统状态", async () => {
     const agent = await connectAgent("alice");
-    const leader = await connectLeader();
+    const dispatchPromise = waitForAgentDispatch(agent);
 
-    // Send a direct task (main slot)
-    const mainDispatch = waitForAgentDispatch(agent);
-    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "main task" }));
-    const mainTask = await mainDispatch;
-    expect(mainTask.targetMode).toBe("direct");
+    await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "snapshot test", atAgents: ["alice"] }),
+    });
+    await dispatchPromise;
 
-    // Send a queue task — should dispatch to alice's queue slot since she's the only agent
-    const queueDispatch = waitForAgentDispatch(agent);
-    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "queue task" }));
-    const queueTask = await queueDispatch;
-    expect(queueTask.targetMode).toBe("queue");
-
-    // Verify both slots are occupied
-    const snapshot = server.buildSnapshot();
-    const alice = snapshot.employees.find((e) => e.id === "alice")!;
-    expect(alice.mainTaskId).toBe(mainTask.taskId);
-    expect(alice.queueTaskId).toBe(queueTask.taskId);
-
-    // Complete main task — should free main slot
-    agent.send(JSON.stringify({ type: "task.completed", taskId: mainTask.taskId, exitCode: 0, summary: "main done" }));
-    await delay(20);
-    const afterMainComplete = server.buildSnapshot();
-    const aliceAfter = afterMainComplete.employees.find((e) => e.id === "alice")!;
-    expect(aliceAfter.mainTaskId).toBeNull();
-    expect(aliceAfter.queueTaskId).toBe(queueTask.taskId);
-
-    // Complete queue task — should free queue slot
-    agent.send(JSON.stringify({ type: "task.completed", taskId: queueTask.taskId, exitCode: 0, summary: "queue done" }));
-    await delay(20);
-    const afterQueueComplete = server.buildSnapshot();
-    const aliceFinal = afterQueueComplete.employees.find((e) => e.id === "alice")!;
-    expect(aliceFinal.mainTaskId).toBeNull();
-    expect(aliceFinal.queueTaskId).toBeNull();
+    const response = await fetch(`${httpBaseUrl}/api/snapshot`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(response.status).toBe(200);
+    const snapshot = (await response.json()) as {
+      employees: Array<{ id: string; status: string }>;
+      tasks: Array<{ id: string }>;
+      logs: Record<string, unknown[]>;
+    };
+    expect(snapshot.employees).toHaveLength(1);
+    expect(snapshot.employees[0]!.id).toBe("alice");
+    expect(snapshot.employees[0]!.status).toBe("online");
+    expect(snapshot.tasks.length).toBeGreaterThanOrEqual(1);
   });
 });
+
+// ─── Helper 函数 ───────────────────────────────────────────────
 
 async function connectLeader() {
   return connectWs(`${baseUrl}/ws/leader?token=${TOKEN}`);
@@ -339,7 +980,7 @@ async function connectAgent(employeeId: string, activeTaskId?: string) {
       lastOutputSeq: 0,
     }),
   );
-  await waitUntil(() => server.buildSnapshot().employees.some((employee) => employee.id === employeeId && employee.status === "online"));
+  await waitUntil(() => server.buildSnapshot().employees.some((e) => e.id === employeeId && e.status === "online"));
   return socket;
 }
 

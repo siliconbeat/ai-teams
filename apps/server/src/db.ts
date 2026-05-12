@@ -1,7 +1,7 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import pg from "pg";
 import type { EmployeeSnapshot, TaskOutputChunk, TaskRecord, TaskCliConfig } from "@ai-teams/shared";
-import WebSocket from "ws";
+import type { StateStore } from "./state-store.js";
 
 // ---------------------------------------------------------------------------
 // Database abstraction
@@ -94,25 +94,8 @@ export async function createDatabaseFromEnv(env: NodeJS.ProcessEnv): Promise<Dat
   return new SqliteDatabase(db);
 }
 
-// ---------------------------------------------------------------------------
-// Server state
-// ---------------------------------------------------------------------------
-
-export type ServerState = {
-  agentSockets: Map<string, WebSocket>;
-  leaderSockets: Set<WebSocket>;
-  employees: Map<string, EmployeeSnapshot>;
-  tasks: Map<string, TaskRecord>;
-  taskLogs: Map<string, TaskOutputChunk[]>;
-  taskWebhooks: Map<string, string>;
-  socketToEmployeeId: WeakMap<WebSocket, string>;
-  taskTimeouts: Map<string, NodeJS.Timeout>;
-  disconnectTimers: Map<string, NodeJS.Timeout>;
-  taskQueues: Map<string, string[]>;
-  mainTaskQueues: Map<string, string[]>;
-  sharedTaskQueue: string[];
-  sharedQueueCursor: number;
-};
+// Re-export StateStore for convenience
+export type { StateStore } from "./state-store.js";
 
 // ---------------------------------------------------------------------------
 // Table creation (PostgreSQL-compatible, also works with SQLite)
@@ -199,7 +182,7 @@ export async function initDb(db: Database) {
 // Hydrate state from database
 // ---------------------------------------------------------------------------
 
-export async function hydrateState(db: Database, state: ServerState, defaultTimeoutSec: number, maxLogChunksPerTask: number) {
+export async function hydrateState(db: Database, state: StateStore, defaultTimeoutSec: number, maxLogChunksPerTask: number) {
   const employeeRows = await db.all<{ payload_json: string }>("SELECT payload_json FROM employees");
   for (const row of employeeRows) {
     const employee = JSON.parse(row.payload_json) as EmployeeSnapshot;
