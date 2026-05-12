@@ -769,7 +769,7 @@ describe("断线恢复", () => {
     expect(server.buildSnapshot().tasks.find((t) => t.id === dispatch.taskId)?.status).toBe("running");
   });
 
-  it("宽限期后任务标记 failed", async () => {
+  it("断线后任务继续运行直到超时", async () => {
     const agent = await connectAgent("alice");
     const leader = await connectLeader();
 
@@ -782,9 +782,21 @@ describe("断线恢复", () => {
     agent.close();
     await closePromise;
 
+    // Wait for server to process the disconnect
     await waitUntil(
-      () => server.buildSnapshot().tasks.some((t) => t.id === dispatch.taskId && t.status === "failed"),
+      () => server.buildSnapshot().employees.find((e) => e.id === "alice")?.status === "offline",
       500,
+    );
+
+    // After disconnect, task should still be running (not failed)
+    const snapshotAfterDisconnect = server.buildSnapshot();
+    const taskAfterDisconnect = snapshotAfterDisconnect.tasks.find((t) => t.id === dispatch.taskId);
+    expect(taskAfterDisconnect?.status).toBe("running");
+
+    // Task should only fail after its actual timeout (2s)
+    await waitUntil(
+      () => server.buildSnapshot().tasks.some((t) => t.id === dispatch.taskId && t.status === "timeout"),
+      3000,
     );
   });
 });

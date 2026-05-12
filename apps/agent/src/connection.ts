@@ -1,6 +1,9 @@
+import crypto from "node:crypto";
 import os from "node:os";
 import WebSocket from "ws";
 import {
+  isEncryptedEnvelope,
+  parseEncryptionKey,
   parseJsonMessage,
   parseServerToEmployeeMessage,
   type EmployeeToServerMessage,
@@ -16,6 +19,42 @@ import {
   MAX_BUFFERED_MESSAGES,
   type ActiveTask,
 } from "./config.js";
+
+// ---------------------------------------------------------------------------
+// Encryption helper
+// ---------------------------------------------------------------------------
+
+const ALGORITHM = "aes-256-gcm";
+const IV_LENGTH = 12;
+const TAG_LENGTH = 16;
+const encryptionKeyHex = process.env.AI_TEAMS_ENCRYPTION_KEY;
+const encryptionKey = encryptionKeyHex ? parseEncryptionKey(encryptionKeyHex) : null;
+
+function encrypt(plainText: string): string {
+  if (!encryptionKey) return plainText;
+  const iv = crypto.randomBytes(IV_LENGTH);
+  const cipher = crypto.createCipheriv(ALGORITHM, encryptionKey, iv, { authTagLength: TAG_LENGTH });
+  const encrypted = Buffer.concat([cipher.update(plainText, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return JSON.stringify({
+    encrypted: true,
+    iv: iv.toString("base64"),
+    ciphertext: encrypted.toString("base64"),
+    tag: tag.toString("base64"),
+  });
+}
+
+function decrypt(raw: string): string {
+  if (!encryptionKey) return raw;
+  const parsed = JSON.parse(raw) as unknown;
+  if (!isEncryptedEnvelope(parsed)) return raw;
+  const iv = Buffer.from(parsed.iv, "base64");
+  const ciphertext = Buffer.from(parsed.ciphertext, "base64");
+  const tag = Buffer.from(parsed.tag, "base64");
+  const decipher = crypto.createDecipheriv(ALGORITHM, encryptionKey, iv, { authTagLength: TAG_LENGTH });
+  decipher.setAuthTag(tag);
+  return decipher.update(ciphertext) + decipher.final("utf8");
+}
 
 export type ConnectionState = {
   socket: WebSocket | null;
@@ -36,7 +75,7 @@ function isTaskMessage(payload: EmployeeToServerMessage) {
 
 export function send(state: ConnectionState, payload: EmployeeToServerMessage) {
   if (state.socket && state.socket.readyState === WebSocket.OPEN) {
-    state.socket.send(JSON.stringify(payload));
+    state.socket.send(encrypt(JSON.stringify(payload)));
     return;
   }
   if (isTaskMessage(payload)) {
@@ -54,7 +93,7 @@ export function flushBufferedMessages(state: ConnectionState) {
   const messages = state.bufferedMessages;
   state.bufferedMessages = [];
   for (const message of messages) {
-    state.socket.send(JSON.stringify(message));
+    state.socket.send(encrypt(JSON.stringify(message)));
   }
 }
 
@@ -122,7 +161,8 @@ export function connect(
 
   state.socket.on("message", (raw: Buffer) => {
     try {
-      const message = parseServerToEmployeeMessage(parseJsonMessage(raw.toString()));
+      const decrypted = decrypt(raw.toString());
+      const message = parseServerToEmployeeMessage(parseJsonMessage(decrypted));
       onMessage(message);
     } catch (error) {
       console.error(`[agent:${EMPLOYEE_ID}] invalid server message`, error);

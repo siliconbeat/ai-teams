@@ -48,6 +48,8 @@ export interface TaskRecord {
   workspace: string | null;
   timeoutSec: number;
   cliConfig: TaskCliConfig | null;
+  priority: number;
+  requiredLabels: string[] | null;
   status: TaskStatus;
   createdAt: string;
   startedAt: string | null;
@@ -135,6 +137,8 @@ export type LeaderToServerMessage =
       prompt: string;
       workspace?: string;
       timeoutSec?: number;
+      priority?: number;
+      requiredLabels?: string[];
     }
   | {
       type: "command.send";
@@ -535,4 +539,33 @@ function optionalCliConfigField(record: Record<string, unknown>, key: string): T
     throw new ProtocolError(`${key} must be an object or null.`);
   }
   return value as TaskCliConfig;
+}
+
+// ---------------------------------------------------------------------------
+// E2E Encryption (AES-256-GCM)
+// ---------------------------------------------------------------------------
+
+export interface EncryptedEnvelope {
+  encrypted: true;
+  iv: string;
+  ciphertext: string;
+  tag: string;
+}
+
+export function isEncryptedEnvelope(value: unknown): value is EncryptedEnvelope {
+  return (
+    typeof value === "object" && value !== null &&
+    (value as Record<string, unknown>).encrypted === true &&
+    typeof (value as Record<string, unknown>).iv === "string" &&
+    typeof (value as Record<string, unknown>).ciphertext === "string" &&
+    typeof (value as Record<string, unknown>).tag === "string"
+  );
+}
+
+export function parseEncryptionKey(hex: string): Buffer {
+  const key = Buffer.from(hex, "hex");
+  if (key.length !== 32) {
+    throw new Error("AI_TEAMS_ENCRYPTION_KEY must be 32 bytes (64 hex characters).");
+  }
+  return key;
 }

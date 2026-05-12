@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  isEncryptedEnvelope,
   parseJsonMessage,
   parseServerToLeaderMessage,
   resolveAtAgentsFromPrompt,
@@ -11,6 +12,53 @@ import {
   TaskRecord,
   TaskStatus,
 } from "@ai-teams/shared";
+
+// ---------------------------------------------------------------------------
+// Web Crypto E2E decryption (AES-256-GCM)
+// ---------------------------------------------------------------------------
+
+// @ts-expect-error Vite injects import.meta.env at build time
+const ENCRYPTION_KEY_HEX: string | undefined = import.meta.env?.VITE_AI_TEAMS_ENCRYPTION_KEY as string | undefined;
+
+async function webCryptoDecrypt(raw: string): Promise<string> {
+  if (!ENCRYPTION_KEY_HEX) return raw;
+  const parsed = JSON.parse(raw) as unknown;
+  if (!isEncryptedEnvelope(parsed)) return raw;
+  const keyBytes = new Uint8Array(
+    Array.from({ length: 32 }, (_, i) => parseInt(ENCRYPTION_KEY_HEX.slice(i * 2, i * 2 + 2), 16)),
+  );
+  const iv = Uint8Array.from(atob(parsed.iv), (c) => c.charCodeAt(0));
+  const ciphertext = Uint8Array.from(atob(parsed.ciphertext), (c) => c.charCodeAt(0));
+  const tag = Uint8Array.from(atob(parsed.tag), (c) => c.charCodeAt(0));
+  const key = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["decrypt"]);
+  const combined = new Uint8Array(ciphertext.length + tag.length);
+  combined.set(ciphertext, 0);
+  combined.set(tag, ciphertext.length);
+  const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv, tagLength: 128 }, key, combined);
+  return new TextDecoder().decode(decrypted);
+}
+
+function webCryptoEncrypt(plainText: string): Promise<string> {
+  if (!ENCRYPTION_KEY_HEX) return Promise.resolve(plainText);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const keyBytes = new Uint8Array(
+    Array.from({ length: 32 }, (_, i) => parseInt(ENCRYPTION_KEY_HEX.slice(i * 2, i * 2 + 2), 16)),
+  );
+  return crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["encrypt"]).then((key) =>
+    crypto.subtle.encrypt({ name: "AES-GCM", iv, tagLength: 128 }, key, new TextEncoder().encode(plainText))
+      .then((encrypted) => {
+        const encryptedBytes = new Uint8Array(encrypted);
+        const ciphertext = encryptedBytes.slice(0, encryptedBytes.length - 16);
+        const tag = encryptedBytes.slice(encryptedBytes.length - 16);
+        return JSON.stringify({
+          encrypted: true,
+          iv: btoa(String.fromCharCode(...iv)),
+          ciphertext: btoa(String.fromCharCode(...ciphertext)),
+          tag: btoa(String.fromCharCode(...tag)),
+        });
+      })
+  );
+}
 
 type CommandDraft = {
   prompt: string;
@@ -43,7 +91,7 @@ type EmployeeTerminalLog = {
   seenFinishedTaskIds: string[];
 };
 
-type ActivePage = "monitor" | "tasks";
+type ActivePage = "monitor" | "tasks" | "employees" | "errors" | "stats";
 
 const TASK_FILTERS: Array<TaskStatus | "all"> = ["all", "running", "failed", "completed", "cancelled"];
 const TOKEN_STORAGE_KEY = "ai-teams.auth-token";
@@ -118,6 +166,7 @@ export default function App() {
   const [history, setHistory] = useState<CommandHistoryItem[]>([]);
   const [activePage, setActivePage] = useState<ActivePage>("monitor");
   const [taskFilter, setTaskFilter] = useState<TaskStatus | "all">("all");
+  const [taskDisplayLimit, setTaskDisplayLimit] = useState(30);
   const [selectedTarget, setSelectedTarget] = useState<AgentTarget>("queue");
   const [draft, setDraft] = useState<CommandDraft>({
     prompt: "",
@@ -171,10 +220,12 @@ export default function App() {
         setShowReconnect(true);
       };
 
-      ws.onmessage = (event) => {
+      ws.onmessage = async (event) => {
         if (disposed) return;
         try {
-          const message = parseServerToLeaderMessage(parseJsonMessage(event.data));
+          const raw = typeof event.data === "string" ? event.data : await (event.data as Blob).text();
+          const decrypted = await webCryptoDecrypt(raw);
+          const message = parseServerToLeaderMessage(parseJsonMessage(decrypted));
           handleLeaderEvent(message);
         } catch (error) {
           setConnectionError(error instanceof Error ? error.message : "服务端消息格式错误。");
@@ -283,12 +334,17 @@ export default function App() {
     return map;
   }, [activeTasksByEmployee, employeeList, latestTasksByEmployee]);
 
-  const taskList = useMemo(() => {
+  const taskListAll = useMemo(() => {
     return Object.values(tasks)
       .filter((task) => taskFilter === "all" || task.status === taskFilter)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .slice(0, 30);
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }, [taskFilter, tasks]);
+
+  const taskList = useMemo(() => {
+    return taskListAll.slice(0, taskDisplayLimit);
+  }, [taskListAll, taskDisplayLimit]);
+
+  const taskHasMore = taskListAll.length > taskDisplayLimit;
 
   const chatFeed = useMemo<ChatFeedItem[]>(() => {
     // Group tasks by leaderCommandId to deduplicate broadcast commands
@@ -452,7 +508,9 @@ export default function App() {
       workspace: draft.workspace.trim() || undefined,
     };
 
-    wsRef.current.send(JSON.stringify(payload));
+    webCryptoEncrypt(JSON.stringify(payload)).then((encrypted) => {
+      wsRef.current?.send(encrypted);
+    });
     setHistory((current) => [
       ...current,
       {
@@ -472,7 +530,9 @@ export default function App() {
       return;
     }
     const payload: LeaderToServerMessage = { type: "task.cancel", taskId };
-    wsRef.current.send(JSON.stringify(payload));
+    webCryptoEncrypt(JSON.stringify(payload)).then((encrypted) => {
+      wsRef.current?.send(encrypted);
+    });
   }
 
   useEffect(() => {
@@ -639,15 +699,30 @@ export default function App() {
           >
             监控台
           </button>
-          <button className="nav-item">员工管理</button>
+          <button
+            className={`nav-item ${activePage === "employees" ? "active" : ""}`}
+            onClick={() => setActivePage("employees")}
+          >
+            员工管理
+          </button>
           <button
             className={`nav-item ${activePage === "tasks" ? "active" : ""}`}
             onClick={() => setActivePage("tasks")}
           >
             任务日志
           </button>
-          <button className="nav-item">异常记录</button>
-          <button className="nav-item">统计分析</button>
+          <button
+            className={`nav-item ${activePage === "errors" ? "active" : ""}`}
+            onClick={() => setActivePage("errors")}
+          >
+            异常记录
+          </button>
+          <button
+            className={`nav-item ${activePage === "stats" ? "active" : ""}`}
+            onClick={() => setActivePage("stats")}
+          >
+            统计分析
+          </button>
         </nav>
         <button className="secondary-button mobile-logout" onClick={clearToken}>
           ⏻
@@ -769,7 +844,7 @@ export default function App() {
       </div>
 
       <div className="workspace-panel">
-        {activePage === "monitor" ? (
+        {activePage === "monitor" && (
           <main className="board">
             <header className="board-header">
               <div>
@@ -856,7 +931,8 @@ export default function App() {
               )}
             </section>
           </main>
-        ) : (
+        )}
+        {activePage === "tasks" && (
           <main className="task-log-page">
             <section className="task-log-panel">
               <div className="section-title-row">
@@ -869,7 +945,7 @@ export default function App() {
                     <button
                       className={`filter-chip ${taskFilter === filter ? "active" : ""}`}
                       key={filter}
-                      onClick={() => setTaskFilter(filter)}
+                      onClick={() => { setTaskFilter(filter); setTaskDisplayLimit(30); }}
                     >
                       {filter}
                     </button>
@@ -895,9 +971,167 @@ export default function App() {
                   ))
                 )}
               </div>
+              {taskHasMore && (
+                <button
+                  className="primary-button"
+                  style={{ marginTop: "10px" }}
+                  onClick={() => setTaskDisplayLimit((n) => n + 30)}
+                >
+                  加载更多（剩余 {taskListAll.length - taskDisplayLimit} 条）
+                </button>
+              )}
             </section>
           </main>
         )}
+        {activePage === "employees" && (
+          <main className="task-log-page">
+            <section className="task-log-panel">
+              <div className="section-title-row">
+                <div>
+                  <h1>员工管理</h1>
+                  <p>所有已注册的 AI 员工及其状态。</p>
+                </div>
+              </div>
+              <div className="task-table">
+                {employeeList.length === 0 ? (
+                  <div className="history-empty">暂无员工注册。</div>
+                ) : (
+                  employeeList.map((emp) => {
+                    const empTasks = Object.values(tasks).filter((t) => t.employeeId === emp.id);
+                    const completed = empTasks.filter((t) => t.status === "completed").length;
+                    const failed = empTasks.filter((t) => ["failed", "timeout", "cancelled"].includes(t.status)).length;
+                    return (
+                      <div className="task-row" key={emp.id} style={{ gap: 12 }}>
+                        <div className="task-row__main">
+                          <strong>{emp.name} <small style={{ color: "#888" }}>({emp.id})</small></strong>
+                          <p>主机: {emp.hostname} | 标签: {emp.labels.length > 0 ? emp.labels.join(", ") : "无"}</p>
+                          <p>完成: {completed} | 失败: {failed} | 总任务: {empTasks.length}</p>
+                        </div>
+                        <div className="task-row__side">
+                          <span className={`status-pill ${emp.status}`}>{emp.status}</span>
+                          <small>{new Date(emp.lastSeenAt).toLocaleTimeString()}</small>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </section>
+          </main>
+        )}
+        {activePage === "errors" && (() => {
+          const errorTasks = Object.values(tasks).filter(
+            (t) => ["failed", "timeout", "cancelled"].includes(t.status),
+          );
+          return (
+            <main className="task-log-page">
+              <section className="task-log-panel">
+                <div className="section-title-row">
+                  <div>
+                    <h1>异常记录</h1>
+                    <p>失败、超时和取消的任务。</p>
+                  </div>
+                </div>
+                <div className="task-table">
+                  {errorTasks.length === 0 ? (
+                    <div className="history-empty">暂无异常任务。</div>
+                  ) : (
+                    errorTasks.map((task) => (
+                      <div className={`task-row task-${task.status}`} key={task.id} style={{ gap: 12 }}>
+                        <div className="task-row__main">
+                          <strong>{task.employeeId ? employees[task.employeeId]?.name ?? task.employeeId : "任务队列"}</strong>
+                          <p>{task.prompt}</p>
+                          {task.error ? <span className="error-text">{task.error}</span> : null}
+                          {task.durationMs != null && <small>耗时: {(task.durationMs / 1000).toFixed(1)}s</small>}
+                        </div>
+                        <div className="task-row__side">
+                          <span className={`status-pill ${task.status}`}>{task.status}</span>
+                          <small>{new Date(task.createdAt).toLocaleTimeString()}</small>
+                          <button
+                            className="secondary-button"
+                            style={{ marginTop: 4, fontSize: 12 }}
+                            onClick={() => {
+                              setDraft((d) => ({ ...d, prompt: task.prompt }));
+                              setSelectedTarget(task.employeeId ? [task.employeeId] : "queue");
+                            }}
+                          >
+                            重试
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </section>
+            </main>
+          );
+        })()}
+        {activePage === "stats" && (() => {
+          const allTasks = Object.values(tasks);
+          const total = allTasks.length;
+          const completed = allTasks.filter((t) => t.status === "completed").length;
+          const failed = allTasks.filter((t) => ["failed", "timeout", "cancelled"].includes(t.status)).length;
+          const running = allTasks.filter((t) => t.status === "running").length;
+          const totalCost = allTasks.reduce((sum, t) => sum + (t.totalCostUsd ?? 0), 0);
+          const totalDurationMs = allTasks.filter((t) => t.durationMs != null).reduce((sum, t) => sum + (t.durationMs ?? 0), 0);
+          const avgDuration = completed > 0 ? totalDurationMs / completed : 0;
+          return (
+            <main className="task-log-page">
+              <section className="task-log-panel">
+                <div className="section-title-row">
+                  <div>
+                    <h1>统计分析</h1>
+                    <p>任务执行概览。</p>
+                  </div>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 12, marginBottom: 16 }}>
+                  {[
+                    { label: "总任务", value: total, color: "#6366f1" },
+                    { label: "已完成", value: completed, color: "#22c55e" },
+                    { label: "失败/超时", value: failed, color: "#ef4444" },
+                    { label: "执行中", value: running, color: "#f59e0b" },
+                    { label: "总费用", value: `$${totalCost.toFixed(4)}`, color: "#8b5cf6" },
+                    { label: "平均耗时", value: avgDuration > 0 ? `${(avgDuration / 1000).toFixed(1)}s` : "-", color: "#06b6d4" },
+                  ].map((card) => (
+                    <div key={card.label} style={{ background: "#1e1e2e", borderRadius: 8, padding: 16, textAlign: "center" }}>
+                      <div style={{ fontSize: 24, fontWeight: 700, color: card.color }}>{card.value}</div>
+                      <div style={{ fontSize: 12, color: "#888", marginTop: 4 }}>{card.label}</div>
+                    </div>
+                  ))}
+                </div>
+                <div className="section-title-row" style={{ marginTop: 16 }}>
+                  <div><h3>各 Agent 统计</h3></div>
+                </div>
+                <div className="task-table">
+                  {employeeList.length === 0 ? (
+                    <div className="history-empty">暂无员工。</div>
+                  ) : (
+                    employeeList.map((emp) => {
+                      const empTasks = allTasks.filter((t) => t.employeeId === emp.id);
+                      const empCompleted = empTasks.filter((t) => t.status === "completed").length;
+                      const empFailed = empTasks.filter((t) => ["failed", "timeout", "cancelled"].includes(t.status)).length;
+                      const empCost = empTasks.reduce((s, t) => s + (t.totalCostUsd ?? 0), 0);
+                      const empAvgMs = empCompleted > 0
+                        ? empTasks.filter((t) => t.durationMs != null).reduce((s, t) => s + (t.durationMs ?? 0), 0) / empCompleted
+                        : 0;
+                      return (
+                        <div className="task-row" key={emp.id} style={{ gap: 12 }}>
+                          <div className="task-row__main">
+                            <strong>{emp.name}</strong>
+                            <p>完成: {empCompleted} | 失败: {empFailed} | 费用: ${empCost.toFixed(4)} | 平均耗时: {empAvgMs > 0 ? `${(empAvgMs / 1000).toFixed(1)}s` : "-"}</p>
+                          </div>
+                          <div className="task-row__side">
+                            <span className={`status-pill ${emp.status}`}>{emp.status}</span>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </section>
+            </main>
+          );
+        })()}
       </div>
 
       <aside className="command-panel">

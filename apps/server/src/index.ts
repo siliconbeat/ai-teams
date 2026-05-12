@@ -20,6 +20,7 @@ import { type RestTaskRequest, errorResponseSchema, snapshotSchema, sessionHisto
 import { createDispatch, nowIso, sendJson } from "./dispatch.js";
 import type { DispatchContext } from "./dispatch.js";
 import { createInMemoryStateStore } from "./state-store.js";
+import { createEncryptor } from "./crypto.js";
 
 const DEFAULT_PORT = 3789;
 
@@ -127,6 +128,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     defaultTimeoutSec,
     maxLogChunksPerTask,
     disconnectGraceMs,
+    encryptor: createEncryptor(process.env.AI_TEAMS_ENCRYPTION_KEY),
   };
   const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage, cancelTaskById } = createDispatch(dispatchCtx);
 
@@ -389,8 +391,8 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     },
     async (request, reply) => {
       try {
-        const { command, webhookUrl, cliConfig } = parseRestTaskRequest(request.body);
-        const result = dispatchLeaderCommand(command, webhookUrl, cliConfig);
+        const { command, webhookUrl, cliConfig, priority, requiredLabels } = parseRestTaskRequest(request.body);
+        const result = dispatchLeaderCommand(command, webhookUrl, cliConfig, priority, requiredLabels);
         if (!result.ok) {
           return reply.code(400).send({
             status: "rejected",
@@ -578,7 +580,8 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
 
     socket.on("message", (raw: WebSocket.RawData) => {
       try {
-        const message = parseEmployeeToServerMessage(parseJsonMessage(raw.toString()));
+        const decrypted = dispatchCtx.encryptor!.decrypt(raw.toString());
+        const message = parseEmployeeToServerMessage(parseJsonMessage(decrypted));
         handleAgentMessage(message, socket);
       } catch (error) {
         app.log.error({ error }, "Failed to parse agent message");
@@ -596,12 +599,17 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
       }
       state.agentSockets.delete(employeeId);
       state.socketToEmployeeId.delete(socket);
+      const heartbeatTimer = state.heartbeatTimers.get(employeeId);
+      if (heartbeatTimer) {
+        clearTimeout(heartbeatTimer);
+        state.heartbeatTimers.delete(employeeId);
+      }
       const employee = state.employees.get(employeeId);
       if (employee) {
         employee.status = "offline";
         employee.lastSeenAt = nowIso();
         for (const leaderSocket of state.leaderSockets) {
-          sendJson(leaderSocket, { type: "employee.upsert", employee });
+          sendJson(leaderSocket, { type: "employee.upsert", employee }, dispatchCtx.encryptor);
         }
         // Don't fail tasks on disconnect — agent may still be running locally.
         // Tasks will only stop via timeout or agent reporting back on reconnect.
@@ -616,12 +624,13 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
       return;
     }
     state.leaderSockets.add(socket);
-    sendJson<ServerToLeaderMessage>(socket, { type: "snapshot", snapshot: buildSnapshot() });
+    sendJson<ServerToLeaderMessage>(socket, { type: "snapshot", snapshot: buildSnapshot() }, dispatchCtx.encryptor);
     app.log.info("Leader connected");
 
     socket.on("message", (raw: WebSocket.RawData) => {
       try {
-        const message = parseLeaderToServerMessage(parseJsonMessage(raw.toString()));
+        const decrypted = dispatchCtx.encryptor!.decrypt(raw.toString());
+        const message = parseLeaderToServerMessage(parseJsonMessage(decrypted));
         handleLeaderMessage(message, socket);
       } catch (error) {
         app.log.error({ error }, "Failed to parse leader message");
@@ -629,7 +638,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
           type: "command.error",
           code: "invalid_message",
           message: error instanceof Error ? error.message : "Invalid leader message.",
-        });
+        }, dispatchCtx.encryptor);
       }
     });
 
@@ -648,6 +657,9 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
         clearTimeout(timer);
       }
       for (const timer of state.disconnectTimers.values()) {
+        clearTimeout(timer);
+      }
+      for (const timer of state.heartbeatTimers.values()) {
         clearTimeout(timer);
       }
       await app.close();

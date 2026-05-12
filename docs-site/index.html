@@ -1,0 +1,878 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Teams — 多 Agent 协作平台</title>
+<meta name="description" content="AI Teams 是一个多 AI Agent 协作调度平台，支持任务分发、负载均衡、实时监控和端到端加密。">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>">
+<link href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet">
+<style>
+:root {
+  --bg: #0f0f17;
+  --bg-card: #1a1a2e;
+  --bg-code: #16162a;
+  --bg-sidebar: #12121e;
+  --border: #2a2a44;
+  --text: #e0e0ef;
+  --text-muted: #8888aa;
+  --accent: #6366f1;
+  --accent-light: #818cf8;
+  --green: #22c55e;
+  --red: #ef4444;
+  --amber: #f59e0b;
+  --cyan: #06b6d4;
+  --purple: #8b5cf6;
+  --sidebar-w: 260px;
+  --topbar-h: 56px;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; scroll-padding-top: 72px; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent-light); text-decoration: none; }
+a:hover { text-decoration: underline; }
+h1, h2, h3, h4 { color: #fff; line-height: 1.3; }
+h2 { font-size: 1.6rem; margin: 2.5rem 0 1rem; padding-bottom: .5rem; border-bottom: 1px solid var(--border); }
+h3 { font-size: 1.25rem; margin: 1.5rem 0 .75rem; }
+code { font-family: "SF Mono", "Fira Code", "JetBrains Mono", monospace; font-size: .9em; }
+:not(pre) > code { background: var(--bg-code); padding: 2px 6px; border-radius: 4px; color: var(--accent-light); }
+pre { border-radius: 8px; margin: 1rem 0; }
+pre code { font-size: .85rem; line-height: 1.5; }
+table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: .9rem; }
+th, td { text-align: left; padding: 10px 14px; border: 1px solid var(--border); }
+th { background: var(--bg-code); color: var(--accent-light); font-weight: 600; white-space: nowrap; }
+td { background: var(--bg-card); }
+td code { background: none; padding: 0; }
+
+/* ─── Sidebar ─── */
+.sidebar {
+  position: fixed; top: 0; left: 0; bottom: 0;
+  width: var(--sidebar-w);
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border);
+  overflow-y: auto; z-index: 100;
+  transition: transform .3s;
+}
+.sidebar-brand {
+  padding: 20px 20px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 12px;
+}
+.sidebar-brand .logo {
+  width: 36px; height: 36px; border-radius: 10px;
+  background: linear-gradient(135deg, var(--accent), var(--purple));
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 800; font-size: 14px; color: #fff; flex-shrink: 0;
+}
+.sidebar-brand h1 { font-size: 1rem; margin: 0; }
+.sidebar-brand p { font-size: .75rem; color: var(--text-muted); margin: 0; }
+.sidebar nav { padding: 12px 0; }
+.sidebar nav a {
+  display: block; padding: 8px 20px; color: var(--text-muted);
+  font-size: .88rem; transition: all .15s; border-left: 3px solid transparent;
+}
+.sidebar nav a:hover { color: var(--text); background: rgba(99,102,241,.08); text-decoration: none; }
+.sidebar nav a.active { color: var(--accent-light); border-left-color: var(--accent); background: rgba(99,102,241,.1); }
+.sidebar nav .nav-section { padding: 16px 20px 4px; font-size: .7rem; text-transform: uppercase; letter-spacing: .1em; color: var(--text-muted); opacity: .6; }
+
+/* ─── Mobile toggle ─── */
+.menu-toggle {
+  display: none; position: fixed; top: 12px; left: 12px; z-index: 200;
+  width: 36px; height: 36px; border-radius: 8px;
+  background: var(--bg-card); border: 1px solid var(--border);
+  color: var(--text); cursor: pointer; font-size: 18px;
+  align-items: center; justify-content: center;
+}
+
+/* ─── Main content ─── */
+.main { margin-left: var(--sidebar-w); min-height: 100vh; }
+.content { max-width: 900px; margin: 0 auto; padding: 40px 32px 80px; }
+.content p { margin: .6rem 0; }
+.content ul, .content ol { margin: .5rem 0 .5rem 1.5rem; }
+.content li { margin: .3rem 0; }
+
+/* ─── Hero ─── */
+.hero {
+  text-align: center; padding: 80px 20px 60px;
+  background: linear-gradient(180deg, rgba(99,102,241,.12) 0%, transparent 100%);
+  border-bottom: 1px solid var(--border);
+}
+.hero h1 { font-size: 2.8rem; background: linear-gradient(135deg, #fff, var(--accent-light)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.hero .tagline { font-size: 1.2rem; color: var(--text-muted); margin: 12px 0 32px; }
+.hero .badges { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+.badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 20px; font-size: .82rem; font-weight: 500; border: 1px solid var(--border); background: var(--bg-card); }
+
+/* ─── Cards ─── */
+.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; margin: 1.5rem 0; }
+.card {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;
+  padding: 20px; transition: border-color .2s;
+}
+.card:hover { border-color: var(--accent); }
+.card h4 { margin-bottom: 8px; font-size: 1rem; }
+.card p { font-size: .88rem; color: var(--text-muted); margin: 0; }
+.card .card-icon { font-size: 1.5rem; margin-bottom: 8px; }
+
+/* ─── Endpoint blocks ─── */
+.endpoint { margin: 2rem 0; }
+.endpoint-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.method {
+  padding: 4px 10px; border-radius: 4px; font-size: .75rem; font-weight: 700;
+  font-family: monospace; text-transform: uppercase;
+}
+.method.get { background: rgba(34,197,94,.15); color: var(--green); }
+.method.post { background: rgba(99,102,241,.15); color: var(--accent-light); }
+.method.patch { background: rgba(245,158,11,.15); color: var(--amber); }
+.method.delete { background: rgba(239,68,68,.15); color: var(--red); }
+.endpoint-path { font-family: monospace; font-size: .95rem; color: #fff; }
+.endpoint-desc { color: var(--text-muted); font-size: .88rem; margin-bottom: 10px; }
+
+/* ─── Status pills ─── */
+.status-pill { display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: .75rem; font-weight: 600; }
+
+/* ─── Lifecycle diagram ─── */
+.lifecycle {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px;
+  margin: 1rem 0; padding: 16px; background: var(--bg-card); border-radius: 10px;
+  font-family: monospace; font-size: .85rem;
+}
+.lifecycle .state {
+  padding: 6px 12px; border-radius: 6px; background: rgba(99,102,241,.15);
+  color: var(--accent-light); white-space: nowrap;
+}
+.lifecycle .state.terminal { background: rgba(239,68,68,.12); color: var(--red); }
+.lifecycle .arrow { color: var(--text-muted); }
+
+/* ─── Arch diagram ─── */
+.arch-diagram {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;
+  padding: 24px; margin: 1.5rem 0; text-align: center; font-family: monospace; font-size: .82rem; line-height: 1.6;
+  overflow-x: auto;
+}
+
+/* ─── Note / Tip blocks ─── */
+.note {
+  padding: 16px 20px; border-radius: 8px; margin: 1rem 0;
+  border-left: 4px solid var(--accent); background: rgba(99,102,241,.08);
+}
+.note.tip { border-left-color: var(--green); background: rgba(34,197,94,.06); }
+.note.warn { border-left-color: var(--amber); background: rgba(245,158,11,.06); }
+.note p { margin: .2rem 0; font-size: .9rem; }
+.note strong { color: #fff; }
+
+/* ─── Env table ─── */
+.env-section { margin: 1.5rem 0; }
+.env-section h3 code { background: none; color: var(--cyan); }
+
+/* ─── Footer ─── */
+.footer {
+  text-align: center; padding: 32px 20px; border-top: 1px solid var(--border);
+  color: var(--text-muted); font-size: .82rem;
+}
+
+/* ─── Responsive ─── */
+@media (max-width: 860px) {
+  .sidebar { transform: translateX(-100%); }
+  .sidebar.open { transform: translateX(0); }
+  .menu-toggle { display: flex; }
+  .main { margin-left: 0; }
+  .content { padding: 24px 16px 60px; }
+  .hero h1 { font-size: 2rem; }
+  .card-grid { grid-template-columns: 1fr; }
+  .lifecycle { font-size: .75rem; }
+  .endpoint-header { flex-wrap: wrap; }
+}
+</style>
+</head>
+<body>
+
+<!-- Mobile menu toggle -->
+<button class="menu-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle menu">☰</button>
+
+<!-- Sidebar -->
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-brand">
+    <div class="logo">AI</div>
+    <div>
+      <h1>AI Teams</h1>
+      <p>多 Agent 协作平台</p>
+    </div>
+  </div>
+  <nav>
+    <div class="nav-section">概览</div>
+    <a href="#hero">首页</a>
+    <a href="#quick-start">快速开始</a>
+    <a href="#architecture">架构概览</a>
+    <div class="nav-section">部署</div>
+    <a href="#deployment">部署指南</a>
+    <a href="#env-server">环境变量</a>
+    <div class="nav-section">接口文档</div>
+    <a href="#rest-api">REST API</a>
+    <a href="#websocket">WebSocket 协议</a>
+    <a href="#data-schemas">数据模型</a>
+    <div class="nav-section">使用</div>
+    <a href="#agent-guide">Agent 使用</a>
+    <a href="#web-console">Web 控制台</a>
+    <a href="#advanced">高级功能</a>
+  </nav>
+</aside>
+
+<!-- Main content -->
+<div class="main">
+
+  <!-- Hero -->
+  <section class="hero" id="hero">
+    <h1>AI Teams</h1>
+    <p class="tagline">人类 Leader 指挥多 AI Agent 协作的开源调度平台</p>
+    <div class="badges">
+      <span class="badge">TypeScript</span>
+      <span class="badge">Fastify + WebSocket</span>
+      <span class="badge">React</span>
+      <span class="badge">Claude CLI</span>
+      <span class="badge">E2E 加密</span>
+    </div>
+  </section>
+
+  <div class="content">
+
+    <p>AI Teams 是一个三方协作系统：<strong>人类 Leader</strong> 通过 Web 控制台或 REST API 向 <strong>Server</strong> 提交任务，Server 将任务智能调度给多个 <strong>AI Agent</strong>（运行 Claude CLI）执行。支持任务队列、负载均衡、标签路由、优先级调度、端到端加密和实时监控。</p>
+
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-icon">&#x1F680;</div>
+        <h4>智能调度</h4>
+        <p>优先级队列 + 标签匹配 + 最小负载优先，三种调度模式灵活适配。</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">&#x1F4CA;</div>
+        <h4>实时监控</h4>
+        <p>Web 控制台实时展示 Agent 状态、任务输出、统计分析，支持移动端。</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">&#x1F512;</div>
+        <h4>安全加密</h4>
+        <p>可选 AES-256-GCM 端到端加密，WebSocket 消息全链路保护。</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">&#x1F504;</div>
+        <h4>高可用</h4>
+        <p>Agent 自动重连、心跳检测、任务断线续跑、Webhook 回调。</p>
+      </div>
+    </div>
+
+    <!-- Quick Start -->
+    <h2 id="quick-start">快速开始</h2>
+
+    <h3>1. 安装依赖</h3>
+    <p>需要 <strong>Node.js &ge; 22</strong> 和 <strong>pnpm &ge; 9</strong>。</p>
+    <pre><code class="language-bash">git clone &lt;your-repo&gt; ai-teams
+cd ai-teams
+pnpm install</code></pre>
+
+    <h3>2. 一键启动（开发模式）</h3>
+    <pre><code class="language-bash">pnpm dev:all</code></pre>
+    <p>这将同时启动 Server（:3789）、Agent Alice 和 Web 控制台（:5173），使用 <code>dev-token</code> 自动认证。</p>
+    <div class="note tip">
+      <p><strong>提示：</strong>开发模式下 Agent 需要 <code>claude</code> CLI 已安装且登录。如无 Claude CLI，可使用 <code>RUNNER_MODE=fake</code> 模拟。</p>
+    </div>
+
+    <h3>3. 访问控制台</h3>
+    <p>浏览器打开 <code>http://localhost:5173</code>，输入 token <code>dev-token</code> 即可进入。</p>
+
+    <!-- Architecture -->
+    <h2 id="architecture">架构概览</h2>
+
+    <div class="arch-diagram">
+<pre>
+  ┌──────────────┐     WebSocket      ┌──────────────┐     WebSocket     ┌──────────────┐
+  │   Web 控制台   │ ◄──────────────► │    Server     │ ◄─────────────► │  Agent (N)   │
+  │  (Leader)     │    /ws/leader     │   Fastify     │    /ws/agent    │  Claude CLI  │
+  │  React SPA    │                   │  SQLite / PG  │                 │  Heartbeat   │
+  └──────────────┘                    └──────┬───────┘                 └──────────────┘
+        │                                    │
+        │         REST API (/api/*)          │
+        └────────────────────────────────────┘
+</pre>
+    </div>
+
+    <h3>核心组件</h3>
+    <table>
+      <tr><th>组件</th><th>技术栈</th><th>职责</th></tr>
+      <tr><td><strong>Server</strong></td><td>Fastify 5 + WebSocket + SQLite/PostgreSQL</td><td>中央调度枢纽：任务队列、Agent 管理、持久化、API 网关</td></tr>
+      <tr><td><strong>Agent</strong></td><td>Node.js + WebSocket</td><td>连接 Server、接收任务、启动 <code>claude -p</code> 子进程执行</td></tr>
+      <tr><td><strong>Web</strong></td><td>React 19 + Vite</td><td>Leader 控制台：监控、命令分发、日志查看、统计分析</td></tr>
+      <tr><td><strong>Shared</strong></td><td>TypeScript</td><td>共享协议类型、消息解析、加密工具</td></tr>
+    </table>
+
+    <h3>任务生命周期</h3>
+    <div class="lifecycle">
+      <span class="state">queued</span><span class="arrow">&rarr;</span>
+      <span class="state">dispatched</span><span class="arrow">&rarr;</span>
+      <span class="state">accepted</span><span class="arrow">&rarr;</span>
+      <span class="state">running</span><span class="arrow">&rarr;</span>
+      <span class="state terminal">completed</span>
+      <span class="state terminal">failed</span>
+      <span class="state terminal">cancelled</span>
+      <span class="state terminal">timeout</span>
+    </div>
+    <p>终态（completed / failed / cancelled / timeout）不可变更，后续事件将被忽略。</p>
+
+    <h3>调度模式</h3>
+    <table>
+      <tr><th>模式</th><th>参数</th><th>行为</th></tr>
+      <tr>
+        <td><strong>Queue</strong></td>
+        <td><code>atAgents: "queue"</code></td>
+        <td>进入共享优先级队列，按负载和标签匹配分发给空闲 Agent。每个队列任务使用独立 Claude 会话。</td>
+      </tr>
+      <tr>
+        <td><strong>Direct</strong></td>
+        <td><code>atAgents: ["alice"]</code></td>
+        <td>直接分发给指定 Agent，使用其持久化会话（支持 <code>--resume</code> 连续对话）。</td>
+      </tr>
+      <tr>
+        <td><strong>Broadcast</strong></td>
+        <td><code>atAgents: "all"</code></td>
+        <td>同时发送给所有在线 Agent，共享同一 <code>leaderCommandId</code>。</td>
+      </tr>
+    </table>
+
+    <!-- Deployment -->
+    <h2 id="deployment">部署指南</h2>
+
+    <h3>环境要求</h3>
+    <ul>
+      <li>Node.js &ge; 22（需要 <code>node:sqlite</code> 支持）</li>
+      <li>pnpm &ge; 9</li>
+      <li>Claude CLI（Agent 执行任务所需）</li>
+      <li>可选：PostgreSQL（替代 SQLite）</li>
+    </ul>
+
+    <h3>构建</h3>
+    <pre><code class="language-bash"># 构建顺序：shared → server → agent
+pnpm build
+
+# Web 独立构建
+cd apps/web && pnpm build</code></pre>
+
+    <h3>生产启动</h3>
+    <pre><code class="language-bash"># 设置认证 Token（必填）
+export AI_TEAMS_AUTH_TOKEN="your-secret-token"
+
+# 启动 Server
+pnpm start:server
+# 或指定参数
+node apps/server/dist/index.js --token "your-secret-token" --port 3789
+
+# 启动 Agent（另一个终端）
+AI_TEAMS_AUTH_TOKEN="your-secret-token" \
+EMPLOYEE_ID=alice \
+EMPLOYEE_NAME="Alice" \
+SERVER_URL=ws://localhost:3789 \
+pnpm start:agent:alice
+
+# 启动 Web 控制台
+pnpm start:web</code></pre>
+
+    <h3>一键全部启动</h3>
+    <pre><code class="language-bash">AI_TEAMS_AUTH_TOKEN="your-secret-token" pnpm start:all</code></pre>
+
+    <h3>Agent 交互式配置</h3>
+    <p>首次运行 Agent 会自动进入配置向导：</p>
+    <pre><code class="language-bash">node apps/agent/dist/index.js</code></pre>
+    <p>也可使用 <code>--config</code> 重新配置。配置保存在 <code>~/.ai-teams/config.json</code>。</p>
+
+    <!-- Environment Variables -->
+    <h2 id="env-server">环境变量</h2>
+
+    <div class="env-section">
+    <h3><code>Server</code></h3>
+    <table>
+      <tr><th>变量</th><th>默认值</th><th>说明</th></tr>
+      <tr><td><code>AI_TEAMS_AUTH_TOKEN</code></td><td><em>必填</em></td><td>共享认证 Token</td></tr>
+      <tr><td><code>AI_TEAMS_SERVER_PORT</code> / <code>PORT</code></td><td><code>3789</code></td><td>服务端口</td></tr>
+      <tr><td><code>HOST</code></td><td><code>0.0.0.0</code></td><td>绑定地址</td></tr>
+      <tr><td><code>DATA_DIR</code></td><td><code>./data</code></td><td>数据目录</td></tr>
+      <tr><td><code>DB_PATH</code></td><td><code>&lt;DATA_DIR&gt;/ai-teams.db</code></td><td>SQLite 数据库路径</td></tr>
+      <tr><td><code>DATABASE_URL</code></td><td>-</td><td>PostgreSQL 连接串（设置后使用 PG 替代 SQLite）</td></tr>
+      <tr><td><code>DEFAULT_TIMEOUT_SEC</code></td><td><code>1800</code></td><td>默认任务超时（秒）</td></tr>
+      <tr><td><code>DISCONNECT_GRACE_MS</code></td><td><code>15000</code></td><td>断线宽限期（ms）</td></tr>
+      <tr><td><code>MAX_LOG_CHUNKS_PER_TASK</code></td><td><code>400</code></td><td>每任务最大日志块数</td></tr>
+      <tr><td><code>LOG_LEVEL</code></td><td><code>info</code></td><td>日志级别：trace / debug / info / warn / error</td></tr>
+      <tr><td><code>LOG_DIR</code></td><td>-</td><td>日志文件目录（不设则仅 stdout）</td></tr>
+      <tr><td><code>AI_TEAMS_ENCRYPTION_KEY</code></td><td>-</td><td>E2E 加密密钥（64 位 hex = 32 字节）</td></tr>
+    </table>
+    </div>
+
+    <div class="env-section">
+    <h3><code>Agent</code></h3>
+    <table>
+      <tr><th>变量</th><th>默认值</th><th>说明</th></tr>
+      <tr><td><code>AI_TEAMS_AUTH_TOKEN</code></td><td><em>必填</em></td><td>认证 Token（需与 Server 一致）</td></tr>
+      <tr><td><code>SERVER_URL</code></td><td><code>ws://localhost:3789</code></td><td>Server WebSocket 地址</td></tr>
+      <tr><td><code>EMPLOYEE_ID</code></td><td><code>emp_local</code></td><td>Agent 唯一标识</td></tr>
+      <tr><td><code>EMPLOYEE_NAME</code></td><td><code>Local Agent</code></td><td>显示名称</td></tr>
+      <tr><td><code>EMPLOYEE_LABELS</code></td><td>-</td><td>逗号分隔的标签（如 <code>backend,python</code>）</td></tr>
+      <tr><td><code>RUNNER_MODE</code></td><td><code>claude</code></td><td>执行模式：<code>claude</code> 或 <code>fake</code></td></tr>
+      <tr><td><code>DEFAULT_WORKSPACE</code></td><td>当前目录</td><td>默认工作目录</td></tr>
+      <tr><td><code>RECONNECT_MS</code></td><td><code>5000</code></td><td>重连间隔（ms）</td></tr>
+      <tr><td><code>AI_TEAMS_ENCRYPTION_KEY</code></td><td>-</td><td>E2E 加密密钥（需与 Server 一致）</td></tr>
+    </table>
+    </div>
+
+    <div class="env-section">
+    <h3><code>Web</code></h3>
+    <table>
+      <tr><th>变量</th><th>默认值</th><th>说明</th></tr>
+      <tr><td><code>VITE_AI_TEAMS_AUTH_TOKEN</code></td><td>-</td><td>开发模式默认 Token</td></tr>
+      <tr><td><code>AI_TEAMS_SERVER_PORT</code></td><td><code>3789</code></td><td>Vite 代理目标端口</td></tr>
+      <tr><td><code>VITE_AI_TEAMS_ENCRYPTION_KEY</code></td><td>-</td><td>Web 端 E2E 加密密钥</td></tr>
+    </table>
+    </div>
+
+    <!-- REST API -->
+    <h2 id="rest-api">REST API</h2>
+    <p>所有 API 需要认证（<code>Authorization: Bearer &lt;token&gt;</code> 或 <code>?token=&lt;token&gt;</code>）。Swagger UI：<code>/docs</code>。</p>
+
+    <div class="endpoint">
+      <div class="endpoint-header">
+        <span class="method get">GET</span>
+        <span class="endpoint-path">/health</span>
+      </div>
+      <p class="endpoint-desc">健康检查，返回服务器状态摘要。</p>
+      <pre><code class="language-json">{
+  "status": "ok",
+  "timestamp": "2026-05-12T10:00:00.000Z",
+  "dbPath": "./data/ai-teams.db",
+  "employees": 2,
+  "leaders": 1,
+  "tasks": 42
+}</code></pre>
+    </div>
+
+    <div class="endpoint">
+      <div class="endpoint-header">
+        <span class="method get">GET</span>
+        <span class="endpoint-path">/api/snapshot</span>
+      </div>
+      <p class="endpoint-desc">获取完整状态快照（员工列表、所有任务、日志）。</p>
+      <pre><code class="language-json">{
+  "employees": [{ "id": "alice", "name": "Alice", "status": "online", ... }],
+  "tasks": [{ "id": "...", "prompt": "...", "status": "completed", ... }],
+  "logs": { "task-id": [{ "content": "...", "seq": 1 }] }
+}</code></pre>
+    </div>
+
+    <div class="endpoint">
+      <div class="endpoint-header">
+        <span class="method post">POST</span>
+        <span class="endpoint-path">/api/tasks</span>
+      </div>
+      <p class="endpoint-desc">提交任务。支持三种目标模式、优先级、标签筛选和 Webhook 回调。</p>
+      <h4>请求体</h4>
+      <pre><code class="language-json">{
+  "prompt": "分析这段代码的性能问题",
+  "atAgents": "queue",
+  "workspace": "/path/to/project",
+  "timeoutSec": 600,
+  "priority": 2,
+  "requiredLabels": ["backend"],
+  "cliConfig": {
+    "model": "claude-sonnet-4-6",
+    "maxTurns": 10,
+    "systemPrompt": "你是一个代码审查专家",
+    "allowedTools": ["Read", "Grep", "Bash"]
+  },
+  "webhook": "https://your-server.com/callback"
+}</code></pre>
+      <h4>响应 <code>202 Accepted</code></h4>
+      <pre><code class="language-json">{
+  "status": "accepted",
+  "leaderCommandId": "cmd_xxx",
+  "tasks": [{ "id": "task_xxx", "status": "queued", ... }]
+}</code></pre>
+    </div>
+
+    <div class="endpoint">
+      <div class="endpoint-header">
+        <span class="method get">GET</span>
+        <span class="endpoint-path">/api/tasks</span>
+      </div>
+      <p class="endpoint-desc">查询任务列表，支持分页和过滤。</p>
+      <h4>查询参数</h4>
+      <table>
+        <tr><th>参数</th><th>类型</th><th>说明</th></tr>
+        <tr><td><code>status</code></td><td>string</td><td>过滤状态：queued / dispatched / accepted / running / completed / failed / cancelled / timeout</td></tr>
+        <tr><td><code>employeeId</code></td><td>string</td><td>按 Agent ID 过滤</td></tr>
+        <tr><td><code>limit</code></td><td>number</td><td>每页数量（1-100，默认 50）</td></tr>
+        <tr><td><code>offset</code></td><td>number</td><td>偏移量（默认 0）</td></tr>
+      </table>
+      <pre><code class="language-json">{ "tasks": [...] }</code></pre>
+    </div>
+
+    <div class="endpoint">
+      <div class="endpoint-header">
+        <span class="method get">GET</span>
+        <span class="endpoint-path">/api/tasks/:taskId</span>
+      </div>
+      <p class="endpoint-desc">获取单个任务详情。</p>
+    </div>
+
+    <div class="endpoint">
+      <div class="endpoint-header">
+        <span class="method patch">PATCH</span>
+        <span class="endpoint-path">/api/tasks/:taskId</span>
+      </div>
+      <p class="endpoint-desc">更新任务。仅允许修改 <code>status</code>（设为 <code>cancelled</code>）、<code>timeoutSec</code>、<code>cliConfig</code>。</p>
+    </div>
+
+    <div class="endpoint">
+      <div class="endpoint-header">
+        <span class="method post">POST</span>
+        <span class="endpoint-path">/api/tasks/:taskId/cancel</span>
+      </div>
+      <p class="endpoint-desc">取消任务。运行中的任务会通知 Agent 终止 Claude 进程。</p>
+    </div>
+
+    <div class="endpoint">
+      <div class="endpoint-header">
+        <span class="method delete">DELETE</span>
+        <span class="endpoint-path">/api/tasks/:taskId</span>
+      </div>
+      <p class="endpoint-desc">删除任务。仅终态任务可删除（completed / failed / cancelled / timeout）。</p>
+    </div>
+
+    <div class="endpoint">
+      <div class="endpoint-header">
+        <span class="method get">GET</span>
+        <span class="endpoint-path">/api/sessions/:sessionId/history</span>
+      </div>
+      <p class="endpoint-desc">按 Session ID 获取对话历史（包含 prompt、输出、最终结果）。</p>
+    </div>
+
+    <div class="endpoint">
+      <div class="endpoint-header">
+        <span class="method get">GET</span>
+        <span class="endpoint-path">/api/employees/:employeeId/claude-sessions</span>
+      </div>
+      <p class="endpoint-desc">列出指定 Agent 工作区下的 Claude Code 会话列表。</p>
+    </div>
+
+    <!-- WebSocket -->
+    <h2 id="websocket">WebSocket 协议</h2>
+    <p>两个 WebSocket 通道均需要 Token 认证（Header 或 <code>?token=</code> 参数）。未授权连接将被关闭（code 1008）。</p>
+
+    <h3>/ws/agent — Agent 通道</h3>
+    <p>Agent 连接此通道，双向通信：接收任务、上报状态。</p>
+
+    <h4>Server → Agent 消息</h4>
+    <table>
+      <tr><th>类型</th><th>字段</th><th>说明</th></tr>
+      <tr><td><code>task.dispatch</code></td><td>taskId, leaderCommandId, employeeId, targetMode, prompt, workspace, timeoutSec, cliConfig</td><td>下发任务给 Agent</td></tr>
+      <tr><td><code>task.cancel</code></td><td>taskId</td><td>要求 Agent 取消任务</td></tr>
+    </table>
+
+    <h4>Agent → Server 消息</h4>
+    <table>
+      <tr><th>类型</th><th>字段</th><th>说明</th></tr>
+      <tr><td><code>agent.register</code></td><td>employeeId, name, machineId, hostname, labels, activeMainTaskId?, activeQueueTaskId?, lastOutputSeq?</td><td>注册 Agent（连接后立即发送）</td></tr>
+      <tr><td><code>agent.heartbeat</code></td><td>employeeId</td><td>心跳（每 10s）</td></tr>
+      <tr><td><code>agent.request_task</code></td><td>employeeId</td><td>请求分配队列任务</td></tr>
+      <tr><td><code>task.accepted</code></td><td>taskId</td><td>Agent 接受任务</td></tr>
+      <tr><td><code>task.started</code></td><td>taskId, pid, sessionId?</td><td>Claude 进程已启动</td></tr>
+      <tr><td><code>task.output</code></td><td>taskId, stream (stdout|stderr), seq, content</td><td>实时输出流</td></tr>
+      <tr><td><code>task.completed</code></td><td>taskId, exitCode, summary?, durationMs?, totalCostUsd?, usageInputTokens?, ...</td><td>任务完成</td></tr>
+      <tr><td><code>task.failed</code></td><td>taskId, error</td><td>任务失败</td></tr>
+      <tr><td><code>task.cancelled</code></td><td>taskId</td><td>任务已取消</td></tr>
+    </table>
+
+    <h3>/ws/leader — Leader 通道</h3>
+    <p>Web 控制台连接此通道。连接后 Server 立即推送完整 <code>snapshot</code>。</p>
+
+    <h4>Server → Leader 消息</h4>
+    <table>
+      <tr><th>类型</th><th>字段</th><th>说明</th></tr>
+      <tr><td><code>snapshot</code></td><td>snapshot (StateSnapshot)</td><td>完整状态快照（连接时推送）</td></tr>
+      <tr><td><code>employee.upsert</code></td><td>employee (EmployeeSnapshot)</td><td>Agent 状态变更</td></tr>
+      <tr><td><code>task.upsert</code></td><td>task (TaskRecord)</td><td>任务状态变更</td></tr>
+      <tr><td><code>task.output</code></td><td>chunk (TaskOutputChunk)</td><td>任务实时输出</td></tr>
+      <tr><td><code>server.error</code></td><td>code, message</td><td>服务端错误</td></tr>
+      <tr><td><code>command.error</code></td><td>code, message, leaderCommandId?</td><td>命令执行错误</td></tr>
+    </table>
+
+    <h4>Leader → Server 消息</h4>
+    <table>
+      <tr><th>类型</th><th>字段</th><th>说明</th></tr>
+      <tr><td><code>command.dispatch</code></td><td>atAgents, prompt, workspace?, timeoutSec?, priority?, requiredLabels?</td><td>通过 atAgents 调度任务</td></tr>
+      <tr><td><code>command.send</code></td><td>employeeId, prompt, workspace?, timeoutSec?</td><td>直接发送给指定 Agent</td></tr>
+      <tr><td><code>command.broadcast</code></td><td>prompt, workspace?, timeoutSec?</td><td>广播给所有 Agent</td></tr>
+      <tr><td><code>task.cancel</code></td><td>taskId</td><td>取消任务</td></tr>
+    </table>
+
+    <!-- Data Schemas -->
+    <h2 id="data-schemas">数据模型</h2>
+
+    <h3>TaskRecord</h3>
+    <table>
+      <tr><th>字段</th><th>类型</th><th>说明</th></tr>
+      <tr><td>id</td><td>string</td><td>任务 ID</td></tr>
+      <tr><td>leaderCommandId</td><td>string</td><td>命令批次 ID（同一命令产生的多个任务共享）</td></tr>
+      <tr><td>employeeId</td><td>string | null</td><td>分配的 Agent ID</td></tr>
+      <tr><td>sessionId</td><td>string | null</td><td>Claude 会话 ID</td></tr>
+      <tr><td>targetMode</td><td>"queue" | "direct" | "broadcast"</td><td>调度模式</td></tr>
+      <tr><td>prompt</td><td>string</td><td>任务指令</td></tr>
+      <tr><td>workspace</td><td>string | null</td><td>工作目录</td></tr>
+      <tr><td>timeoutSec</td><td>number</td><td>超时时间（秒）</td></tr>
+      <tr><td>cliConfig</td><td>TaskCliConfig | null</td><td>Claude CLI 配置</td></tr>
+      <tr><td>priority</td><td>number (0-3)</td><td>优先级（0=低, 1=普通, 2=高, 3=紧急）</td></tr>
+      <tr><td>requiredLabels</td><td>string[] | null</td><td>要求的 Agent 标签</td></tr>
+      <tr><td>status</td><td>TaskStatus</td><td>当前状态</td></tr>
+      <tr><td>createdAt / startedAt / finishedAt</td><td>string | null</td><td>时间戳（ISO 8601）</td></tr>
+      <tr><td>exitCode</td><td>number | null</td><td>退出码</td></tr>
+      <tr><td>summary</td><td>string | null</td><td>任务摘要</td></tr>
+      <tr><td>error</td><td>string | null</td><td>错误信息</td></tr>
+      <tr><td>durationMs / durationApiMs</td><td>number | null</td><td>耗时（ms）</td></tr>
+      <tr><td>numTurns</td><td>number | null</td><td>对话轮次</td></tr>
+      <tr><td>totalCostUsd</td><td>number | null</td><td>总费用（USD）</td></tr>
+      <tr><td>usageInputTokens / usageOutputTokens</td><td>number | null</td><td>Token 用量</td></tr>
+      <tr><td>usageCacheReadTokens / usageCacheCreationTokens</td><td>number | null</td><td>缓存 Token 用量</td></tr>
+    </table>
+
+    <h3>EmployeeSnapshot</h3>
+    <table>
+      <tr><th>字段</th><th>类型</th><th>说明</th></tr>
+      <tr><td>id</td><td>string</td><td>Agent 唯一标识</td></tr>
+      <tr><td>name</td><td>string</td><td>显示名称</td></tr>
+      <tr><td>machineId / hostname</td><td>string</td><td>机器信息</td></tr>
+      <tr><td>labels</td><td>string[]</td><td>标签列表</td></tr>
+      <tr><td>status</td><td>"online" | "offline"</td><td>在线状态</td></tr>
+      <tr><td>mainTaskId / mainTaskPrompt</td><td>string | null</td><td>主槽任务</td></tr>
+      <tr><td>queueTaskId / queueTaskPrompt</td><td>string | null</td><td>队列槽任务</td></tr>
+      <tr><td>lastSeenAt</td><td>string</td><td>最后心跳时间</td></tr>
+    </table>
+
+    <h3>TaskCliConfig</h3>
+    <table>
+      <tr><th>字段</th><th>类型</th><th>说明</th></tr>
+      <tr><td>model</td><td>string?</td><td>模型名称（如 <code>claude-sonnet-4-6</code>）</td></tr>
+      <tr><td>maxTurns</td><td>number?</td><td>最大对话轮次</td></tr>
+      <tr><td>systemPrompt</td><td>string?</td><td>系统提示词</td></tr>
+      <tr><td>appendSystemPrompt</td><td>string?</td><td>追加系统提示词</td></tr>
+      <tr><td>allowedTools</td><td>string[]?</td><td>允许的工具列表</td></tr>
+      <tr><td>disallowedTools</td><td>string[]?</td><td>禁止的工具列表</td></tr>
+      <tr><td>extraArgs</td><td>string[]?</td><td>额外 CLI 参数</td></tr>
+    </table>
+
+    <!-- Agent Guide -->
+    <h2 id="agent-guide">Agent 使用</h2>
+
+    <h3>CLI 参数</h3>
+    <pre><code class="language-bash">node dist/index.js [选项]
+
+选项:
+  --server &lt;url&gt;       Server WebSocket 地址
+  --token &lt;token&gt;      认证 Token
+  --id &lt;id&gt;            Agent 唯一标识
+  --name &lt;name&gt;        显示名称
+  --workspace &lt;dir&gt;    默认工作目录
+  --runner &lt;mode&gt;      执行模式 (claude | fake)
+  --config             重新运行配置向导
+  -h, --help           显示帮助</code></pre>
+
+    <h3>标签系统</h3>
+    <p>通过 <code>EMPLOYEE_LABELS</code> 环境变量为 Agent 设置标签（逗号分隔）：</p>
+    <pre><code class="language-bash">EMPLOYEE_LABELS="backend,python,review" node dist/index.js</code></pre>
+    <p>提交任务时可通过 <code>requiredLabels</code> 筛选匹配的 Agent：</p>
+    <pre><code class="language-json">{ "prompt": "审查 Python 代码", "atAgents": "queue", "requiredLabels": ["python"] }</code></pre>
+
+    <h3>双槽位并行</h3>
+    <p>每个 Agent 有两个任务槽位：</p>
+    <ul>
+      <li><strong>Main 槽</strong> — 接收 direct / broadcast 任务，使用持久化会话</li>
+      <li><strong>Queue 槽</strong> — 接收 queue 任务，使用独立会话</li>
+    </ul>
+    <p>两个槽位可以同时运行，实现并行执行。</p>
+
+    <h3>Fake Runner 模式</h3>
+    <p>用于测试，无需安装 Claude CLI：</p>
+    <pre><code class="language-bash">RUNNER_MODE=fake node dist/index.js</code></pre>
+    <p>模拟 Agent 会定时输出步骤信息，最终返回成功结果。</p>
+
+    <h3>Agent 文件结构</h3>
+    <pre><code>.ai-teams/agents/&lt;EMPLOYEE_ID&gt;/
+├── session-state.json      # 持久化会话 ID
+├── daily/
+│   └── 2026-05-12.md       # 每日活动日志
+└── hooks/
+    └── claude-hooks.settings.json  # Claude hooks 配置</code></pre>
+
+    <!-- Web Console -->
+    <h2 id="web-console">Web 控制台</h2>
+
+    <h3>五个功能页面</h3>
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-icon">&#x1F4BB;</div>
+        <h4>实时监控</h4>
+        <p>Agent 卡片展示在线状态、活跃任务、终端输出。支持取消运行中任务。</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">&#x1F4CB;</div>
+        <h4>员工管理</h4>
+        <p>所有已注册 Agent 列表，显示标签、主机名、完成/失败任务统计。</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">&#x1F4DD;</div>
+        <h4>任务日志</h4>
+        <p>按状态筛选、分页加载。显示任务指令、执行者、时间、错误信息。</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">&#x26A0;&#xFE0F;</div>
+        <h4>异常记录</h4>
+        <p>筛选失败/超时/取消的任务，显示错误原因，支持一键重试。</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">&#x1F4CA;</div>
+        <h4>统计分析</h4>
+        <p>总任务、完成率、费用汇总、平均耗时。按 Agent 维度展示详细统计。</p>
+      </div>
+    </div>
+
+    <h3>命令面板</h3>
+    <p>右侧命令面板支持：</p>
+    <ul>
+      <li><strong>目标选择</strong> — 任务队列 / @所有员工 / 指定 Agent</li>
+      <li><strong>工作目录</strong> — 可选覆盖</li>
+      <li><strong>@ 提及</strong> — 输入 <code>@Alice</code> 自动解析为直接调度</li>
+      <li><strong>群聊视图</strong> — 历史命令和 Agent 回复按时间线展示</li>
+    </ul>
+
+    <h3>移动端适配</h3>
+    <p>Web 控制台完全适配移动端：</p>
+    <ul>
+      <li>固定全屏布局，仅聊天区域滚动</li>
+      <li>底部 Agent 状态快捷栏</li>
+      <li>点击 Agent 名称弹出终端输出浮层</li>
+      <li>自动重连 + 断线提示按钮</li>
+    </ul>
+
+    <!-- Advanced -->
+    <h2 id="advanced">高级功能</h2>
+
+    <h3>任务优先级</h3>
+    <p>任务支持 4 级优先级（默认 1 = 普通）：</p>
+    <table>
+      <tr><th>值</th><th>级别</th><th>说明</th></tr>
+      <tr><td>0</td><td>低</td><td>低于普通优先级</td></tr>
+      <tr><td>1</td><td>普通（默认）</td><td>标准 FIFO</td></tr>
+      <tr><td>2</td><td>高</td><td>插队到普通任务前</td></tr>
+      <tr><td>3</td><td>紧急</td><td>最优先执行</td></tr>
+    </table>
+    <pre><code class="language-json">{ "prompt": "紧急修复线上 Bug", "priority": 3 }</code></pre>
+
+    <h3>标签调度</h3>
+    <p>结合 Agent 标签和任务 <code>requiredLabels</code> 实现精准路由：</p>
+    <pre><code class="language-bash"># Agent 端设置标签
+EMPLOYEE_LABELS="frontend,react" node dist/index.js
+
+# 任务端要求标签
+{ "prompt": "重构组件", "requiredLabels": ["frontend"] }</code></pre>
+    <p>调度逻辑：在匹配标签的 Agent 中选择负载最低的，同等负载时 round-robin 轮转。</p>
+
+    <h3>端到端加密</h3>
+    <p>设置 <code>AI_TEAMS_ENCRYPTION_KEY</code>（64 位 hex = 32 字节 AES 密钥）后，所有 WebSocket 消息使用 AES-256-GCM 加密。</p>
+    <pre><code class="language-bash"># 生成随机密钥
+openssl rand -hex 32
+
+# 三端设置相同密钥
+export AI_TEAMS_ENCRYPTION_KEY="生成的密钥"</code></pre>
+    <div class="note warn">
+      <p><strong>注意：</strong>Web 端需使用 <code>VITE_AI_TEAMS_ENCRYPTION_KEY</code> 环境变量，在构建时嵌入。修改密钥后需重新构建 Web 应用。</p>
+    </div>
+    <p>不设置密钥时，所有通信为明文 JSON（向后兼容）。</p>
+
+    <h3>Webhook 回调</h3>
+    <p>提交任务时可指定 Webhook URL，Server 会在任务生命周期事件时 POST 通知。</p>
+    <pre><code class="language-json">{ "prompt": "部署到生产环境", "webhook": "https://your-server.com/hooks/ai-teams" }</code></pre>
+    <h4>事件类型</h4>
+    <p><code>task.started</code> · <code>task.output</code> · <code>task.completed</code> · <code>task.failed</code> · <code>task.cancelled</code> · <code>task.timeout</code></p>
+    <h4>回调格式</h4>
+    <pre><code class="language-json">{
+  "event": "task.completed",
+  "timestamp": "2026-05-12T10:30:00.000Z",
+  "task": { "id": "task_xxx", ... }
+}</code></pre>
+    <h4>安全验证</h4>
+    <p>回调请求包含签名头：</p>
+    <pre><code>x-ai-teams-signature: sha256=&lt;HMAC-SHA256&gt;</code></pre>
+    <p>密钥为 <code>AI_TEAMS_AUTH_TOKEN</code>，用于验证请求来源。失败重试最多 3 次，间隔 1 秒。</p>
+
+    <h3>Agent 健康检查</h3>
+    <p>Server 为每个 Agent 维护 30 秒心跳超时计时器：</p>
+    <ul>
+      <li>每收到 <code>agent.heartbeat</code> 重置计时器</li>
+      <li>超时后自动标记 Agent 为 <code>offline</code></li>
+      <li>回收该 Agent 未执行的队列任务，重新调度给其他 Agent</li>
+    </ul>
+
+    <h3>数据库</h3>
+    <p>默认使用 SQLite（<code>node:sqlite</code>），设置 <code>DATABASE_URL</code> 可切换到 PostgreSQL。</p>
+    <table>
+      <tr><th>表</th><th>说明</th></tr>
+      <tr><td>employees</td><td>Agent 注册信息（JSON 快照）</td></tr>
+      <tr><td>tasks</td><td>任务记录（完整字段）</td></tr>
+      <tr><td>task_logs</td><td>任务输出日志（按 task_id + seq）</td></tr>
+      <tr><td>task_webhooks</td><td>任务 Webhook URL</td></tr>
+    </table>
+    <p>Server 启动时从数据库恢复状态，标记所有 Agent 为 offline，重新入队未完成任务。</p>
+
+  </div>
+
+  <footer class="footer">
+    <p>AI Teams &mdash; 多 Agent 协作平台 | Built with TypeScript, Fastify, React, Claude CLI</p>
+  </footer>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/prism.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-bash.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-json.min.js"></script>
+<script>
+// Sidebar active link tracking
+(function() {
+  const navLinks = document.querySelectorAll('.sidebar nav a[href^="#"]');
+  const sections = [];
+  navLinks.forEach(link => {
+    const id = link.getAttribute('href').slice(1);
+    const el = document.getElementById(id);
+    if (el) sections.push({ id, el, link });
+  });
+
+  function updateActive() {
+    const scrollY = window.scrollY + 80;
+    let current = sections[0];
+    for (const s of sections) {
+      if (s.el.offsetTop <= scrollY) current = s;
+    }
+    navLinks.forEach(l => l.classList.remove('active'));
+    if (current) current.link.classList.add('active');
+  }
+
+  window.addEventListener('scroll', updateActive, { passive: true });
+  updateActive();
+
+  // Close mobile sidebar on link click
+  navLinks.forEach(link => {
+    link.addEventListener('click', () => {
+      document.querySelector('.sidebar').classList.remove('open');
+    });
+  });
+})();
+</script>
+</body>
+</html>

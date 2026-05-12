@@ -11,6 +11,7 @@ export interface StateStore {
   socketToEmployeeId: WeakMap<WebSocket, string>;
   taskTimeouts: Map<string, NodeJS.Timeout>;
   disconnectTimers: Map<string, NodeJS.Timeout>;
+  heartbeatTimers: Map<string, NodeJS.Timeout>;
   taskQueues: Map<string, string[]>;
   mainTaskQueues: Map<string, string[]>;
   sharedTaskQueue: string[];
@@ -28,6 +29,7 @@ export function createInMemoryStateStore(): StateStore {
     socketToEmployeeId: new WeakMap(),
     taskTimeouts: new Map(),
     disconnectTimers: new Map(),
+    heartbeatTimers: new Map(),
     taskQueues: new Map(),
     mainTaskQueues: new Map(),
     sharedTaskQueue: [],

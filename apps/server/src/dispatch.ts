@@ -17,6 +17,7 @@ import type { Database } from "./db.js";
 import type { StateStore } from "./state-store.js";
 import { persistEmployee, persistTask, persistTaskLog, persistTaskWebhook, persistSharedQueueCursor } from "./db.js";
 import type { WebhookEventType } from "./schemas.js";
+import type { MaybeEncryptor } from "./crypto.js";
 
 export const TERMINAL_STATUSES = new Set<TaskStatus>(["completed", "failed", "cancelled", "timeout"]);
 
@@ -24,9 +25,10 @@ export function nowIso() {
   return new Date().toISOString();
 }
 
-export function sendJson<T>(socket: WebSocket, payload: T) {
+export function sendJson<T>(socket: WebSocket, payload: T, encryptor?: MaybeEncryptor) {
   if (socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify(payload));
+    const plain = JSON.stringify(payload);
+    socket.send(encryptor ? encryptor.encrypt(plain) : plain);
   }
 }
 
@@ -43,6 +45,7 @@ export type DispatchContext = {
   disconnectGraceMs: number;
   db: Database;
   log: FastifyInstance["log"];
+  encryptor?: MaybeEncryptor;
 };
 
 export function createDispatch(ctx: DispatchContext) {
@@ -50,7 +53,7 @@ export function createDispatch(ctx: DispatchContext) {
 
   function broadcastToLeaders(payload: ServerToLeaderMessage) {
     for (const socket of state.leaderSockets) {
-      sendJson(socket, payload);
+      sendJson(socket, payload, ctx.encryptor);
     }
   }
 
@@ -58,6 +61,34 @@ export function createDispatch(ctx: DispatchContext) {
     state.employees.set(employee.id, employee);
     persistEmployee(db, employee).catch((error) => log.error({ error, employeeId: employee.id }, "Failed to persist employee"));
     broadcastToLeaders({ type: "employee.upsert", employee });
+  }
+
+  function resetHeartbeatTimer(employeeId: string) {
+    const existing = state.heartbeatTimers.get(employeeId);
+    if (existing) clearTimeout(existing);
+    state.heartbeatTimers.set(employeeId, setTimeout(() => {
+      state.heartbeatTimers.delete(employeeId);
+      const employee = state.employees.get(employeeId);
+      if (!employee || employee.status === "offline") return;
+      log.warn({ employeeId }, "Agent heartbeat timeout, marking offline");
+      employee.status = "offline";
+      upsertEmployee(employee);
+      // Reclaim queue-slot tasks that haven't started running yet
+      const queueTaskId = employee.queueTaskId;
+      if (queueTaskId) {
+        const task = state.tasks.get(queueTaskId);
+        if (task && (task.status === "queued" || task.status === "dispatched")) {
+          task.status = "queued";
+          task.employeeId = null;
+          task.startedAt = null;
+          upsertTask(task);
+          state.sharedTaskQueue.push(task.id);
+          log.info({ taskId: task.id }, "Reclaimed queue task from unresponsive agent");
+        }
+      }
+      setQueueTask(employeeId, null, null);
+      dispatchSharedQueuedTasks();
+    }, 30000));
   }
 
   function upsertTask(task: TaskRecord) {
@@ -210,7 +241,7 @@ export function createDispatch(ctx: DispatchContext) {
     }
     const socket = task.employeeId ? state.agentSockets.get(task.employeeId) : undefined;
     if (socket) {
-      sendJson<ServerToEmployeeMessage>(socket, { type: "task.cancel", taskId: task.id });
+      sendJson<ServerToEmployeeMessage>(socket, { type: "task.cancel", taskId: task.id }, ctx.encryptor);
     }
     current.status = "timeout";
     current.finishedAt = nowIso();
@@ -239,9 +270,19 @@ export function createDispatch(ctx: DispatchContext) {
   }
 
   function enqueueSharedTask(taskId: string) {
-    if (!state.sharedTaskQueue.includes(taskId)) {
-      state.sharedTaskQueue.push(taskId);
+    if (state.sharedTaskQueue.includes(taskId)) return;
+    const task = state.tasks.get(taskId);
+    if (!task) { state.sharedTaskQueue.push(taskId); return; }
+    // Insert sorted by priority DESC — higher priority first
+    let insertAt = state.sharedTaskQueue.length;
+    for (let i = 0; i < state.sharedTaskQueue.length; i++) {
+      const existing = state.tasks.get(state.sharedTaskQueue[i]);
+      if (existing && task.priority > existing.priority) {
+        insertAt = i;
+        break;
+      }
     }
+    state.sharedTaskQueue.splice(insertAt, 0, taskId);
   }
 
   function removeFromSharedQueue(taskId: string) {
@@ -251,20 +292,37 @@ export function createDispatch(ctx: DispatchContext) {
     }
   }
 
-  function pickAvailableEmployeeIdForQueue() {
-    const available = [...state.employees.values()]
+  function pickAvailableEmployeeIdForQueue(requiredLabels?: string[]) {
+    let available = [...state.employees.values()]
       .filter((employee) => {
         const socket = state.agentSockets.get(employee.id);
-        return employee.status === "online" && !employee.queueTaskId && socket?.readyState === WebSocket.OPEN;
-      })
-      .sort((a, b) => a.id.localeCompare(b.id));
+        if (employee.status !== "online" || employee.queueTaskId || socket?.readyState !== WebSocket.OPEN) {
+          return false;
+        }
+        if (requiredLabels && requiredLabels.length > 0) {
+          return requiredLabels.every((label) => employee.labels.includes(label));
+        }
+        return true;
+      });
 
     if (available.length === 0) {
       return null;
     }
 
-    const employee = available[state.sharedQueueCursor % available.length];
-    state.sharedQueueCursor = (state.sharedQueueCursor + 1) % Math.max(available.length, 1);
+    // Sort by load (fewer active tasks first), then by id for stability
+    available.sort((a, b) => {
+      const loadA = (a.mainTaskId ? 1 : 0) + (a.queueTaskId ? 1 : 0);
+      const loadB = (b.mainTaskId ? 1 : 0) + (b.queueTaskId ? 1 : 0);
+      if (loadA !== loadB) return loadA - loadB;
+      return a.id.localeCompare(b.id);
+    });
+
+    // Among equally-loaded agents, use round-robin
+    const minLoad = (available[0].mainTaskId ? 1 : 0) + (available[0].queueTaskId ? 1 : 0);
+    const lightest = available.filter((e) => (e.mainTaskId ? 1 : 0) + (e.queueTaskId ? 1 : 0) === minLoad);
+
+    const employee = lightest[state.sharedQueueCursor % lightest.length];
+    state.sharedQueueCursor = (state.sharedQueueCursor + 1) % Math.max(lightest.length, 1);
     void persistSharedQueueCursor(db, state.sharedQueueCursor);
     return employee.id;
   }
@@ -274,7 +332,15 @@ export function createDispatch(ctx: DispatchContext) {
       return;
     }
 
-    const employeeId = preferredEmployeeId ?? pickAvailableEmployeeIdForQueue();
+    // Peek at the first valid task to get its requiredLabels for agent matching
+    let firstTask: TaskRecord | null = null;
+    for (const tid of state.sharedTaskQueue) {
+      const t = state.tasks.get(tid);
+      if (t && t.status === "queued") { firstTask = t; break; }
+    }
+    const requiredLabels = firstTask?.requiredLabels;
+
+    const employeeId = preferredEmployeeId ?? pickAvailableEmployeeIdForQueue(requiredLabels);
     if (!employeeId) {
       return;
     }
@@ -356,7 +422,7 @@ export function createDispatch(ctx: DispatchContext) {
       workspace: task.workspace,
       timeoutSec: task.timeoutSec,
       cliConfig: task.cliConfig,
-    });
+    }, ctx.encryptor);
   }
 
   function dispatchNextQueuedTask(employeeId: string) {
@@ -414,6 +480,8 @@ export function createDispatch(ctx: DispatchContext) {
     targetMode: TaskTargetMode,
     webhookUrl?: string | null,
     cliConfig?: unknown,
+    priority?: number,
+    requiredLabels?: string[] | null,
   ) {
     const task: TaskRecord = {
       id: randomUUID(),
@@ -425,6 +493,8 @@ export function createDispatch(ctx: DispatchContext) {
       workspace: workspace?.trim() || null,
       timeoutSec: timeoutSec ?? ctx.defaultTimeoutSec,
       cliConfig: (cliConfig && typeof cliConfig === "object" && !Array.isArray(cliConfig) ? cliConfig : null) as TaskRecord["cliConfig"],
+      priority: priority ?? 1,
+      requiredLabels: requiredLabels ?? null,
       status: "queued",
       createdAt: nowIso(),
       startedAt: null,
@@ -471,13 +541,15 @@ export function createDispatch(ctx: DispatchContext) {
     message: Extract<LeaderToServerMessage, { type: "command.dispatch" }>,
     webhookUrl?: string | null,
     cliConfig?: unknown,
+    priority?: number,
+    requiredLabels?: string[] | null,
   ) {
     const leaderCommandId = randomUUID();
     if (message.atAgents === "queue") {
       return {
         ok: true as const,
         leaderCommandId,
-        tasks: [createTask(null, message.prompt, message.workspace, message.timeoutSec, leaderCommandId, "queue", webhookUrl, cliConfig)],
+        tasks: [createTask(null, message.prompt, message.workspace, message.timeoutSec, leaderCommandId, "queue", webhookUrl, cliConfig, message.priority, message.requiredLabels)],
       };
     }
 
@@ -495,7 +567,7 @@ export function createDispatch(ctx: DispatchContext) {
       ok: true as const,
       leaderCommandId,
       tasks: targetIds.map((employeeId) =>
-        createTask(employeeId, message.prompt, message.workspace, message.timeoutSec, leaderCommandId, targetMode, webhookUrl, cliConfig),
+        createTask(employeeId, message.prompt, message.workspace, message.timeoutSec, leaderCommandId, targetMode, webhookUrl, cliConfig, message.priority, message.requiredLabels),
       ),
     };
   }
@@ -563,6 +635,7 @@ export function createDispatch(ctx: DispatchContext) {
     if (!queueTaskId) {
       dispatchNextQueuedTask(message.employeeId);
     }
+    resetHeartbeatTimer(message.employeeId);
   }
 
   function taskBelongsToSocket(taskId: string, employeeId: string | undefined, socket: WebSocket) {
@@ -586,7 +659,7 @@ export function createDispatch(ctx: DispatchContext) {
         type: "server.error",
         code: "agent_not_registered",
         message: "Agent must register before sending task events.",
-      });
+      }, ctx.encryptor);
       socket.close(1008, "agent_not_registered");
       return;
     }
@@ -601,6 +674,7 @@ export function createDispatch(ctx: DispatchContext) {
         employee.lastSeenAt = nowIso();
         employee.status = "online";
         upsertEmployee(employee);
+        resetHeartbeatTimer(message.employeeId);
       }
       return;
     }
@@ -746,7 +820,7 @@ export function createDispatch(ctx: DispatchContext) {
       markTaskFailed(task.id, "员工已离线，无法取消运行中的进程。");
       return { ok: true, task: state.tasks.get(task.id)! };
     }
-    sendJson<ServerToEmployeeMessage>(agentSocket, { type: "task.cancel", taskId: task.id });
+    sendJson<ServerToEmployeeMessage>(agentSocket, { type: "task.cancel", taskId: task.id }, ctx.encryptor);
     return { ok: true, task };
   }
 
@@ -759,12 +833,12 @@ export function createDispatch(ctx: DispatchContext) {
             type: "command.error",
             code: result.code,
             message: result.message,
-          });
+          }, ctx.encryptor);
         }
         break;
       }
       case "command.send":
-        createTask(message.employeeId, message.prompt, message.workspace, message.timeoutSec, undefined, "direct");
+        createTask(message.employeeId, message.prompt, message.workspace, message.timeoutSec, undefined, "direct"); // direct tasks don't use requiredLabels
         break;
       case "command.broadcast":
         handleLeaderMessage(

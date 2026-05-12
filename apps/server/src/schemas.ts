@@ -61,6 +61,8 @@ export const taskRecordSchema = {
     "workspace",
     "timeoutSec",
     "cliConfig",
+    "priority",
+    "requiredLabels",
     "status",
     "createdAt",
     "startedAt",
@@ -87,6 +89,8 @@ export const taskRecordSchema = {
     workspace: nullableString,
     timeoutSec: { type: "number" },
     cliConfig: { anyOf: [taskCliConfigSchema, { type: "null" }] },
+    priority: { type: "integer", minimum: 0, maximum: 3 },
+    requiredLabels: { anyOf: [{ type: "array", items: { type: "string" } }, { type: "null" }] },
     status: taskStatusSchema,
     createdAt: { type: "string", format: "date-time" },
     startedAt: { anyOf: [{ type: "string", format: "date-time" }, { type: "null" }] },
@@ -178,6 +182,8 @@ export const restTaskRequestSchema = {
     prompt: { type: "string", minLength: 1 },
     workspace: { type: "string" },
     timeoutSec: { type: "number", minimum: 1 },
+    priority: { type: "integer", minimum: 0, maximum: 3 },
+    requiredLabels: { type: "array", items: { type: "string" } },
     cliConfig: taskCliConfigSchema,
     webhook: {
       anyOf: [
@@ -302,6 +308,8 @@ export function parseRestTaskRequest(body: unknown) {
     command: command as Extract<LeaderToServerMessage, { type: "command.dispatch" }>,
     webhookUrl,
     cliConfig: request.cliConfig ?? undefined,
+    priority: typeof request.priority === "number" ? request.priority : undefined,
+    requiredLabels: Array.isArray(request.requiredLabels) ? request.requiredLabels : undefined,
   };
 }
 

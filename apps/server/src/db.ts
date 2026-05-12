@@ -131,6 +131,8 @@ export async function initDb(db: Database) {
       status                      TEXT NOT NULL DEFAULT 'queued',
       timeout_sec                 INTEGER NOT NULL DEFAULT 1800,
       cli_config                  TEXT,
+      priority                    INTEGER NOT NULL DEFAULT 1,
+      required_labels             TEXT,
       created_at                  TEXT NOT NULL,
       started_at                  TEXT,
       finished_at                 TEXT,
@@ -248,7 +250,7 @@ export async function persistEmployee(db: Database, employee: EmployeeSnapshot) 
 
 const TASK_COLUMNS = [
   "id", "leader_command_id", "employee_id", "session_id", "target_mode",
-  "prompt", "workspace", "status", "timeout_sec", "cli_config",
+  "prompt", "workspace", "status", "timeout_sec", "cli_config", "priority", "required_labels",
   "created_at", "started_at", "finished_at", "exit_code", "summary", "error",
   "duration_ms", "duration_api_ms", "num_turns", "total_cost_usd",
   "usage_input_tokens", "usage_output_tokens", "usage_cache_read_tokens", "usage_cache_creation_tokens",
@@ -379,6 +381,8 @@ export type DbTaskRow = {
   status: string;
   timeout_sec: number;
   cli_config: string | null;
+  priority: number;
+  required_labels: string | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -406,6 +410,8 @@ export function dbRowToTask(row: DbTaskRow, defaultTimeoutSec: number): TaskReco
     workspace: row.workspace,
     timeoutSec: row.timeout_sec ?? defaultTimeoutSec,
     cliConfig: row.cli_config ? (JSON.parse(row.cli_config) as TaskCliConfig) : null,
+    priority: row.priority ?? 1,
+    requiredLabels: row.required_labels ? JSON.parse(row.required_labels) : null,
     status: (row.status || "queued") as TaskRecord["status"],
     createdAt: row.created_at,
     startedAt: row.started_at,
@@ -436,6 +442,8 @@ function taskToDbValues(task: TaskRecord): unknown[] {
     task.status,
     task.timeoutSec,
     task.cliConfig ? JSON.stringify(task.cliConfig) : null,
+    task.priority,
+    task.requiredLabels ? JSON.stringify(task.requiredLabels) : null,
     task.createdAt,
     task.startedAt,
     task.finishedAt,
