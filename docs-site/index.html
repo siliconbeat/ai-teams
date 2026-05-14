@@ -211,6 +211,7 @@ td code { background: none; padding: 0; }
     <a href="#architecture">架构概览</a>
     <div class="nav-section">部署</div>
     <a href="#deployment">部署指南</a>
+    <a href="#npm-install">npm 安装</a>
     <a href="#env-server">环境变量</a>
     <div class="nav-section">接口文档</div>
     <a href="#rest-api">REST API</a>
@@ -387,6 +388,87 @@ pnpm start:web</code></pre>
     <p>首次运行 Agent 会自动进入配置向导：</p>
     <pre><code class="language-bash">node apps/agent/dist/index.js</code></pre>
     <p>也可使用 <code>--config</code> 重新配置。配置保存在 <code>~/.ai-teams/config.json</code>。</p>
+
+    <!-- npm Install -->
+    <h2 id="npm-install">通过 npm 安装</h2>
+
+    <p>Server 和 Agent 已发布到 npm，无需克隆仓库即可使用。</p>
+
+    <h3>全局安装</h3>
+    <pre><code class="language-bash"># 安装 Server
+npm install -g @csdwd/ai-teams-server
+
+# 安装 Agent
+npm install -g @csdwd/ai-teams-agent</code></pre>
+
+    <p>安装后即可直接使用 CLI 命令：</p>
+    <pre><code class="language-bash"># 启动 Server
+ai-teams-server --token "your-secret-token" --port 3789
+
+# 启动 Agent（首次运行自动进入配置向导）
+ai-teams-agent</code></pre>
+
+    <h3>使用 npx（无需安装）</h3>
+    <pre><code class="language-bash"># 直接运行 Server
+npx @csdwd/ai-teams-server --token "your-secret-token"
+
+# 直接运行 Agent
+npx @csdwd/ai-teams-agent</code></pre>
+
+    <h3>CLI 参数</h3>
+
+    <div class="card-grid">
+      <div class="card">
+        <h4><code>ai-teams-server</code></h4>
+        <table>
+          <tr><th>参数</th><th>说明</th></tr>
+          <tr><td><code>--token &lt;token&gt;</code></td><td>认证 Token（必填）</td></tr>
+          <tr><td><code>--port &lt;port&gt;</code></td><td>服务端口（默认 3789）</td></tr>
+          <tr><td><code>--host &lt;host&gt;</code></td><td>绑定地址（默认 0.0.0.0）</td></tr>
+          <tr><td><code>--data-dir &lt;dir&gt;</code></td><td>数据目录</td></tr>
+          <tr><td><code>--db-path &lt;path&gt;</code></td><td>数据库路径</td></tr>
+          <tr><td><code>--log-level &lt;level&gt;</code></td><td>日志级别（默认 info）</td></tr>
+          <tr><td><code>--log-dir &lt;dir&gt;</code></td><td>日志文件目录</td></tr>
+          <tr><td><code>-h, --help</code></td><td>显示帮助</td></tr>
+        </table>
+      </div>
+      <div class="card">
+        <h4><code>ai-teams-agent</code></h4>
+        <table>
+          <tr><th>参数</th><th>说明</th></tr>
+          <tr><td><code>--server &lt;url&gt;</code></td><td>Server WebSocket 地址</td></tr>
+          <tr><td><code>--token &lt;token&gt;</code></td><td>认证 Token</td></tr>
+          <tr><td><code>--id &lt;id&gt;</code></td><td>Agent 唯一标识</td></tr>
+          <tr><td><code>--name &lt;name&gt;</code></td><td>显示名称</td></tr>
+          <tr><td><code>--workspace &lt;dir&gt;</code></td><td>默认工作目录</td></tr>
+          <tr><td><code>--runner &lt;mode&gt;</code></td><td>执行模式（claude / fake）</td></tr>
+          <tr><td><code>--config</code></td><td>重新运行配置向导</td></tr>
+          <tr><td><code>-h, --help</code></td><td>显示帮助</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <h3>多 Agent 部署示例</h3>
+    <pre><code class="language-bash"># 终端 1 — 启动 Server
+ai-teams-server --token "my-secret"
+
+# 终端 2 — 启动 Agent Alice
+ai-teams-agent --server ws://localhost:3789 --token "my-secret" \
+  --id alice --name "Alice" --workspace ~/projects/project-a
+
+# 终端 3 — 启动 Agent Bob
+ai-teams-agent --server ws://localhost:3789 --token "my-secret" \
+  --id bob --name "Bob" --workspace ~/projects/project-b \
+  --labels "backend,python"</code></pre>
+
+    <div class="note">
+      <p><strong>包说明：</strong></p>
+      <ul>
+        <li><code>@csdwd/ai-teams-server</code> — 服务端，依赖 Fastify / WebSocket / SQLite</li>
+        <li><code>@csdwd/ai-teams-agent</code> — Agent 端，依赖 <code>ws</code>，需要系统安装 <code>claude</code> CLI</li>
+        <li>共享协议包 <code>@ai-teams/shared</code> 在构建时已内联，无需单独安装</li>
+      </ul>
+    </div>
 
     <!-- Environment Variables -->
     <h2 id="env-server">环境变量</h2>
