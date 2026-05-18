@@ -353,6 +353,19 @@ if (isCli) {
       } else {
         console.log("ai-teams-agent is not running.");
       }
+    } else if (subcommand === "update") {
+      const { execSync } = await import("node:child_process");
+      try {
+        execSync("npm install -g @csdwd/ai-teams-agent@latest", { stdio: "inherit" });
+        const ver = execSync("ai-teams-agent --version").toString().trim();
+        console.log(`\n  ✓ 已更新到 ${ver}`);
+        const status = getDaemonStatus(resolvePidFile());
+        if (status.running) {
+          console.log("  提示: 运行 ai-teams-agent restart 以应用更新。");
+        }
+      } catch {
+        process.exit(1);
+      }
     } else {
       // No sub-command — foreground mode (existing behavior)
       void (async () => {
