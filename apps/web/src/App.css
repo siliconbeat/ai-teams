@@ -513,6 +513,32 @@ textarea {
   border-bottom-right-radius: 6px;
   background: linear-gradient(135deg, rgba(104, 182, 255, 0.28), rgba(121, 255, 209, 0.12));
   max-width: none;
+  position: relative;
+  overflow: hidden;
+}
+
+.leader-message.task-running::before,
+.leader-message.task-dispatched::before,
+.leader-message.task-accepted::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    105deg,
+    transparent 30%,
+    rgba(121, 255, 209, 0.18) 45%,
+    rgba(104, 182, 255, 0.22) 55%,
+    transparent 70%
+  );
+  background-size: 250% 100%;
+  animation: shimmer 2.5s ease-in-out infinite;
+  pointer-events: none;
+  border-radius: inherit;
+}
+
+@keyframes shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -50% 0; }
 }
 
 .leader-message small,
