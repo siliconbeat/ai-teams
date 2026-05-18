@@ -308,21 +308,23 @@ if (isCli) {
     const subcommand = args[0];
 
     if (subcommand === "start" || subcommand === "restart") {
-      if (subcommand === "restart") {
-        const pidFile = resolvePidFile();
-        const status = getDaemonStatus(pidFile);
-        if (status.running) {
-          void stopDaemon(pidFile);
-        }
-      } else if (!process.env.__AI_TEAMS_DAEMON_WATCHDOG && !process.env.__AI_TEAMS_DAEMON_WORKER) {
-        const status = getDaemonStatus(resolvePidFile());
-        if (status.running) {
-          console.log(`Already running (PID ${status.pid}).`);
-          process.exit(0);
+      applyCliArgsToEnv();
+
+      if (!process.env.__AI_TEAMS_DAEMON_WATCHDOG && !process.env.__AI_TEAMS_DAEMON_WORKER) {
+        if (subcommand === "restart") {
+          const pidFile = resolvePidFile();
+          const status = getDaemonStatus(pidFile);
+          if (status.running) {
+            void stopDaemon(pidFile);
+          }
+        } else {
+          const status = getDaemonStatus(resolvePidFile());
+          if (status.running) {
+            console.log(`Already running (PID ${status.pid}).`);
+            process.exit(0);
+          }
         }
       }
-
-      applyCliArgsToEnv();
 
       // Ensure config exists
       const fileConfig = loadConfigFile();

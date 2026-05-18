@@ -1020,21 +1020,24 @@ if (isCli) {
   const subcommand = args[0];
   if (subcommand === "start" || subcommand === "restart") {
     void (async () => {
-      // For restart, stop first
-      if (subcommand === "restart") {
-        const status = getDaemonStatus(resolvePidFile());
-        if (status.running) {
-          await stopDaemon(resolvePidFile());
-        }
-      } else if (!process.env.__AI_TEAMS_DAEMON_WATCHDOG && !process.env.__AI_TEAMS_DAEMON_WORKER) {
-        const status = getDaemonStatus(resolvePidFile());
-        if (status.running) {
-          console.log(`Already running (PID ${status.pid}).`);
-          process.exit(0);
+      applyCliArgsToEnv();
+
+      if (!process.env.__AI_TEAMS_DAEMON_WATCHDOG && !process.env.__AI_TEAMS_DAEMON_WORKER) {
+        // Only the launcher process should stop/check existing daemon
+        if (subcommand === "restart") {
+          const status = getDaemonStatus(resolvePidFile());
+          if (status.running) {
+            await stopDaemon(resolvePidFile());
+          }
+        } else {
+          const status = getDaemonStatus(resolvePidFile());
+          if (status.running) {
+            console.log(`Already running (PID ${status.pid}).`);
+            process.exit(0);
+          }
         }
       }
 
-      applyCliArgsToEnv();
       if (!process.env.AI_TEAMS_AUTH_TOKEN) {
         console.error("错误: 需要认证 Token。使用 --token <token> 或设置 AI_TEAMS_AUTH_TOKEN 环境变量。");
         process.exit(1);
