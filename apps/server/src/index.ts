@@ -143,7 +143,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     disconnectGraceMs,
     encryptor: createEncryptor(process.env.AI_TEAMS_ENCRYPTION_KEY),
   };
-  const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage, cancelTaskById } = createDispatch(dispatchCtx);
+  const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage, cancelTaskById, startDisconnectRecovery } = createDispatch(dispatchCtx);
 
   const scheduleDispatchFn: ScheduleDispatchFn = (message, webhookUrl, cliConfig, priority, requiredLabels) => {
     return dispatchLeaderCommand(message, webhookUrl, cliConfig, priority, requiredLabels);
@@ -824,7 +824,8 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
           sendJson(leaderSocket, { type: "employee.upsert", employee }, dispatchCtx.encryptor);
         }
         // Don't fail tasks on disconnect — agent may still be running locally.
-        // Tasks will only stop via timeout or agent reporting back on reconnect.
+        // Start a grace period; if agent doesn't reconnect, tasks are re-queued.
+        startDisconnectRecovery(employeeId);
       }
       app.log.info({ employeeId }, "Agent disconnected");
     });

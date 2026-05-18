@@ -769,7 +769,7 @@ describe("断线恢复", () => {
     expect(server.buildSnapshot().tasks.find((t) => t.id === dispatch.taskId)?.status).toBe("running");
   });
 
-  it("断线后任务继续运行直到超时", async () => {
+  it("断线后宽限期内任务保留，超时后重新入队", async () => {
     const agent = await connectAgent("alice");
     const leader = await connectLeader();
 
@@ -788,20 +788,96 @@ describe("断线恢复", () => {
       500,
     );
 
-    // After disconnect, task should still be running (not failed)
+    // Within grace period (80ms), task should still be running
     const snapshotAfterDisconnect = server.buildSnapshot();
     const taskAfterDisconnect = snapshotAfterDisconnect.tasks.find((t) => t.id === dispatch.taskId);
     expect(taskAfterDisconnect?.status).toBe("running");
 
-    // Task should only fail after its actual timeout (2s)
+    // After grace period, task should be re-queued
     await waitUntil(
-      () => server.buildSnapshot().tasks.some((t) => t.id === dispatch.taskId && t.status === "timeout"),
-      3000,
+      () => server.buildSnapshot().tasks.some((t) => t.id === dispatch.taskId && t.status === "queued"),
+      500,
     );
   });
 });
 
-// ─── 双槽位并行 ────────────────────────────────────────────────
+// ─── 断线任务恢复 ────────────────────────────────────────────────
+
+describe("断线任务恢复", () => {
+  it("宽限期内重连恢复任务", async () => {
+    const agent = await connectAgent("alice");
+    const leader = await connectLeader();
+
+    const dispatchPromise = waitForAgentDispatch(agent);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "resume task", timeoutSec: 2 }));
+    const dispatch = await dispatchPromise;
+    agent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 123 }));
+
+    const closePromise = waitForClose(agent);
+    agent.close();
+    await closePromise;
+
+    // Reconnect within grace period (80ms) reporting the same active task
+    await delay(10);
+    const recovered = await connectAgent("alice", dispatch.taskId);
+    await delay(20);
+    await waitUntil(() =>
+      server.buildSnapshot().employees.some((e) => e.id === "alice" && e.status === "online"),
+    );
+    expect(recovered.readyState).toBe(WebSocket.OPEN);
+    expect(server.buildSnapshot().tasks.find((t) => t.id === dispatch.taskId)?.status).toBe("running");
+  });
+
+  it("宽限期过后队列任务重新入队，其他 Agent 可接手", async () => {
+    const alice = await connectAgent("alice");
+    const leader = await connectLeader();
+
+    const dispatchPromise = waitForAgentDispatch(alice);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "reassign task", timeoutSec: 2 }));
+    const dispatch = await dispatchPromise;
+    alice.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 123 }));
+
+    const closePromise = waitForClose(alice);
+    alice.close();
+    await closePromise;
+
+    // Wait for grace period to expire and task to be re-queued
+    await waitUntil(
+      () => server.buildSnapshot().tasks.some((t) => t.id === dispatch.taskId && t.status === "queued"),
+      500,
+    );
+
+    // Bob comes online and should get the re-queued task from shared queue
+    const bob = await connectAgent("bob");
+    await delay(20);
+    const snapshot = server.buildSnapshot();
+    expect(snapshot.tasks.find((t) => t.id === dispatch.taskId)?.status).toBe("dispatched");
+  });
+
+  it("直接任务断线后回到员工个人队列", async () => {
+    const agent = await connectAgent("alice");
+    const leader = await connectLeader();
+
+    const dispatchPromise = waitForAgentDispatch(agent);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "direct task", timeoutSec: 2 }));
+    const dispatch = await dispatchPromise;
+    agent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 123 }));
+
+    const closePromise = waitForClose(agent);
+    agent.close();
+    await closePromise;
+
+    // Wait for grace period to expire
+    await waitUntil(
+      () => server.buildSnapshot().tasks.some((t) => t.id === dispatch.taskId && t.status === "queued"),
+      500,
+    );
+
+    // Verify task is queued but not in shared queue (targetMode is direct)
+    const task = server.buildSnapshot().tasks.find((t) => t.id === dispatch.taskId);
+    expect(task?.targetMode).toBe("direct");
+  });
+});
 
 describe("双槽位并行", () => {
   it("main 和 queue 槽位可同时运行", async () => {

@@ -1,6 +1,7 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import pg from "pg";
 import type { EmployeeSnapshot, TaskOutputChunk, TaskRecord, TaskCliConfig } from "@ai-teams/shared";
+import { TERMINAL_STATUSES } from "@ai-teams/shared";
 import type { StateStore } from "./state-store.js";
 
 // ---------------------------------------------------------------------------
@@ -222,6 +223,16 @@ export async function hydrateState(db: Database, state: StateStore, defaultTimeo
         const queue = state.taskQueues.get(task.employeeId!) ?? [];
         queue.push(task.id);
         state.taskQueues.set(task.employeeId!, queue);
+      }
+    } else if (task.employeeId && !TERMINAL_STATUSES.has(task.status)) {
+      task.status = "queued";
+      persistTask(db, task);
+      if (task.targetMode === "queue") {
+        state.sharedTaskQueue.push(task.id);
+      } else {
+        const queue = state.mainTaskQueues.get(task.employeeId) ?? [];
+        queue.push(task.id);
+        state.mainTaskQueues.set(task.employeeId, queue);
       }
     }
   }

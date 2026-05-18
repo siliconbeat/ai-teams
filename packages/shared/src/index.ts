@@ -10,6 +10,8 @@ export type TaskStatus =
   | "cancelled"
   | "timeout";
 
+export const TERMINAL_STATUSES = new Set<TaskStatus>(["completed", "failed", "cancelled", "timeout"]);
+
 export type AgentTarget = "queue" | "all" | string[];
 export type TaskTargetMode = "queue" | "direct" | "broadcast";
 

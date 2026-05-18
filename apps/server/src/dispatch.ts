@@ -12,14 +12,13 @@ import {
   type TaskRecord,
   type TaskStatus,
   type TaskTargetMode,
+  TERMINAL_STATUSES,
 } from "@ai-teams/shared";
 import type { Database } from "./db.js";
 import type { StateStore } from "./state-store.js";
 import { persistEmployee, persistTask, persistTaskLog, persistTaskWebhook, persistSharedQueueCursor } from "./db.js";
 import type { WebhookEventType } from "./schemas.js";
 import type { MaybeEncryptor } from "./crypto.js";
-
-export const TERMINAL_STATUSES = new Set<TaskStatus>(["completed", "failed", "cancelled", "timeout"]);
 
 export function nowIso() {
   return new Date().toISOString();
@@ -858,10 +857,59 @@ export function createDispatch(ctx: DispatchContext) {
     }
   }
 
+  function startDisconnectRecovery(employeeId: string) {
+    const employee = state.employees.get(employeeId);
+    if (!employee) return;
+
+    const taskIds: string[] = [];
+    if (employee.mainTaskId) taskIds.push(employee.mainTaskId);
+    if (employee.queueTaskId) taskIds.push(employee.queueTaskId);
+    if (taskIds.length === 0) return;
+
+    const timer = setTimeout(() => {
+      state.disconnectTimers.delete(employeeId);
+      if (state.agentSockets.has(employeeId)) return;
+
+      for (const taskId of taskIds) {
+        const task = state.tasks.get(taskId);
+        if (!task || TERMINAL_STATUSES.has(task.status)) continue;
+
+        clearTaskTimeout(taskId);
+        task.status = "queued";
+        task.employeeId = null;
+        upsertTask(task);
+        log.info({ taskId, employeeId }, "Task re-queued after disconnect grace period");
+
+        if (task.targetMode === "queue") {
+          enqueueSharedTask(taskId);
+        } else {
+          const queue = state.mainTaskQueues.get(employeeId) ?? [];
+          if (!queue.includes(taskId)) queue.push(taskId);
+          state.mainTaskQueues.set(employeeId, queue);
+        }
+      }
+
+      const emp = state.employees.get(employeeId);
+      if (emp) {
+        if (taskIds.includes(emp.mainTaskId ?? "")) setMainTask(employeeId, null, null);
+        if (taskIds.includes(emp.queueTaskId ?? "")) setQueueTask(employeeId, null, null);
+        broadcastToLeaders({ type: "employee.upsert", employee: emp });
+      }
+      for (const taskId of taskIds) {
+        const task = state.tasks.get(taskId);
+        if (task) broadcastToLeaders({ type: "task.upsert", task });
+      }
+      dispatchSharedQueuedTasks();
+    }, ctx.disconnectGraceMs);
+
+    state.disconnectTimers.set(employeeId, timer);
+  }
+
   return {
     dispatchLeaderCommand,
     handleAgentMessage,
     handleLeaderMessage,
     cancelTaskById,
+    startDisconnectRecovery,
   };
 }
