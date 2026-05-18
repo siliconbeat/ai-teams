@@ -1,11 +1,14 @@
 {
   "name": "@csdwd/ai-teams-agent",
-  "version": "0.1.0",
+  "version": "0.1.2",
+  "description": "AI Teams agent — connects to server via WebSocket, spawns Claude CLI to execute tasks",
   "type": "module",
   "bin": {
     "ai-teams-agent": "./dist/index.js"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "node ../../scripts/build-bundle.js agent",
@@ -24,5 +27,17 @@
   },
   "engines": {
     "node": ">=22"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/siliconbeat/ai-teams.git",
+    "directory": "apps/agent"
+  },
+  "license": "MIT",
+  "keywords": [
+    "ai-teams",
+    "ai-agent",
+    "claude",
+    "websocket"
+  ]
 }

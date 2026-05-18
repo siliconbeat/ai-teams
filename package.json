@@ -13,7 +13,7 @@
     "start:agent:alice": "EMPLOYEE_ID=alice EMPLOYEE_NAME=Alice RUNNER_MODE=claude DEFAULT_WORKSPACE=/Users/junhang/IdeaProjects/cfhy/agent/ai-teams pnpm --filter @csdwd/ai-teams-agent start",
     "start:web": "pnpm --filter @ai-teams/web preview -- --host 0.0.0.0",
     "start:all": "concurrently -n server,alice,web -c blue,green,magenta \"pnpm start:server\" \"pnpm start:agent:alice\" \"pnpm start:web\"",
-    "build": "pnpm --filter @ai-teams/shared build && pnpm --filter @csdwd/ai-teams-server build && pnpm --filter @csdwd/ai-teams-agent build",
+    "build": "pnpm --filter @ai-teams/shared build && pnpm --filter @csdwd/ai-teams-server build && pnpm --filter @ai-teams/web build && pnpm --filter @csdwd/ai-teams-agent build",
     "typecheck": "pnpm --filter @ai-teams/shared build && pnpm --filter @csdwd/ai-teams-server build && pnpm --filter @csdwd/ai-teams-agent build",
     "test": "pnpm --filter @ai-teams/shared build && vitest run"
   },

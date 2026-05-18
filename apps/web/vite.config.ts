@@ -6,6 +6,10 @@ const serverTarget = process.env.AI_TEAMS_SERVER_HTTP_URL || `http://localhost:$
 
 export default defineConfig({
   plugins: [react()],
+  build: {
+    outDir: "../server/dist/web",
+    emptyOutDir: true,
+  },
   server: {
     port: 5173,
     host: "0.0.0.0",

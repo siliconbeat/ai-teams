@@ -22,7 +22,7 @@ if (fs.existsSync(distDir)) {
 }
 
 const external = pkg === "server"
-  ? ["fastify", "@fastify/swagger", "@fastify/swagger-ui", "@fastify/websocket", "ws", "pg"]
+  ? ["fastify", "@fastify/swagger", "@fastify/swagger-ui", "@fastify/websocket", "@fastify/static", "ws", "pg"]
   : ["ws"];
 
 esbuild

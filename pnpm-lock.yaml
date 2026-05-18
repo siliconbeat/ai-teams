@@ -42,6 +42,9 @@ importers:
 
   apps/server:
     dependencies:
+      '@fastify/static':
+        specifier: ^9.1.3
+        version: 9.1.3
       '@fastify/swagger':
         specifier: ^9.7.0
         version: 9.7.0
@@ -832,8 +835,8 @@ packages:
   '@fastify/send@4.1.0':
     resolution: {integrity: sha512-TMYeQLCBSy2TOFmV95hQWkiTYgC/SEx7vMdV+wnZVX4tt8VBLKzmH8vV9OzJehV0+XBfg+WxPMt5wp+JBUKsVw==}
 
-  '@fastify/static@9.1.2':
-    resolution: {integrity: sha512-yH5lRei8+uQL8PuO2UnLYZjVH6mlpw2CUsuRTpfXomA9yt9RiSRdKRJczaxFCebekoIF2na0IZqpih4PsDl6lg==}
+  '@fastify/static@9.1.3':
+    resolution: {integrity: sha512-aXrYtsiryLhRxRNaxNqsn7FUISeb7rB9q4eHUPIot5aeQBLNahnz1m6thzm7JWC1poSGXS9XrX8DvuMivp2hkQ==}
 
   '@fastify/swagger-ui@5.2.5':
     resolution: {integrity: sha512-ky3I0LAkXKX/prwSDpoQ3kscBKsj2Ha6Gp1/JfgQSqyx0bm9F2bE//XmGVGj2cR9l5hUjZYn60/hqn7e+OLgWQ==}
@@ -2286,7 +2289,7 @@ snapshots:
       http-errors: 2.0.1
       mime: 3.0.0
 
-  '@fastify/static@9.1.2':
+  '@fastify/static@9.1.3':
     dependencies:
       '@fastify/accept-negotiator': 2.0.1
       '@fastify/send': 4.1.0
@@ -2297,7 +2300,7 @@ snapshots:
 
   '@fastify/swagger-ui@5.2.5':
     dependencies:
-      '@fastify/static': 9.1.2
+      '@fastify/static': 9.1.3
       fastify-plugin: 5.1.0
       openapi-types: 12.1.3
       rfdc: 1.4.1

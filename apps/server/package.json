@@ -1,11 +1,14 @@
 {
   "name": "@csdwd/ai-teams-server",
-  "version": "0.1.0",
+  "version": "0.1.2",
+  "description": "AI Teams central server — Fastify HTTP + WebSocket server for task dispatch, employee management, and web UI",
   "type": "module",
   "bin": {
     "ai-teams-server": "./dist/index.js"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "node ../../scripts/build-bundle.js server",
@@ -13,6 +16,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
+    "@fastify/static": "^9.1.3",
     "@fastify/swagger": "^9.7.0",
     "@fastify/swagger-ui": "^5.2.5",
     "@fastify/websocket": "^11.0.0",
@@ -30,5 +34,18 @@
   },
   "engines": {
     "node": ">=22"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/siliconbeat/ai-teams.git",
+    "directory": "apps/server"
+  },
+  "license": "MIT",
+  "keywords": [
+    "ai-teams",
+    "ai-agent",
+    "task-dispatch",
+    "websocket",
+    "fastify"
+  ]
 }

@@ -6,6 +6,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 import websocket from "@fastify/websocket";
+import fastifyStatic from "@fastify/static";
 import WebSocket from "ws";
 import {
   parseEmployeeToServerMessage,
@@ -119,6 +120,15 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     },
     staticCSP: true,
   });
+
+  const webDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "web");
+  if (fs.existsSync(webDir)) {
+    await app.register(fastifyStatic, { root: webDir, prefix: "/" });
+    app.setNotFoundHandler((_, reply) => {
+      reply.sendFile("index.html");
+    });
+    app.log.info({ webDir }, "Web UI enabled");
+  }
 
   const dispatchCtx: DispatchContext = {
     state,
@@ -256,8 +266,14 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     return { employeeId, workspace, activeSessionId, sessions };
   }
 
+  const staticExts = new Set([".html", ".js", ".css", ".ico", ".png", ".jpg", ".svg", ".woff", ".woff2", ".ttf", ".map"]);
+
   app.addHook("preHandler", async (request, reply) => {
     if (request.url.startsWith("/ws/") || request.url.startsWith("/docs")) {
+      return;
+    }
+    const ext = path.extname(request.url.split("?")[0]);
+    if (request.url === "/" || staticExts.has(ext)) {
       return;
     }
     if (!isAuthorized(options.authToken, request.url, request.headers)) {
@@ -689,7 +705,7 @@ export async function startServer(options = readOptionsFromEnv()) {
   return server;
 }
 
-const isCli = process.argv[1] === fileURLToPath(import.meta.url);
+const isCli = process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isCli) {
   const args = process.argv.slice(2);
   function getArgValue(name: string): string | undefined {
