@@ -1,0 +1,260 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]: AI
+      - generic [ref=e7]:
+        - strong [ref=e8]: AI Teams
+        - paragraph [ref=e9]: 员工协作控制台
+    - navigation [ref=e10]:
+      - button "监控台" [ref=e11] [cursor=pointer]
+      - button "员工管理" [ref=e12] [cursor=pointer]
+      - button "任务日志" [ref=e13] [cursor=pointer]
+      - button "定时任务" [ref=e14] [cursor=pointer]
+      - button "异常记录" [ref=e15] [cursor=pointer]
+      - button "统计分析" [ref=e16] [cursor=pointer]
+  - main [ref=e110]:
+    - generic [ref=e111]:
+      - generic [ref=e112]:
+        - generic [ref=e113]:
+          - heading "定时任务" [level=1] [ref=e114]
+          - paragraph [ref=e115]: 管理 cron 定时调度，自动向 Agent 或队列派发任务。
+        - button "+ 新建" [ref=e116] [cursor=pointer]
+      - generic [ref=e117]:
+        - generic [ref=e118]:
+          - generic [ref=e119]:
+            - generic [ref=e120]:
+              - strong [ref=e121]: 测试定时任务
+              - generic [ref=e122]: 队列
+            - paragraph [ref=e123]: "*/2 * * * *"
+            - paragraph [ref=e124]: echo hello world
+          - generic [ref=e125]:
+            - generic [ref=e129] [cursor=pointer]: 启用
+            - generic "上次执行" [ref=e130]: "上次: 2026/5/18 22:46:00"
+            - generic "下次执行" [ref=e131]: "下次: 2026/5/18 22:48:00"
+            - generic [ref=e132]:
+              - button "触发" [ref=e133] [cursor=pointer]
+              - button "编辑" [ref=e134] [cursor=pointer]
+              - button "删除" [ref=e135] [cursor=pointer]
+        - generic [ref=e136]:
+          - generic [ref=e137]:
+            - generic [ref=e138]:
+              - strong [ref=e139]: 测试定时任务
+              - generic [ref=e140]: 队列
+            - paragraph [ref=e141]: "*/2 * * * *"
+            - paragraph [ref=e142]: echo hello world
+          - generic [ref=e143]:
+            - generic [ref=e147] [cursor=pointer]: 启用
+            - generic "上次执行" [ref=e148]: "上次: 2026/5/18 22:46:00"
+            - generic "下次执行" [ref=e149]: "下次: 2026/5/18 22:48:00"
+            - generic [ref=e150]:
+              - button "触发" [ref=e151] [cursor=pointer]
+              - button "编辑" [ref=e152] [cursor=pointer]
+              - button "删除" [ref=e153] [cursor=pointer]
+        - generic [ref=e154]:
+          - generic [ref=e155]:
+            - generic [ref=e156]:
+              - strong [ref=e157]: test
+              - generic [ref=e158]: 队列
+            - paragraph [ref=e159]: "*/2 * * * *"
+            - paragraph [ref=e160]: hello
+          - generic [ref=e161]:
+            - generic [ref=e165] [cursor=pointer]: 启用
+            - generic "上次执行" [ref=e166]: "上次: 2026/5/18 22:46:00"
+            - generic "下次执行" [ref=e167]: "下次: 2026/5/18 22:48:00"
+            - generic [ref=e168]:
+              - button "触发" [ref=e169] [cursor=pointer]
+              - button "编辑" [ref=e170] [cursor=pointer]
+              - button "删除" [ref=e171] [cursor=pointer]
+        - generic [ref=e172]:
+          - generic [ref=e173]:
+            - generic [ref=e174]:
+              - strong [ref=e175]: test
+              - generic [ref=e176]: 队列
+            - paragraph [ref=e177]: 0 9 * * 1-5
+            - paragraph [ref=e178]: hello
+          - generic [ref=e179]:
+            - generic [ref=e183] [cursor=pointer]: 启用
+            - generic "下次执行" [ref=e184]: "下次: 2026/5/19 09:00:00"
+            - generic [ref=e185]:
+              - button "触发" [ref=e186] [cursor=pointer]
+              - button "编辑" [ref=e187] [cursor=pointer]
+              - button "删除" [ref=e188] [cursor=pointer]
+        - generic [ref=e189]:
+          - generic [ref=e190]:
+            - generic [ref=e191]:
+              - strong [ref=e192]: test schedule (edited)
+              - generic [ref=e193]: 队列
+            - paragraph [ref=e194]: "*/2 * * * *"
+            - paragraph [ref=e195]: echo hello
+          - generic [ref=e196]:
+            - generic [ref=e200] [cursor=pointer]: 启用
+            - generic "上次执行" [ref=e201]: "上次: 2026/5/18 22:46:00"
+            - generic "下次执行" [ref=e202]: "下次: 2026/5/18 22:48:00"
+            - generic [ref=e203]:
+              - button "触发" [ref=e204] [cursor=pointer]
+              - button "编辑" [active] [ref=e205] [cursor=pointer]
+              - button "删除" [ref=e206] [cursor=pointer]
+    - generic [ref=e208]:
+      - generic [ref=e209]:
+        - heading "编辑定时任务" [level=2] [ref=e210]
+        - button "✕" [ref=e211] [cursor=pointer]
+      - generic [ref=e212]:
+        - generic [ref=e213]:
+          - generic [ref=e214]: 名称
+          - textbox "名称" [ref=e215]:
+            - /placeholder: 每日站会报告
+            - text: test schedule (edited)
+        - generic [ref=e216]:
+          - generic [ref=e217]: Cron 表达式（5 字段）
+          - 'textbox "Cron 表达式（5 字段） 格式: 分 时 日 月 星期 例:" [ref=e218]':
+            - /placeholder: 0 9 * * 1-5
+            - text: "*/2 * * * *"
+          - generic [ref=e219]: "格式: 分 时 日 月 星期 例:"
+        - generic [ref=e220]:
+          - generic [ref=e221]: 目标模式
+          - combobox "目标模式" [ref=e222]:
+            - option "队列（空闲 Agent 执行）" [selected]
+            - option "指定 Agent"
+            - option "广播（所有 Agent）"
+        - generic [ref=e223]:
+          - generic [ref=e224]: Prompt
+          - textbox "Prompt" [ref=e225]:
+            - /placeholder: 输入要执行的任务指令...
+            - text: echo hello
+        - generic [ref=e226]:
+          - generic [ref=e227]: 工作目录（可选）
+          - textbox "工作目录（可选）" [ref=e228]:
+            - /placeholder: /Users/junhang/workspace/project
+        - generic [ref=e229]:
+          - generic [ref=e230]: 超时秒数（可选）
+          - spinbutton "超时秒数（可选）" [ref=e231]
+        - generic [ref=e232]:
+          - generic [ref=e233]: 立即启用
+          - generic [ref=e237] [cursor=pointer]: 启用
+      - generic [ref=e238]:
+        - button "取消" [ref=e239] [cursor=pointer]
+        - button "保存" [ref=e240] [cursor=pointer]
+  - complementary [ref=e26]:
+    - generic [ref=e27]:
+      - generic [ref=e28]:
+        - generic [ref=e29]:
+          - heading "Leader 群聊指挥中心" [level=2] [ref=e30]
+          - paragraph [ref=e31]:
+            - text: 目标可单独选择，也可在输入中使用
+            - code [ref=e32]: "@Alice"
+            - text: 合并目标。
+        - button "切换 Token" [ref=e33] [cursor=pointer]
+      - generic [ref=e34]:
+        - generic [ref=e35]:
+          - generic [ref=e36]:
+            - paragraph [ref=e37]: echo hello world
+            - text: 任务队列
+          - generic [ref=e38]: 22:38:00
+        - generic [ref=e39]:
+          - generic [ref=e40]:
+            - paragraph [ref=e41]: echo hello world
+            - text: 任务队列
+          - generic [ref=e42]: 22:38:00
+        - generic [ref=e43]:
+          - generic [ref=e44]:
+            - paragraph [ref=e45]: hello
+            - text: 任务队列
+          - generic [ref=e46]: 22:38:00
+        - generic [ref=e47]:
+          - generic [ref=e48]:
+            - paragraph [ref=e49]: echo hello world
+            - text: 任务队列
+          - generic [ref=e50]: 22:40:00
+        - generic [ref=e51]:
+          - generic [ref=e52]:
+            - paragraph [ref=e53]: echo hello world
+            - text: 任务队列
+          - generic [ref=e54]: 22:40:00
+        - generic [ref=e55]:
+          - generic [ref=e56]:
+            - paragraph [ref=e57]: hello
+            - text: 任务队列
+          - generic [ref=e58]: 22:40:00
+        - generic [ref=e59]:
+          - generic [ref=e60]:
+            - paragraph [ref=e61]: echo hello world
+            - text: 任务队列
+          - generic [ref=e62]: 22:42:00
+        - generic [ref=e63]:
+          - generic [ref=e64]:
+            - paragraph [ref=e65]: echo hello world
+            - text: 任务队列
+          - generic [ref=e66]: 22:42:00
+        - generic [ref=e67]:
+          - generic [ref=e68]:
+            - paragraph [ref=e69]: hello
+            - text: 任务队列
+          - generic [ref=e70]: 22:42:00
+        - generic [ref=e71]:
+          - generic [ref=e72]:
+            - paragraph [ref=e73]: hello
+            - text: 任务队列
+          - generic [ref=e74]: 22:44:00
+        - generic [ref=e75]:
+          - generic [ref=e76]:
+            - paragraph [ref=e77]: echo hello world
+            - text: 任务队列
+          - generic [ref=e78]: 22:44:00
+        - generic [ref=e79]:
+          - generic [ref=e80]:
+            - paragraph [ref=e81]: echo hello world
+            - text: 任务队列
+          - generic [ref=e82]: 22:44:00
+        - generic [ref=e83]:
+          - generic [ref=e84]:
+            - paragraph [ref=e85]: echo hello world
+            - text: 任务队列
+          - generic [ref=e86]: 22:46:00
+        - generic [ref=e87]:
+          - generic [ref=e88]:
+            - paragraph [ref=e89]: hello
+            - text: 任务队列
+          - generic [ref=e90]: 22:46:00
+        - generic [ref=e91]:
+          - generic [ref=e92]:
+            - paragraph [ref=e93]: echo hello world
+            - text: 任务队列
+          - generic [ref=e94]: 22:46:00
+        - generic [ref=e95]:
+          - generic [ref=e96]:
+            - paragraph [ref=e97]: echo hello
+            - text: 任务队列
+          - generic [ref=e98]: 22:46:00
+        - generic [ref=e241]:
+          - generic [ref=e242]:
+            - paragraph [ref=e243]: echo hello world
+            - text: 任务队列
+          - generic [ref=e244]: 22:48:00
+        - generic [ref=e245]:
+          - generic [ref=e246]:
+            - paragraph [ref=e247]: echo hello world
+            - text: 任务队列
+          - generic [ref=e248]: 22:48:00
+        - generic [ref=e249]:
+          - generic [ref=e250]:
+            - paragraph [ref=e251]: hello
+            - text: 任务队列
+          - generic [ref=e252]: 22:48:00
+        - generic [ref=e253]:
+          - generic [ref=e254]:
+            - paragraph [ref=e255]: echo hello
+            - text: 任务队列
+          - generic [ref=e256]: 22:48:00
+      - generic [ref=e99]:
+        - generic [ref=e100]:
+          - button "任务队列" [ref=e101] [cursor=pointer]
+          - button "@所有员工" [ref=e102] [cursor=pointer]
+        - generic [ref=e103]:
+          - generic [ref=e104]: 工作目录（可选）
+          - textbox "工作目录（可选）" [ref=e105]:
+            - /placeholder: /Users/junhang/workspace/project
+        - generic [ref=e106]:
+          - generic [ref=e107]: 群聊输入
+          - textbox "群聊输入" [ref=e108]:
+            - /placeholder: 按 Enter 发送；Option/Alt + Enter 换行。默认进入任务队列，由一个空闲 Agent 执行；输入 @Alice 或选择 Agent 可指定会话。
+        - button "发送到群聊" [ref=e109] [cursor=pointer]

@@ -1,0 +1,11 @@
+- generic [ref=e4]:
+  - generic [ref=e5]:
+    - generic [ref=e6]: AI
+    - generic [ref=e7]:
+      - strong [ref=e8]: AI Teams
+      - paragraph [ref=e9]: 员工协作控制台
+  - generic [ref=e10]:
+    - generic [ref=e11]: 访问 Token
+    - textbox "访问 Token" [ref=e12]:
+      - /placeholder: AI_TEAMS_AUTH_TOKEN
+  - button "连接控制台" [ref=e13] [cursor=pointer]

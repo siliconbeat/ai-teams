@@ -1,0 +1,83 @@
+- generic [ref=e3]:
+  - banner [ref=e14]:
+    - generic [ref=e15]:
+      - generic [ref=e16]: AI
+      - generic [ref=e17]:
+        - strong [ref=e18]: AI Teams
+        - paragraph [ref=e19]: 员工协作控制台
+    - navigation [ref=e20]:
+      - button "监控台" [ref=e21] [cursor=pointer]
+      - button "员工管理" [ref=e22] [cursor=pointer]
+      - button "任务日志" [ref=e23] [cursor=pointer]
+      - button "定时任务" [ref=e24] [cursor=pointer]
+      - button "异常记录" [ref=e25] [cursor=pointer]
+      - button "统计分析" [ref=e26] [cursor=pointer]
+  - main [ref=e57]:
+    - generic [ref=e58]:
+      - generic [ref=e59]:
+        - generic [ref=e60]:
+          - heading "定时任务" [level=1] [ref=e61]
+          - paragraph [ref=e62]: 管理 cron 定时调度，自动向 Agent 或队列派发任务。
+        - button "+ 新建" [active] [ref=e63] [cursor=pointer]
+      - generic [ref=e65]: 暂无定时任务。点击"新建"创建第一个。
+    - generic [ref=e67]:
+      - generic [ref=e68]:
+        - heading "新建定时任务" [level=2] [ref=e69]
+        - button "✕" [ref=e70] [cursor=pointer]
+      - generic [ref=e71]:
+        - generic [ref=e72]:
+          - generic [ref=e73]: 名称
+          - textbox "名称" [ref=e74]:
+            - /placeholder: 每日站会报告
+        - generic [ref=e75]:
+          - generic [ref=e76]: Cron 表达式（5 字段）
+          - 'textbox "Cron 表达式（5 字段） 格式: 分 时 日 月 星期 例: 0 9 * * 1-5 (工作日早9点)" [ref=e77]':
+            - /placeholder: 0 9 * * 1-5
+          - generic [ref=e78]: "格式: 分 时 日 月 星期 例: 0 9 * * 1-5 (工作日早9点)"
+        - generic [ref=e79]:
+          - generic [ref=e80]: 目标模式
+          - combobox "目标模式" [ref=e81]:
+            - option "队列（空闲 Agent 执行）" [selected]
+            - option "指定 Agent"
+            - option "广播（所有 Agent）"
+        - generic [ref=e82]:
+          - generic [ref=e83]: Prompt
+          - textbox "Prompt" [ref=e84]:
+            - /placeholder: 输入要执行的任务指令...
+        - generic [ref=e85]:
+          - generic [ref=e86]: 工作目录（可选）
+          - textbox "工作目录（可选）" [ref=e87]:
+            - /placeholder: /Users/junhang/workspace/project
+        - generic [ref=e88]:
+          - generic [ref=e89]: 超时秒数（可选）
+          - spinbutton "超时秒数（可选）" [ref=e90]
+        - generic [ref=e91]:
+          - generic [ref=e92]: 立即启用
+          - generic [ref=e96] [cursor=pointer]: 启用
+      - generic [ref=e97]:
+        - button "取消" [ref=e98] [cursor=pointer]
+        - button "创建" [disabled] [ref=e99] [cursor=pointer]
+  - complementary [ref=e36]:
+    - generic [ref=e37]:
+      - generic [ref=e38]:
+        - generic [ref=e39]:
+          - heading "Leader 群聊指挥中心" [level=2] [ref=e40]
+          - paragraph [ref=e41]:
+            - text: 目标可单独选择，也可在输入中使用
+            - code [ref=e42]: "@Alice"
+            - text: 合并目标。
+        - button "切换 Token" [ref=e43] [cursor=pointer]
+      - generic [ref=e45]: 还没有发送过指令。
+      - generic [ref=e46]:
+        - generic [ref=e47]:
+          - button "任务队列" [ref=e48] [cursor=pointer]
+          - button "@所有员工" [ref=e49] [cursor=pointer]
+        - generic [ref=e50]:
+          - generic [ref=e51]: 工作目录（可选）
+          - textbox "工作目录（可选）" [ref=e52]:
+            - /placeholder: /Users/junhang/workspace/project
+        - generic [ref=e53]:
+          - generic [ref=e54]: 群聊输入
+          - textbox "群聊输入" [ref=e55]:
+            - /placeholder: 按 Enter 发送；Option/Alt + Enter 换行。默认进入任务队列，由一个空闲 Agent 执行；输入 @Alice 或选择 Agent 可指定会话。
+        - button "发送到群聊" [ref=e56] [cursor=pointer]
