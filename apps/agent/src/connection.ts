@@ -169,7 +169,12 @@ export function connect(
     }
   });
 
-  state.socket.on("close", () => {
+  state.socket.on("close", (code, reason) => {
+    if (code === 1008) {
+      console.error(`[agent:${EMPLOYEE_ID}] 认证失败：Token 无效或服务器拒绝连接。${reason ? ` (${reason})` : ""}`);
+      console.error(`[agent:${EMPLOYEE_ID}] 请检查 AI_TEAMS_AUTH_TOKEN 配置后重新启动。`);
+      process.exit(1);
+    }
     console.log(`[agent:${EMPLOYEE_ID}] disconnected, reconnecting in ${RECONNECT_MS}ms...`);
     scheduleReconnect(state, () => connect(state, getMainTask, getQueueTask, onMessage));
   });

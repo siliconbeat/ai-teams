@@ -957,7 +957,6 @@ export default function App() {
               <div className="leader-message-wrapper" key={item.id}>
                 <div className={`chat-message leader-message ${item.status ? `task-${item.status}` : ""}`}>
                   <p>{item.content}</p>
-                  {item.target ? <small>{item.target}</small> : null}
                   {item.executingBy && item.executingBy.length > 0 && (
                     <div className="chat-message__executing">
                       {item.executingBy.map((agent) => (
@@ -968,7 +967,7 @@ export default function App() {
                     </div>
                   )}
                 </div>
-                <span className="chat-message__time-outside">{item.createdAt}</span>
+                <span className="chat-message__time-outside">{item.target ? `${item.target} · ` : ""}{item.createdAt}</span>
               </div>
             ) : (
               <div className={`chat-message employee-message ${item.status ? `task-${item.status}` : ""}`} key={item.id}>
@@ -1532,7 +1531,6 @@ export default function App() {
                   <div className="leader-message-wrapper" key={item.id}>
                     <div className={`chat-message leader-message ${item.status ? `task-${item.status}` : ""}`}>
                       <p>{item.content}</p>
-                      {item.target ? <small>{item.target}</small> : null}
                       {item.executingBy && item.executingBy.length > 0 && (
                         <div className="chat-message__executing">
                           {item.executingBy.map((agent) => (
@@ -1543,7 +1541,7 @@ export default function App() {
                         </div>
                       )}
                     </div>
-                    <span className="chat-message__time-outside">{item.createdAt}</span>
+                    <span className="chat-message__time-outside">{item.target ? `${item.target} · ` : ""}{item.createdAt}</span>
                   </div>
                 ) : (
                   <div className={`chat-message employee-message ${item.status ? `task-${item.status}` : ""}`} key={item.id}>
