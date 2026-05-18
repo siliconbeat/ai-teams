@@ -985,6 +985,12 @@ if (isCli) {
         if (status.running) {
           await stopDaemon(resolvePidFile());
         }
+      } else if (!process.env.__AI_TEAMS_DAEMON_WATCHDOG && !process.env.__AI_TEAMS_DAEMON_WORKER) {
+        const status = getDaemonStatus(resolvePidFile());
+        if (status.running) {
+          console.log(`Already running (PID ${status.pid}).`);
+          process.exit(0);
+        }
       }
 
       applyCliArgsToEnv();
