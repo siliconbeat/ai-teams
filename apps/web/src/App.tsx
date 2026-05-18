@@ -78,6 +78,28 @@ type ExecutingAgent = {
   status: TaskStatus;
 };
 
+function renderTerminalContent(text: string) {
+  const lines = text.split("\n");
+  return lines.map((line, i) => {
+    let cls = "term-output"; // Agent output — green (default)
+    if (line.startsWith("$ ") || line.startsWith("$\t")) {
+      cls = "term-meta"; // Task meta — dim cyan
+    } else if (line.startsWith("[done]")) {
+      cls = "term-done"; // Claude done markers — gray
+    } else if (line.startsWith("[tool]")) {
+      cls = "term-tool"; // Tool usage — yellow
+    } else if (line.startsWith("[agent]")) {
+      cls = "term-agent"; // Agent system — blue
+    }
+    return (
+      <span key={i} className={cls}>
+        {line}
+        {i < lines.length - 1 ? "\n" : ""}
+      </span>
+    );
+  });
+}
+
 type ChatFeedItem = {
   id: string;
   side: "leader" | "employee";
@@ -941,7 +963,7 @@ export default function App() {
                 <span>{emp?.name ?? mobileTerminalEmployeeId}</span>
                 <button onClick={() => setMobileTerminalEmployeeId(null)}>✕</button>
               </div>
-              <pre className="mobile-terminal-content" ref={mobileTerminalRef}>{text}</pre>
+              <pre className="mobile-terminal-content" ref={mobileTerminalRef}>{renderTerminalContent(text)}</pre>
             </div>
           </div>
         );
@@ -1119,7 +1141,7 @@ export default function App() {
                           logWindowRefs.current[employee.id] = element;
                         }}
                       >
-                        {terminalText}
+                        {renderTerminalContent(terminalText)}
                       </pre>
                     </article>
                   );

@@ -375,6 +375,21 @@ textarea {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
 }
 
+.log-window .term-meta,
+.mobile-terminal-content .term-meta { color: #79d7ff; }
+
+.log-window .term-output,
+.mobile-terminal-content .term-output { color: #bfffd4; }
+
+.log-window .term-done,
+.mobile-terminal-content .term-done { color: #6b7280; }
+
+.log-window .term-tool,
+.mobile-terminal-content .term-tool { color: #fbbf24; }
+
+.log-window .term-agent,
+.mobile-terminal-content .term-agent { color: #60a5fa; }
+
 .status-pill {
   display: inline-flex;
   align-items: center;
