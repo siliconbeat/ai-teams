@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 import {
@@ -7,6 +8,7 @@ import {
   type ServerToEmployeeMessage,
   type TaskTargetMode,
 } from "@ai-teams/shared";
+import { daemonize, stopDaemon, getDaemonStatus } from "@ai-teams/shared/daemon";
 import {
   EMPLOYEE_ID,
   MAX_ERROR_TAIL,
@@ -23,6 +25,8 @@ import {
   type ConnectionState,
 } from "./connection.js";
 import { runSetup, loadConfigFile } from "./setup.js";
+
+const PKG_VERSION = "0.2.0";
 
 let mainTask: ActiveTask | null = null;
 let queueTask: ActiveTask | null = null;
@@ -234,7 +238,13 @@ if (isCli) {
   if (args.includes("--help") || args.includes("-h")) {
     console.log(`ai-teams-agent — AI Teams 员工代理
 
-用法: ai-teams-agent [选项]
+用法: ai-teams-agent <command> [选项]
+
+命令:
+  start [选项]          后台启动守护进程
+  stop                  停止守护进程
+  restart [选项]        重启守护进程
+  status                查看运行状态
 
 选项:
   --server <url>        服务器地址
@@ -246,51 +256,111 @@ if (isCli) {
   --config              重新运行配置向导
   -v, --version         显示版本号
   -h, --help            显示帮助
+
+不带命令直接运行时为前台模式。
 `);
     process.exit(0);
   }
 
+  function getArgValue(name: string): string | undefined {
+    const idx = args.indexOf(name);
+    if (idx === -1) return undefined;
+    return args[idx + 1];
+  }
+
+  // Resolve paths based on workspace and employee ID
+  function resolveWorkspace(): string {
+    return getArgValue("--workspace") || process.env.DEFAULT_WORKSPACE || process.cwd();
+  }
+  function resolveAgentDir(): string {
+    const ws = resolveWorkspace();
+    const id = getArgValue("--id") || process.env.EMPLOYEE_ID || "emp_local";
+    return path.join(ws, ".ai-teams", "agents", id);
+  }
+  function resolvePidFile(): string {
+    return path.join(resolveAgentDir(), "agent.pid");
+  }
+  function resolveLogDir(): string {
+    return path.join(resolveAgentDir(), "logs");
+  }
+
+  function applyCliArgsToEnv(): void {
+    const cliServer = getArgValue("--server");
+    const cliToken = getArgValue("--token");
+    const cliId = getArgValue("--id");
+    const cliName = getArgValue("--name");
+    const cliWorkspace = getArgValue("--workspace");
+    const cliRunner = getArgValue("--runner");
+    if (cliServer) process.env.SERVER_URL = cliServer;
+    if (cliToken) process.env.AI_TEAMS_AUTH_TOKEN = cliToken;
+    if (cliId) process.env.EMPLOYEE_ID = cliId;
+    if (cliName) process.env.EMPLOYEE_NAME = cliName;
+    if (cliWorkspace) process.env.DEFAULT_WORKSPACE = cliWorkspace;
+    if (cliRunner) process.env.RUNNER_MODE = cliRunner;
+  }
+
   if (args.includes("--config")) {
     void runSetup(loadConfigFile()).then(() => {
-      console.log("  \u2713 重新配置完成，请重新启动 agent。");
+      console.log("  ✓ 重新配置完成，请重新启动 agent。");
       process.exit(0);
     });
   } else {
-    void (async () => {
+    const subcommand = args[0];
+
+    if (subcommand === "start" || subcommand === "restart") {
+      if (subcommand === "restart") {
+        const pidFile = resolvePidFile();
+        const status = getDaemonStatus(pidFile);
+        if (status.running) {
+          void stopDaemon(pidFile);
+        }
+      }
+
+      applyCliArgsToEnv();
+
+      // Ensure config exists
       const fileConfig = loadConfigFile();
       const hasEnvConfig = process.env.AI_TEAMS_AUTH_TOKEN || process.env.SERVER_URL;
       if (!fileConfig && !hasEnvConfig) {
-        console.log("\n  \u26A0 未找到配置文件且未设置环境变量，启动配置向导...\n");
-        await runSetup(null);
+        console.log("\n  ⚠ 未找到配置文件且未设置环境变量，请先运行 --config 配置。\n");
+        process.exit(1);
       }
 
-      // Apply CLI arg overrides
-      function getArgValue(name: string): string | undefined {
-        const idx = args.indexOf(name);
-        if (idx === -1) return undefined;
-        return args[idx + 1];
+      void (async () => {
+        await daemonize({
+          name: "ai-teams-agent",
+          pidFile: resolvePidFile(),
+          logFile: path.join(resolveLogDir(), "agent.log"),
+          run: async () => {
+            console.log("  ✓ 正在连接服务器...");
+            connect();
+          },
+        });
+      })();
+    } else if (subcommand === "stop") {
+      void stopDaemon(resolvePidFile());
+    } else if (subcommand === "status") {
+      const status = getDaemonStatus(resolvePidFile());
+      if (status.running) {
+        console.log(`ai-teams-agent is running (PID ${status.pid})`);
+        console.log(`Log: ${path.join(resolveLogDir(), "agent.log")}`);
+      } else {
+        console.log("ai-teams-agent is not running.");
       }
-      const cliServer = getArgValue("--server");
-      const cliToken = getArgValue("--token");
-      const cliId = getArgValue("--id");
-      const cliName = getArgValue("--name");
-      const cliWorkspace = getArgValue("--workspace");
-      const cliRunner = getArgValue("--runner");
-      if (cliServer) process.env.SERVER_URL = cliServer;
-      if (cliToken) process.env.AI_TEAMS_AUTH_TOKEN = cliToken;
-      if (cliId) process.env.EMPLOYEE_ID = cliId;
-      if (cliName) process.env.EMPLOYEE_NAME = cliName;
-      if (cliWorkspace) process.env.DEFAULT_WORKSPACE = cliWorkspace;
-      if (cliRunner) process.env.RUNNER_MODE = cliRunner;
+    } else {
+      // No sub-command — foreground mode (existing behavior)
+      void (async () => {
+        const fileConfig = loadConfigFile();
+        const hasEnvConfig = process.env.AI_TEAMS_AUTH_TOKEN || process.env.SERVER_URL;
+        if (!fileConfig && !hasEnvConfig) {
+          console.log("\n  ⚠ 未找到配置文件且未设置环境变量，启动配置向导...\n");
+          await runSetup(null);
+        }
 
-      // Config is read at module level via config.ts, but CLI args
-      // set env vars which take priority. We need to reconnect with
-      // fresh config by re-importing the values. Since config.ts reads
-      // env vars (which we just set), and the module was already loaded,
-      // we rely on env var overrides being read from process.env directly
-      // in config.ts — which they are.
-      console.log(`  \u2713 正在连接服务器...`);
-      connect();
-    })();
+        applyCliArgsToEnv();
+        console.log("  ✓ 正在连接服务器...");
+        connect();
+      })();
+    }
   }
 }
