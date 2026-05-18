@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { describe, it, expect, afterEach } from "vitest";
-import { readPidFile, writePidFile, removePidFile, isProcessRunning, spawnWorker } from "./daemon.js";
+import { readPidFile, writePidFile, removePidFile, isProcessRunning, spawnWorker, getDaemonStatus, stopDaemon } from "./daemon.js";
 
 const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), "ai-teams-daemon-test-"));
 
@@ -81,5 +81,69 @@ describe("spawnWorker", () => {
     const exitCode = await new Promise<number>((resolve) => child.on("exit", resolve));
     expect(exitCode).toBe(0);
     expect(fs.existsSync(readyFile)).toBe(true);
+  });
+});
+
+describe("getDaemonStatus", () => {
+  const dirs: string[] = [];
+
+  afterEach(() => {
+    for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
+    dirs.length = 0;
+  });
+
+  it("returns stopped when PID file does not exist", () => {
+    const dir = tmpDir();
+    dirs.push(dir);
+    const status = getDaemonStatus(path.join(dir, "no.pid"));
+    expect(status.running).toBe(false);
+    expect(status.pid).toBeNull();
+  });
+
+  it("returns running when PID file points to a live process", () => {
+    const dir = tmpDir();
+    dirs.push(dir);
+    const pidFile = path.join(dir, "test.pid");
+    writePidFile(pidFile, process.pid);
+    const status = getDaemonStatus(pidFile);
+    expect(status.running).toBe(true);
+    expect(status.pid).toBe(process.pid);
+  });
+
+  it("returns stopped and cleans stale PID when process is dead", () => {
+    const dir = tmpDir();
+    dirs.push(dir);
+    const pidFile = path.join(dir, "test.pid");
+    writePidFile(pidFile, 9999999);
+    const status = getDaemonStatus(pidFile);
+    expect(status.running).toBe(false);
+    expect(status.pid).toBeNull();
+    // stale PID file should be removed
+    expect(fs.existsSync(pidFile)).toBe(false);
+  });
+});
+
+describe("stopDaemon", () => {
+  const dirs: string[] = [];
+
+  afterEach(() => {
+    for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
+    dirs.length = 0;
+  });
+
+  it("does nothing when PID file does not exist", async () => {
+    const dir = tmpDir();
+    dirs.push(dir);
+    // Should not throw
+    await stopDaemon(path.join(dir, "no.pid"));
+  });
+
+  it("cleans stale PID file when process is already dead", async () => {
+    const dir = tmpDir();
+    dirs.push(dir);
+    const pidFile = path.join(dir, "test.pid");
+    writePidFile(pidFile, 9999999);
+    await stopDaemon(pidFile);
+    expect(fs.existsSync(pidFile)).toBe(false);
   });
 });

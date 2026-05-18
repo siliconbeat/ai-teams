@@ -132,6 +132,56 @@ export async function runWatchdog(opts: {
   cleanupAndExit(0);
 }
 
+// --- Stop / Status helpers ---
+
+export type DaemonStatus = {
+  running: boolean;
+  pid: number | null;
+};
+
+export function getDaemonStatus(pidFile: string): DaemonStatus {
+  const pid = readPidFile(pidFile);
+  if (pid === null) {
+    return { running: false, pid: null };
+  }
+  if (isProcessRunning(pid)) {
+    return { running: true, pid };
+  }
+  // Stale PID file — clean it up
+  removePidFile(pidFile);
+  return { running: false, pid: null };
+}
+
+export async function stopDaemon(pidFile: string): Promise<void> {
+  const pid = readPidFile(pidFile);
+  if (pid === null) {
+    console.log("Not running (no PID file found).");
+    return;
+  }
+  if (!isProcessRunning(pid)) {
+    removePidFile(pidFile);
+    console.log("Not running (stale PID file cleaned).");
+    return;
+  }
+
+  process.kill(pid, "SIGTERM");
+
+  // Wait up to 10 seconds for process to exit
+  for (let i = 0; i < 20; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    if (!isProcessRunning(pid)) {
+      removePidFile(pidFile);
+      console.log(`Stopped (PID ${pid}).`);
+      return;
+    }
+  }
+
+  // Force kill
+  process.kill(pid, "SIGKILL");
+  removePidFile(pidFile);
+  console.log(`Force killed (PID ${pid}).`);
+}
+
 // --- Daemonization ---
 
 export type DaemonOptions = {
