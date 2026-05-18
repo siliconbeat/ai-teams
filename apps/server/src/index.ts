@@ -713,6 +713,10 @@ if (isCli) {
     if (idx === -1) return undefined;
     return args[idx + 1];
   }
+  if (args.includes("--version") || args.includes("-v")) {
+    console.log("0.1.3");
+    process.exit(0);
+  }
   if (args.includes("--help") || args.includes("-h")) {
     console.log(`ai-teams-server — AI Teams 中央服务器
 
@@ -726,6 +730,7 @@ if (isCli) {
   --db-path <path>      数据库路径
   --log-level <level>   日志级别 trace/debug/info/warn/error (默认 info)
   --log-dir <dir>       日志文件目录 (不设则仅输出到 stdout)
+  -v, --version         显示版本号
   -h, --help            显示帮助
 `);
     process.exit(0);

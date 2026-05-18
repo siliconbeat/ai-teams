@@ -17,8 +17,9 @@ if (!fs.existsSync(sharedDist)) {
 }
 
 const distDir = path.join(appDir, "dist");
-if (fs.existsSync(distDir)) {
-  fs.rmSync(distDir, { recursive: true, force: true });
+const indexFile = path.join(distDir, "index.js");
+if (fs.existsSync(indexFile)) {
+  fs.rmSync(indexFile);
 }
 
 const external = pkg === "server"
