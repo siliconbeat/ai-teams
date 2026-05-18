@@ -9,6 +9,7 @@ if (!pkg) {
 }
 
 const appDir = path.join(__dirname, "..", "apps", pkg);
+const pkgJson = JSON.parse(fs.readFileSync(path.join(appDir, "package.json"), "utf8"));
 const sharedDist = path.join(__dirname, "..", "packages", "shared", "dist");
 
 if (!fs.existsSync(sharedDist)) {
@@ -35,6 +36,7 @@ esbuild
     format: "esm",
     outdir: path.join(appDir, "dist"),
     banner: { js: "#!/usr/bin/env node" },
+    define: { PKG_VERSION: JSON.stringify(pkgJson.version) },
     external,
     alias: {
       "@ai-teams/shared": sharedDist,
