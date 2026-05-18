@@ -247,10 +247,15 @@ export default function App() {
         if (showReconnectTimer) { clearTimeout(showReconnectTimer); showReconnectTimer = null; }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         if (disposed) return;
         wsRef.current = null;
         setConnected(false);
+        if (event.code === 1008) {
+          setConnectionError("认证失败：Token 无效，请检查后重新输入。");
+          setShowReconnect(false);
+          return;
+        }
         // Show reconnect button after 10s if still not connected
         if (showReconnectTimer) clearTimeout(showReconnectTimer);
         showReconnectTimer = setTimeout(() => setShowReconnect(true), 10000);
@@ -523,6 +528,7 @@ export default function App() {
       return;
     }
     localStorage.setItem(TOKEN_STORAGE_KEY, next);
+    setConnectionError(null);
     setAuthToken(next);
   }
 
