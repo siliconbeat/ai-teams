@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyInstance } from "fastify";
 import swagger from "@fastify/swagger";
@@ -16,12 +17,13 @@ import {
   type ServerToLeaderMessage,
   type StateSnapshot,
 } from "@ai-teams/shared";
-import { createDatabaseFromEnv, initDb, hydrateState, type Database, queryTasks, getTaskById, deleteTask, updateTaskFields, dbRowToTask } from "./db.js";
-import { type RestTaskRequest, errorResponseSchema, snapshotSchema, sessionHistorySchema, restTaskRequestSchema, restTaskAcceptedSchema, taskListResponseSchema, taskRecordSchema, taskPatchSchema, parseRestTaskRequest, claudeSessionsResponseSchema } from "./schemas.js";
+import { createDatabaseFromEnv, initDb, hydrateState, type Database, queryTasks, getTaskById, deleteTask, updateTaskFields, dbRowToTask, upsertSchedule, getAllSchedules, getScheduleById, deleteScheduleRow, updateScheduleFields, type ScheduleRecord } from "./db.js";
+import { type RestTaskRequest, errorResponseSchema, snapshotSchema, sessionHistorySchema, restTaskRequestSchema, restTaskAcceptedSchema, taskListResponseSchema, taskRecordSchema, taskPatchSchema, parseRestTaskRequest, claudeSessionsResponseSchema, createScheduleRequestSchema, updateScheduleRequestSchema, scheduleResponseSchema, scheduleListResponseSchema, type CreateScheduleRequest, type UpdateScheduleRequest } from "./schemas.js";
 import { createDispatch, nowIso, sendJson } from "./dispatch.js";
 import type { DispatchContext } from "./dispatch.js";
 import { createInMemoryStateStore } from "./state-store.js";
 import { createEncryptor } from "./crypto.js";
+import { startScheduleJob, stopScheduleJob, type ScheduleDispatchFn } from "./scheduler.js";
 
 const DEFAULT_PORT = 3789;
 
@@ -141,6 +143,33 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     encryptor: createEncryptor(process.env.AI_TEAMS_ENCRYPTION_KEY),
   };
   const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage, cancelTaskById } = createDispatch(dispatchCtx);
+
+  const scheduleDispatchFn: ScheduleDispatchFn = (message, webhookUrl, cliConfig, priority, requiredLabels) => {
+    return dispatchLeaderCommand(message, webhookUrl, cliConfig, priority, requiredLabels);
+  };
+
+  async function onScheduleFire(scheduleId: string) {
+    const now = new Date().toISOString();
+    const job = state.scheduleJobs.get(scheduleId);
+    const nextRun = job?.nextDate()?.toISO() ?? null;
+    await updateScheduleFields(db, scheduleId, { lastRunAt: now, nextRunAt: nextRun });
+  }
+
+  async function loadAndStartSchedules() {
+    const schedules = await getAllSchedules(db);
+    for (const schedule of schedules) {
+      if (schedule.enabled) {
+        try {
+          startScheduleJob(schedule, scheduleDispatchFn, state.scheduleJobs, onScheduleFire);
+        } catch (err) {
+          app.log.error({ scheduleId: schedule.id, cronExpr: schedule.cronExpr, err }, "Failed to start schedule");
+        }
+      }
+    }
+    app.log.info({ count: schedules.filter((s) => s.enabled).length }, "Schedules loaded");
+  }
+
+  await loadAndStartSchedules();
 
   function buildSnapshot(): StateSnapshot {
     return {
@@ -587,6 +616,172 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     },
   );
 
+  // ── Schedule Routes ───────────────────────────────────────────────────
+
+  app.get(
+    "/api/schedules",
+    {
+      schema: {
+        tags: ["schedules"],
+        summary: "List all schedules",
+        response: { 200: scheduleListResponseSchema, 401: errorResponseSchema },
+      },
+    },
+    async () => {
+      const schedules = await getAllSchedules(db);
+      return { schedules };
+    },
+  );
+
+  app.get<{ Params: { scheduleId: string } }>(
+    "/api/schedules/:scheduleId",
+    {
+      schema: {
+        tags: ["schedules"],
+        summary: "Get a schedule by ID",
+        params: { type: "object", required: ["scheduleId"], properties: { scheduleId: { type: "string", minLength: 1 } } },
+        response: { 200: scheduleResponseSchema, 404: errorResponseSchema, 401: errorResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const schedule = await getScheduleById(db, request.params.scheduleId);
+      if (!schedule) return reply.code(404).send({ error: "Schedule not found." });
+      return schedule;
+    },
+  );
+
+  app.post<{ Body: CreateScheduleRequest }>(
+    "/api/schedules",
+    {
+      schema: {
+        tags: ["schedules"],
+        summary: "Create a schedule",
+        body: createScheduleRequestSchema,
+        response: { 201: scheduleResponseSchema, 400: errorResponseSchema, 401: errorResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const body = request.body;
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      const schedule: ScheduleRecord = {
+        id,
+        name: body.name,
+        cronExpr: body.cron,
+        enabled: body.enabled ?? true,
+        targetMode: body.targetMode ?? "queue",
+        targetAgents: body.targetAgents ?? [],
+        prompt: body.prompt,
+        workspace: body.workspace ?? null,
+        timeoutSec: body.timeoutSec ?? null,
+        priority: body.priority ?? 0,
+        requiredLabels: body.requiredLabels ?? null,
+        lastRunAt: null,
+        nextRunAt: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      try {
+        if (schedule.enabled) {
+          startScheduleJob(schedule, scheduleDispatchFn, state.scheduleJobs, onScheduleFire);
+          schedule.nextRunAt = state.scheduleJobs.get(id)?.nextDate()?.toISO() ?? null;
+        }
+        await upsertSchedule(db, schedule);
+        return reply.code(201).send(schedule);
+      } catch (err) {
+        stopScheduleJob(state.scheduleJobs, id);
+        return reply.code(400).send({ error: err instanceof Error ? err.message : "Invalid schedule." });
+      }
+    },
+  );
+
+  app.patch<{ Params: { scheduleId: string }; Body: UpdateScheduleRequest }>(
+    "/api/schedules/:scheduleId",
+    {
+      schema: {
+        tags: ["schedules"],
+        summary: "Update a schedule",
+        params: { type: "object", required: ["scheduleId"], properties: { scheduleId: { type: "string", minLength: 1 } } },
+        body: updateScheduleRequestSchema,
+        response: { 200: scheduleResponseSchema, 404: errorResponseSchema, 401: errorResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const existing = await getScheduleById(db, request.params.scheduleId);
+      if (!existing) return reply.code(404).send({ error: "Schedule not found." });
+      const fields: Record<string, unknown> = {};
+      if (request.body.name !== undefined) fields.name = request.body.name;
+      if (request.body.cron !== undefined) fields.cronExpr = request.body.cron;
+      if (request.body.enabled !== undefined) fields.enabled = request.body.enabled;
+      if (request.body.targetMode !== undefined) fields.targetMode = request.body.targetMode;
+      if (request.body.targetAgents !== undefined) fields.targetAgents = request.body.targetAgents;
+      if (request.body.prompt !== undefined) fields.prompt = request.body.prompt;
+      if (request.body.workspace !== undefined) fields.workspace = request.body.workspace;
+      if (request.body.timeoutSec !== undefined) fields.timeoutSec = request.body.timeoutSec;
+      if (request.body.priority !== undefined) fields.priority = request.body.priority;
+      if (request.body.requiredLabels !== undefined) fields.requiredLabels = request.body.requiredLabels;
+      const updated = await updateScheduleFields(db, request.params.scheduleId, fields);
+      if (!updated) return reply.code(404).send({ error: "Schedule not found." });
+      stopScheduleJob(state.scheduleJobs, request.params.scheduleId);
+      if (updated.enabled) {
+        startScheduleJob(updated, scheduleDispatchFn, state.scheduleJobs, onScheduleFire);
+        updated.nextRunAt = state.scheduleJobs.get(request.params.scheduleId)?.nextDate()?.toISO() ?? null;
+        await updateScheduleFields(db, request.params.scheduleId, { nextRunAt: updated.nextRunAt });
+      }
+      return updated;
+    },
+  );
+
+  app.delete<{ Params: { scheduleId: string } }>(
+    "/api/schedules/:scheduleId",
+    {
+      schema: {
+        tags: ["schedules"],
+        summary: "Delete a schedule",
+        params: { type: "object", required: ["scheduleId"], properties: { scheduleId: { type: "string", minLength: 1 } } },
+        response: {
+          200: { type: "object", required: ["deleted"], properties: { deleted: { type: "boolean" } } },
+          404: errorResponseSchema,
+          401: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      stopScheduleJob(state.scheduleJobs, request.params.scheduleId);
+      const deleted = await deleteScheduleRow(db, request.params.scheduleId);
+      if (!deleted) return reply.code(404).send({ error: "Schedule not found." });
+      return { deleted: true };
+    },
+  );
+
+  app.post<{ Params: { scheduleId: string } }>(
+    "/api/schedules/:scheduleId/trigger",
+    {
+      schema: {
+        tags: ["schedules"],
+        summary: "Manually trigger a schedule",
+        params: { type: "object", required: ["scheduleId"], properties: { scheduleId: { type: "string", minLength: 1 } } },
+        response: { 200: scheduleResponseSchema, 404: errorResponseSchema, 401: errorResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const schedule = await getScheduleById(db, request.params.scheduleId);
+      if (!schedule) return reply.code(404).send({ error: "Schedule not found." });
+      const atAgents = schedule.targetMode === "queue"
+        ? ("queue" as const)
+        : schedule.targetMode === "broadcast"
+        ? ("all" as const)
+        : schedule.targetAgents;
+      const result = dispatchLeaderCommand(
+        { type: "command.dispatch", atAgents, prompt: schedule.prompt, workspace: schedule.workspace ?? undefined, timeoutSec: schedule.timeoutSec ?? undefined },
+        null, undefined, schedule.priority, schedule.requiredLabels,
+      );
+      if (!result.ok) return reply.code(400).send({ error: result.message });
+      await onScheduleFire(request.params.scheduleId);
+      return await getScheduleById(db, request.params.scheduleId);
+    },
+  );
+
   app.get("/ws/agent", { websocket: true }, (socket, request) => {
     if (!isAuthorized(options.authToken, request.url, request.headers)) {
       socket.close(1008, "unauthorized");
@@ -669,6 +864,9 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     buildSnapshot,
     close: async () => {
       closing = true;
+      for (const job of state.scheduleJobs.values()) {
+        job.stop();
+      }
       for (const timer of state.taskTimeouts.values()) {
         clearTimeout(timer);
       }
@@ -727,6 +925,7 @@ if (isCli) {
   --port <port>         服务端口 (默认 3789)
   --host <host>         绑定地址 (默认 0.0.0.0)
   --data-dir <dir>      数据目录
+  --database-url <url>  PostgreSQL 连接字符串 (设置后使用 PostgreSQL 而非 SQLite)
   --db-path <path>      数据库路径
   --log-level <level>   日志级别 trace/debug/info/warn/error (默认 info)
   --log-dir <dir>       日志文件目录 (不设则仅输出到 stdout)
@@ -739,6 +938,7 @@ if (isCli) {
   const cliPort = getArgValue("--port");
   const cliHost = getArgValue("--host");
   const cliDataDir = getArgValue("--data-dir");
+  const cliDatabaseUrl = getArgValue("--database-url");
   const cliDbPath = getArgValue("--db-path");
   const cliLogLevel = getArgValue("--log-level");
   const cliLogDir = getArgValue("--log-dir");
@@ -746,6 +946,7 @@ if (isCli) {
   if (cliPort) process.env.AI_TEAMS_SERVER_PORT = cliPort;
   if (cliHost) process.env.HOST = cliHost;
   if (cliDataDir) process.env.DATA_DIR = cliDataDir;
+  if (cliDatabaseUrl) process.env.DATABASE_URL = cliDatabaseUrl;
   if (cliDbPath) process.env.DB_PATH = cliDbPath;
   if (cliLogLevel) process.env.LOG_LEVEL = cliLogLevel;
   if (cliLogDir) process.env.LOG_DIR = cliLogDir;

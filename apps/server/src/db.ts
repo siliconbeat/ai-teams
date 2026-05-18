@@ -178,6 +178,25 @@ export async function initDb(db: Database) {
       webhook_url  TEXT NOT NULL
     )
   `);
+  await db.run(`
+    CREATE TABLE IF NOT EXISTS schedules (
+      id              TEXT PRIMARY KEY,
+      name            TEXT NOT NULL,
+      cron_expr       TEXT NOT NULL,
+      enabled         INTEGER NOT NULL DEFAULT 1,
+      target_mode     TEXT NOT NULL DEFAULT 'queue',
+      target_agents   TEXT NOT NULL DEFAULT '[]',
+      prompt          TEXT NOT NULL,
+      workspace       TEXT,
+      timeout_sec     INTEGER,
+      priority        INTEGER NOT NULL DEFAULT 0,
+      required_labels TEXT DEFAULT '[]',
+      last_run_at     TEXT,
+      next_run_at     TEXT,
+      created_at      TEXT NOT NULL,
+      updated_at      TEXT NOT NULL
+    )
+  `);
 }
 
 // ---------------------------------------------------------------------------
@@ -463,4 +482,114 @@ function taskToDbValues(task: TaskRecord): unknown[] {
 
 function toSnakeCase(str: string): string {
   return str.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+}
+
+// ---------------------------------------------------------------------------
+// Schedule CRUD
+// ---------------------------------------------------------------------------
+
+export interface ScheduleRecord {
+  id: string;
+  name: string;
+  cronExpr: string;
+  enabled: boolean;
+  targetMode: "queue" | "direct" | "broadcast";
+  targetAgents: string[];
+  prompt: string;
+  workspace: string | null;
+  timeoutSec: number | null;
+  priority: number;
+  requiredLabels: string[] | null;
+  lastRunAt: string | null;
+  nextRunAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+type DbScheduleRow = {
+  id: string;
+  name: string;
+  cron_expr: string;
+  enabled: number;
+  target_mode: string;
+  target_agents: string;
+  prompt: string;
+  workspace: string | null;
+  timeout_sec: number | null;
+  priority: number;
+  required_labels: string | null;
+  last_run_at: string | null;
+  next_run_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+const SCHEDULE_COLUMNS = [
+  "id", "name", "cron_expr", "enabled", "target_mode", "target_agents",
+  "prompt", "workspace", "timeout_sec", "priority", "required_labels",
+  "last_run_at", "next_run_at", "created_at", "updated_at",
+] as const;
+
+const SCHEDULE_PLACEHOLDERS = SCHEDULE_COLUMNS.map((_, i) => `$${i + 1}`).join(", ");
+const SCHEDULE_UPDATE_SET = SCHEDULE_COLUMNS.slice(1).map((col) => `${col} = excluded.${col}`).join(", ");
+
+function dbRowToSchedule(row: DbScheduleRow): ScheduleRecord {
+  return {
+    id: row.id,
+    name: row.name,
+    cronExpr: row.cron_expr,
+    enabled: row.enabled === 1,
+    targetMode: row.target_mode as ScheduleRecord["targetMode"],
+    targetAgents: JSON.parse(row.target_agents || "[]"),
+    prompt: row.prompt,
+    workspace: row.workspace,
+    timeoutSec: row.timeout_sec,
+    priority: row.priority,
+    requiredLabels: row.required_labels ? JSON.parse(row.required_labels) : null,
+    lastRunAt: row.last_run_at,
+    nextRunAt: row.next_run_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function scheduleToDbValues(s: ScheduleRecord): unknown[] {
+  return [
+    s.id, s.name, s.cronExpr, s.enabled ? 1 : 0, s.targetMode,
+    JSON.stringify(s.targetAgents), s.prompt, s.workspace, s.timeoutSec,
+    s.priority, s.requiredLabels ? JSON.stringify(s.requiredLabels) : null,
+    s.lastRunAt, s.nextRunAt, s.createdAt, s.updatedAt,
+  ];
+}
+
+export async function upsertSchedule(db: Database, schedule: ScheduleRecord): Promise<void> {
+  await db.run(
+    `INSERT INTO schedules (${SCHEDULE_COLUMNS.join(", ")}) VALUES (${SCHEDULE_PLACEHOLDERS}) ON CONFLICT(id) DO UPDATE SET ${SCHEDULE_UPDATE_SET}`,
+    scheduleToDbValues(schedule),
+  );
+}
+
+export async function getAllSchedules(db: Database): Promise<ScheduleRecord[]> {
+  const rows = await db.all<DbScheduleRow>("SELECT * FROM schedules ORDER BY created_at");
+  return rows.map(dbRowToSchedule);
+}
+
+export async function getScheduleById(db: Database, id: string): Promise<ScheduleRecord | undefined> {
+  const row = await db.get<DbScheduleRow>("SELECT * FROM schedules WHERE id = $1", [id]);
+  return row ? dbRowToSchedule(row) : undefined;
+}
+
+export async function deleteScheduleRow(db: Database, id: string): Promise<boolean> {
+  const row = await db.get<{ id: string }>("SELECT id FROM schedules WHERE id = $1", [id]);
+  if (!row) return false;
+  await db.run("DELETE FROM schedules WHERE id = $1", [id]);
+  return true;
+}
+
+export async function updateScheduleFields(db: Database, id: string, fields: Record<string, unknown>): Promise<ScheduleRecord | undefined> {
+  const existing = await getScheduleById(db, id);
+  if (!existing) return undefined;
+  const updated = { ...existing, ...fields, updatedAt: new Date().toISOString() };
+  await upsertSchedule(db, updated);
+  return updated;
 }

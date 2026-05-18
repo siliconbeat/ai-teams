@@ -1,6 +1,8 @@
 import type { EmployeeSnapshot, TaskOutputChunk, TaskRecord } from "@ai-teams/shared";
 import type WebSocket from "ws";
 
+export type CronJobLike = { stop(): void; nextDate(): Date | null };
+
 export interface StateStore {
   agentSockets: Map<string, WebSocket>;
   leaderSockets: Set<WebSocket>;
@@ -16,6 +18,7 @@ export interface StateStore {
   mainTaskQueues: Map<string, string[]>;
   sharedTaskQueue: string[];
   sharedQueueCursor: number;
+  scheduleJobs: Map<string, CronJobLike>;
 }
 
 export function createInMemoryStateStore(): StateStore {
@@ -34,5 +37,6 @@ export function createInMemoryStateStore(): StateStore {
     mainTaskQueues: new Map(),
     sharedTaskQueue: [],
     sharedQueueCursor: 0,
+    scheduleJobs: new Map(),
   };
 }

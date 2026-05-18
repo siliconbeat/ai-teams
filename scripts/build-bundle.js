@@ -24,7 +24,7 @@ if (fs.existsSync(indexFile)) {
 }
 
 const external = pkg === "server"
-  ? ["fastify", "@fastify/swagger", "@fastify/swagger-ui", "@fastify/websocket", "@fastify/static", "ws", "pg"]
+  ? ["fastify", "@fastify/swagger", "@fastify/swagger-ui", "@fastify/websocket", "@fastify/static", "cron", "ws", "pg"]
   : ["ws"];
 
 esbuild

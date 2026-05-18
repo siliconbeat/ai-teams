@@ -334,3 +334,83 @@ function parseWebhookUrl(value: unknown) {
   }
   return url.toString();
 }
+
+// ── Schedules ──────────────────────────────────────────────────────────────
+
+export type CreateScheduleRequest = {
+  name: string;
+  cron: string;
+  enabled?: boolean;
+  targetMode?: "queue" | "direct" | "broadcast";
+  targetAgents?: string[];
+  prompt: string;
+  workspace?: string;
+  timeoutSec?: number;
+  priority?: number;
+  requiredLabels?: string[];
+};
+
+export type UpdateScheduleRequest = Partial<CreateScheduleRequest>;
+
+export const createScheduleRequestSchema = {
+  type: "object",
+  required: ["name", "cron", "prompt"],
+  properties: {
+    name: { type: "string", minLength: 1 },
+    cron: { type: "string", minLength: 9 },
+    enabled: { type: "boolean", default: true },
+    targetMode: { type: "string", enum: ["queue", "direct", "broadcast"], default: "queue" },
+    targetAgents: { type: "array", items: { type: "string" } },
+    prompt: { type: "string", minLength: 1 },
+    workspace: { type: "string" },
+    timeoutSec: { type: "number", minimum: 1 },
+    priority: { type: "integer", minimum: 0, maximum: 3, default: 0 },
+    requiredLabels: { type: "array", items: { type: "string" } },
+  },
+} as const;
+
+export const updateScheduleRequestSchema = {
+  type: "object",
+  properties: {
+    name: { type: "string", minLength: 1 },
+    cron: { type: "string", minLength: 9 },
+    enabled: { type: "boolean" },
+    targetMode: { type: "string", enum: ["queue", "direct", "broadcast"] },
+    targetAgents: { type: "array", items: { type: "string" } },
+    prompt: { type: "string", minLength: 1 },
+    workspace: { type: "string" },
+    timeoutSec: { type: "number", minimum: 1 },
+    priority: { type: "integer", minimum: 0, maximum: 3 },
+    requiredLabels: { type: "array", items: { type: "string" } },
+  },
+} as const;
+
+export const scheduleResponseSchema = {
+  type: "object",
+  required: ["id", "name", "cron", "enabled", "targetMode", "prompt", "createdAt", "updatedAt"],
+  properties: {
+    id: { type: "string" },
+    name: { type: "string" },
+    cron: { type: "string" },
+    enabled: { type: "boolean" },
+    targetMode: { type: "string", enum: ["queue", "direct", "broadcast"] },
+    targetAgents: { type: "array", items: { type: "string" } },
+    prompt: { type: "string" },
+    workspace: { type: "string" },
+    timeoutSec: { type: "number" },
+    priority: { type: "integer" },
+    requiredLabels: { type: "array", items: { type: "string" } },
+    lastRunAt: { type: "string" },
+    nextRunAt: { type: "string" },
+    createdAt: { type: "string" },
+    updatedAt: { type: "string" },
+  },
+} as const;
+
+export const scheduleListResponseSchema = {
+  type: "object",
+  required: ["schedules"],
+  properties: {
+    schedules: { type: "array", items: scheduleResponseSchema },
+  },
+} as const;
