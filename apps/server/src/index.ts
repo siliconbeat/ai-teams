@@ -905,6 +905,8 @@ export async function startServer(options = readOptionsFromEnv()) {
   return server;
 }
 
+declare const PKG_VERSION: string;
+
 const isCli = process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isCli) {
   const args = process.argv.slice(2);
@@ -946,6 +948,27 @@ if (isCli) {
     process.exit(0);
   }
 
+  // Config persistence
+  const SERVER_CONFIG_DIR = path.join(os.homedir(), ".ai-teams");
+  const SERVER_CONFIG_FILE = path.join(SERVER_CONFIG_DIR, "server-config.json");
+  type ServerConfig = {
+    authToken?: string;
+    port?: string;
+    host?: string;
+    dataDir?: string;
+    databaseUrl?: string;
+    dbPath?: string;
+    logLevel?: string;
+    logDir?: string;
+  };
+  function loadServerConfig(): ServerConfig | null {
+    try { return JSON.parse(fs.readFileSync(SERVER_CONFIG_FILE, "utf8")); } catch { return null; }
+  }
+  function saveServerConfig(config: ServerConfig) {
+    fs.mkdirSync(SERVER_CONFIG_DIR, { recursive: true });
+    fs.writeFileSync(SERVER_CONFIG_FILE, JSON.stringify(config, null, 2) + "\n");
+  }
+
   // Resolve paths
   function resolveDataDir(): string {
     return getArgValue("--data-dir") || process.env.DATA_DIR || path.join(process.cwd(), "data");
@@ -958,6 +981,7 @@ if (isCli) {
   }
 
   function applyCliArgsToEnv(): void {
+    const saved = loadServerConfig() ?? {};
     const cliToken = getArgValue("--token");
     const cliPort = getArgValue("--port");
     const cliHost = getArgValue("--host");
@@ -966,14 +990,31 @@ if (isCli) {
     const cliDbPath = getArgValue("--db-path");
     const cliLogLevel = getArgValue("--log-level");
     const cliLogDir = getArgValue("--log-dir");
-    if (cliToken) process.env.AI_TEAMS_AUTH_TOKEN = cliToken;
-    if (cliPort) process.env.AI_TEAMS_SERVER_PORT = cliPort;
-    if (cliHost) process.env.HOST = cliHost;
-    if (cliDataDir) process.env.DATA_DIR = cliDataDir;
-    if (cliDatabaseUrl) process.env.DATABASE_URL = cliDatabaseUrl;
-    if (cliDbPath) process.env.DB_PATH = cliDbPath;
-    if (cliLogLevel) process.env.LOG_LEVEL = cliLogLevel;
-    if (cliLogDir) process.env.LOG_DIR = cliLogDir;
+
+    // CLI args override saved config, saved config overrides env
+    const token = cliToken || process.env.AI_TEAMS_AUTH_TOKEN || saved.authToken;
+    const port = cliPort || process.env.AI_TEAMS_SERVER_PORT || saved.port;
+    const host = cliHost || process.env.HOST || saved.host;
+    const dataDir = cliDataDir || process.env.DATA_DIR || saved.dataDir;
+    const databaseUrl = cliDatabaseUrl || process.env.DATABASE_URL || saved.databaseUrl;
+    const dbPath = cliDbPath || process.env.DB_PATH || saved.dbPath;
+    const logLevel = cliLogLevel || process.env.LOG_LEVEL || saved.logLevel;
+    const logDir = cliLogDir || process.env.LOG_DIR || saved.logDir;
+
+    if (token) process.env.AI_TEAMS_AUTH_TOKEN = token;
+    if (port) process.env.AI_TEAMS_SERVER_PORT = port;
+    if (host) process.env.HOST = host;
+    if (dataDir) process.env.DATA_DIR = dataDir;
+    if (databaseUrl) process.env.DATABASE_URL = databaseUrl;
+    if (dbPath) process.env.DB_PATH = dbPath;
+    if (logLevel) process.env.LOG_LEVEL = logLevel;
+    if (logDir) process.env.LOG_DIR = logDir;
+
+    // Save if any new CLI args were provided
+    const newConfig: ServerConfig = { authToken: token, port, host, dataDir, databaseUrl, dbPath, logLevel, logDir };
+    if (cliToken || cliPort || cliHost || cliDataDir || cliDatabaseUrl || cliDbPath || cliLogLevel || cliLogDir || !loadServerConfig()) {
+      saveServerConfig(newConfig);
+    }
   }
 
   const subcommand = args[0];
@@ -1023,6 +1064,19 @@ if (isCli) {
       console.log(`Log: ${path.join(resolveLogDir(), "server.log")}`);
     } else {
       console.log("ai-teams-server is not running.");
+    }
+  } else if (subcommand === "update") {
+    const { execSync } = await import("node:child_process");
+    try {
+      execSync("npm install -g @csdwd/ai-teams-server@latest", { stdio: "inherit" });
+      const ver = execSync("ai-teams-server --version").toString().trim();
+      console.log(`\n  ✓ 已更新到 ${ver}`);
+      const status = getDaemonStatus(resolvePidFile());
+      if (status.running) {
+        console.log("  提示: 运行 ai-teams-server restart 以应用更新。");
+      }
+    } catch {
+      process.exit(1);
     }
   } else {
     // No sub-command — foreground mode (existing behavior)

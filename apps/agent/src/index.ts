@@ -26,7 +26,7 @@ import {
 } from "./connection.js";
 import { runSetup, loadConfigFile } from "./setup.js";
 
-const PKG_VERSION = "0.2.0";
+declare const PKG_VERSION: string;
 
 let mainTask: ActiveTask | null = null;
 let queueTask: ActiveTask | null = null;
