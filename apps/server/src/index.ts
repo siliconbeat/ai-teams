@@ -17,6 +17,7 @@ import {
   type ServerToLeaderMessage,
   type StateSnapshot,
 } from "@ai-teams/shared";
+import { daemonize, stopDaemon, getDaemonStatus } from "@ai-teams/shared/daemon";
 import { createDatabaseFromEnv, initDb, hydrateState, type Database, queryTasks, getTaskById, deleteTask, updateTaskFields, dbRowToTask, upsertSchedule, getAllSchedules, getScheduleById, deleteScheduleRow, updateScheduleFields, type ScheduleRecord } from "./db.js";
 import { type RestTaskRequest, errorResponseSchema, snapshotSchema, sessionHistorySchema, restTaskRequestSchema, restTaskAcceptedSchema, taskListResponseSchema, taskRecordSchema, taskPatchSchema, parseRestTaskRequest, claudeSessionsResponseSchema, createScheduleRequestSchema, updateScheduleRequestSchema, scheduleResponseSchema, scheduleListResponseSchema, type CreateScheduleRequest, type UpdateScheduleRequest } from "./schemas.js";
 import { createDispatch, nowIso, sendJson } from "./dispatch.js";
@@ -911,6 +912,7 @@ if (isCli) {
     if (idx === -1) return undefined;
     return args[idx + 1];
   }
+
   if (args.includes("--version") || args.includes("-v")) {
     console.log(PKG_VERSION);
     process.exit(0);
@@ -918,7 +920,13 @@ if (isCli) {
   if (args.includes("--help") || args.includes("-h")) {
     console.log(`ai-teams-server — AI Teams 中央服务器
 
-用法: ai-teams-server [选项]
+用法: ai-teams-server <command> [选项]
+
+命令:
+  start [选项]          后台启动守护进程
+  stop                  停止守护进程
+  restart [选项]        重启守护进程
+  status                查看运行状态
 
 选项:
   --token <token>       认证 Token (必填，或设 AI_TEAMS_AUTH_TOKEN)
@@ -931,32 +939,95 @@ if (isCli) {
   --log-dir <dir>       日志文件目录 (不设则仅输出到 stdout)
   -v, --version         显示版本号
   -h, --help            显示帮助
+
+不带命令直接运行时为前台模式。
 `);
     process.exit(0);
   }
-  const cliToken = getArgValue("--token");
-  const cliPort = getArgValue("--port");
-  const cliHost = getArgValue("--host");
-  const cliDataDir = getArgValue("--data-dir");
-  const cliDatabaseUrl = getArgValue("--database-url");
-  const cliDbPath = getArgValue("--db-path");
-  const cliLogLevel = getArgValue("--log-level");
-  const cliLogDir = getArgValue("--log-dir");
-  if (cliToken) process.env.AI_TEAMS_AUTH_TOKEN = cliToken;
-  if (cliPort) process.env.AI_TEAMS_SERVER_PORT = cliPort;
-  if (cliHost) process.env.HOST = cliHost;
-  if (cliDataDir) process.env.DATA_DIR = cliDataDir;
-  if (cliDatabaseUrl) process.env.DATABASE_URL = cliDatabaseUrl;
-  if (cliDbPath) process.env.DB_PATH = cliDbPath;
-  if (cliLogLevel) process.env.LOG_LEVEL = cliLogLevel;
-  if (cliLogDir) process.env.LOG_DIR = cliLogDir;
-  const options = readOptionsFromEnv();
-  if (!options.authToken) {
-    console.error("错误: 需要认证 Token。使用 --token <token> 或设置 AI_TEAMS_AUTH_TOKEN 环境变量。");
-    process.exit(1);
+
+  // Resolve paths
+  function resolveDataDir(): string {
+    return getArgValue("--data-dir") || process.env.DATA_DIR || path.join(process.cwd(), "data");
   }
-  startServer(options).catch((error) => {
-    console.error(error);
-    process.exit(1);
-  });
+  function resolvePidFile(): string {
+    return path.join(resolveDataDir(), ".ai-teams-server.pid");
+  }
+  function resolveLogDir(): string {
+    return getArgValue("--log-dir") || process.env.LOG_DIR || path.join(resolveDataDir(), "logs");
+  }
+
+  function applyCliArgsToEnv(): void {
+    const cliToken = getArgValue("--token");
+    const cliPort = getArgValue("--port");
+    const cliHost = getArgValue("--host");
+    const cliDataDir = getArgValue("--data-dir");
+    const cliDatabaseUrl = getArgValue("--database-url");
+    const cliDbPath = getArgValue("--db-path");
+    const cliLogLevel = getArgValue("--log-level");
+    const cliLogDir = getArgValue("--log-dir");
+    if (cliToken) process.env.AI_TEAMS_AUTH_TOKEN = cliToken;
+    if (cliPort) process.env.AI_TEAMS_SERVER_PORT = cliPort;
+    if (cliHost) process.env.HOST = cliHost;
+    if (cliDataDir) process.env.DATA_DIR = cliDataDir;
+    if (cliDatabaseUrl) process.env.DATABASE_URL = cliDatabaseUrl;
+    if (cliDbPath) process.env.DB_PATH = cliDbPath;
+    if (cliLogLevel) process.env.LOG_LEVEL = cliLogLevel;
+    if (cliLogDir) process.env.LOG_DIR = cliLogDir;
+  }
+
+  const subcommand = args[0];
+  if (subcommand === "start" || subcommand === "restart") {
+    void (async () => {
+      // For restart, stop first
+      if (subcommand === "restart") {
+        const status = getDaemonStatus(resolvePidFile());
+        if (status.running) {
+          await stopDaemon(resolvePidFile());
+        }
+      }
+
+      applyCliArgsToEnv();
+      if (!process.env.AI_TEAMS_AUTH_TOKEN) {
+        console.error("错误: 需要认证 Token。使用 --token <token> 或设置 AI_TEAMS_AUTH_TOKEN 环境变量。");
+        process.exit(1);
+      }
+      // Ensure log-dir is set for daemon mode
+      if (!process.env.LOG_DIR) {
+        process.env.LOG_DIR = resolveLogDir();
+      }
+
+      await daemonize({
+        name: "ai-teams-server",
+        pidFile: resolvePidFile(),
+        logFile: path.join(resolveLogDir(), "server.log"),
+        run: async () => {
+          await startServer(readOptionsFromEnv());
+        },
+      });
+    })();
+  } else if (subcommand === "stop") {
+    void (async () => {
+      await stopDaemon(resolvePidFile());
+    })();
+  } else if (subcommand === "status") {
+    const status = getDaemonStatus(resolvePidFile());
+    if (status.running) {
+      console.log(`ai-teams-server is running (PID ${status.pid})`);
+      console.log(`Log: ${path.join(resolveLogDir(), "server.log")}`);
+    } else {
+      console.log("ai-teams-server is not running.");
+    }
+  } else {
+    // No sub-command — foreground mode (existing behavior)
+    applyCliArgsToEnv();
+    const options = readOptionsFromEnv();
+    if (!options.authToken) {
+      console.error("错误: 需要认证 Token。使用 --token <token> 或设置 AI_TEAMS_AUTH_TOKEN 环境变量。");
+      process.exit(1);
+    }
+    startServer(options).catch((error) => {
+      console.error(error);
+      process.exit(1);
+    });
+  }
 }

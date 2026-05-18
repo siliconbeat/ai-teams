@@ -569,17 +569,3 @@ export function parseEncryptionKey(hex: string): Buffer {
   }
   return key;
 }
-
-export {
-  readPidFile,
-  writePidFile,
-  removePidFile,
-  isProcessRunning,
-  daemonize,
-  spawnWorker,
-  runWatchdog,
-  stopDaemon,
-  getDaemonStatus,
-  type DaemonOptions,
-  type DaemonStatus,
-} from "./daemon.js";
