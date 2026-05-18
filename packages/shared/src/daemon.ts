@@ -48,7 +48,11 @@ export function spawnWorker(script: string, args: string[], logDir: string): Chi
 
   const child = spawn(process.execPath, [script, ...args], {
     stdio: ["ignore", logStream, logStream],
-    env: { ...process.env },
+    env: {
+      ...process.env,
+      __AI_TEAMS_DAEMON_WORKER: "1",
+      __AI_TEAMS_DAEMON_WATCHDOG: undefined,
+    },
   });
   fs.closeSync(logStream);
   return child;
