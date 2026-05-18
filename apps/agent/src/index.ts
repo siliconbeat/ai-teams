@@ -342,6 +342,7 @@ if (isCli) {
           run: async () => {
             console.log("  ✓ 正在连接服务器...");
             connect();
+            return new Promise<void>(() => {}); // keep worker alive
           },
         });
       })();

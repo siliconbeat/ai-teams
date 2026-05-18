@@ -49,6 +49,7 @@ export type DispatchContext = {
 
 export function createDispatch(ctx: DispatchContext) {
   const { state, db, log } = ctx;
+  const retryDelays = new Map<string, NodeJS.Timeout>();
 
   function broadcastToLeaders(payload: ServerToLeaderMessage) {
     for (const socket of state.leaderSockets) {
@@ -353,6 +354,11 @@ export function createDispatch(ctx: DispatchContext) {
       const taskId = state.sharedTaskQueue.shift()!;
       const task = state.tasks.get(taskId);
       if (task && task.status === "queued" && task.targetMode === "queue") {
+        if (retryDelays.has(taskId)) {
+          // Put it back at the front and skip dispatch — still in retry cooldown
+          state.sharedTaskQueue.unshift(taskId);
+          return;
+        }
         dispatchTask(task, employeeId);
         return;
       }
@@ -495,6 +501,7 @@ export function createDispatch(ctx: DispatchContext) {
       priority: priority ?? 1,
       requiredLabels: requiredLabels ?? null,
       status: "queued",
+      retryCount: 0,
       createdAt: nowIso(),
       startedAt: null,
       finishedAt: null,
@@ -634,6 +641,7 @@ export function createDispatch(ctx: DispatchContext) {
     if (!queueTaskId) {
       dispatchNextQueuedTask(message.employeeId);
     }
+    dispatchSharedQueuedTasks();
     resetHeartbeatTimer(message.employeeId);
   }
 
@@ -875,10 +883,21 @@ export function createDispatch(ctx: DispatchContext) {
         if (!task || TERMINAL_STATUSES.has(task.status)) continue;
 
         clearTaskTimeout(taskId);
-        task.status = "queued";
         task.employeeId = null;
+        task.retryCount += 1;
+
+        if (task.retryCount > 3) {
+          task.status = "failed";
+          task.error = `任务重试次数超过上限（3次），已终止。`;
+          task.finishedAt = nowIso();
+          upsertTask(task);
+          log.warn({ taskId, employeeId, retryCount: task.retryCount }, "Task exceeded max retry count, marked failed");
+          continue;
+        }
+
+        task.status = "queued";
         upsertTask(task);
-        log.info({ taskId, employeeId }, "Task re-queued after disconnect grace period");
+        log.info({ taskId, employeeId, retryCount: task.retryCount }, "Task re-queued after disconnect grace period");
 
         if (task.targetMode === "queue") {
           enqueueSharedTask(taskId);
@@ -886,6 +905,18 @@ export function createDispatch(ctx: DispatchContext) {
           const queue = state.mainTaskQueues.get(employeeId) ?? [];
           if (!queue.includes(taskId)) queue.push(taskId);
           state.mainTaskQueues.set(employeeId, queue);
+        }
+
+        // Schedule delayed re-dispatch for subsequent retries
+        if (task.retryCount > 1) {
+          const retryDelay = (task.retryCount - 1) * 5000;
+          const existingDelay = retryDelays.get(taskId);
+          if (existingDelay) clearTimeout(existingDelay);
+          retryDelays.set(taskId, setTimeout(() => {
+            retryDelays.delete(taskId);
+            dispatchSharedQueuedTasks();
+            dispatchNextMainQueuedTask(employeeId);
+          }, retryDelay));
         }
       }
 

@@ -53,6 +53,7 @@ export interface TaskRecord {
   priority: number;
   requiredLabels: string[] | null;
   status: TaskStatus;
+  retryCount: number;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;

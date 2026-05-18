@@ -147,7 +147,8 @@ export async function initDb(db: Database) {
       usage_input_tokens          INTEGER,
       usage_output_tokens         INTEGER,
       usage_cache_read_tokens     INTEGER,
-      usage_cache_creation_tokens INTEGER
+      usage_cache_creation_tokens INTEGER,
+      retry_count                 INTEGER NOT NULL DEFAULT 0
     )
   `);
   await db.run(`
@@ -198,6 +199,9 @@ export async function initDb(db: Database) {
       updated_at      TEXT NOT NULL
     )
   `);
+
+  // Migration: add retry_count column
+  try { await db.run("ALTER TABLE tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"); } catch { /* already exists */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +285,7 @@ export async function persistEmployee(db: Database, employee: EmployeeSnapshot) 
 const TASK_COLUMNS = [
   "id", "leader_command_id", "employee_id", "session_id", "target_mode",
   "prompt", "workspace", "status", "timeout_sec", "cli_config", "priority", "required_labels",
+  "retry_count",
   "created_at", "started_at", "finished_at", "exit_code", "summary", "error",
   "duration_ms", "duration_api_ms", "num_turns", "total_cost_usd",
   "usage_input_tokens", "usage_output_tokens", "usage_cache_read_tokens", "usage_cache_creation_tokens",
@@ -443,6 +448,7 @@ export function dbRowToTask(row: DbTaskRow, defaultTimeoutSec: number): TaskReco
     priority: row.priority ?? 1,
     requiredLabels: row.required_labels ? JSON.parse(row.required_labels) : null,
     status: (row.status || "queued") as TaskRecord["status"],
+    retryCount: (row as Record<string, unknown>).retry_count as number ?? 0,
     createdAt: row.created_at,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
@@ -474,6 +480,7 @@ function taskToDbValues(task: TaskRecord): unknown[] {
     task.cliConfig ? JSON.stringify(task.cliConfig) : null,
     task.priority,
     task.requiredLabels ? JSON.stringify(task.requiredLabels) : null,
+    task.retryCount,
     task.createdAt,
     task.startedAt,
     task.finishedAt,
