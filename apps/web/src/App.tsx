@@ -73,6 +73,11 @@ type CommandHistoryItem = {
   createdAtMs: number;
 };
 
+type ExecutingAgent = {
+  name: string;
+  status: TaskStatus;
+};
+
 type ChatFeedItem = {
   id: string;
   side: "leader" | "employee";
@@ -82,7 +87,7 @@ type ChatFeedItem = {
   createdAt: string;
   createdAtMs: number;
   status?: TaskStatus;
-  executingBy?: string[];
+  executingBy?: ExecutingAgent[];
 };
 
 type EmployeeTerminalLog = {
@@ -373,8 +378,8 @@ export default function App() {
           .join(" ");
       }
       const executingBy = groupTasks
-        .filter((t) => t.employeeId && (t.status === "dispatched" || t.status === "accepted" || t.status === "running"))
-        .map((t) => employees[t.employeeId!]?.name ?? t.employeeId!);
+        .filter((t) => t.employeeId && t.status !== "queued")
+        .map((t) => ({ name: employees[t.employeeId!]?.name ?? t.employeeId!, status: t.status }));
       leaderItems.push({
         id: `leader-${first.leaderCommandId}`,
         side: "leader",
@@ -426,6 +431,18 @@ export default function App() {
       return "任务执行失败。";
     }
     return `任务状态：${status}`;
+  }
+
+  function statusLabel(status: TaskStatus) {
+    switch (status) {
+      case "dispatched": case "accepted": return "等待中";
+      case "running": return "执行中";
+      case "completed": return "已完成";
+      case "failed": return "失败";
+      case "timeout": return "超时";
+      case "cancelled": return "已取消";
+      default: return status;
+    }
   }
 
   function getAgentPresence(employee: EmployeeSnapshot, activeTask?: TaskRecord) {
@@ -786,8 +803,10 @@ export default function App() {
                   {item.target ? <small>{item.target}</small> : null}
                   {item.executingBy && item.executingBy.length > 0 && (
                     <div className="chat-message__executing">
-                      {item.executingBy.map((name) => (
-                        <span key={name}>● {name} 执行中</span>
+                      {item.executingBy.map((agent) => (
+                        <span key={agent.name} className={`executing-status executing-${agent.status}`}>
+                          {agent.status === "completed" ? "✓" : agent.status === "failed" || agent.status === "timeout" ? "✗" : "●"} {agent.name} {statusLabel(agent.status)}
+                        </span>
                       ))}
                     </div>
                   )}
@@ -1178,8 +1197,10 @@ export default function App() {
                       {item.target ? <small>{item.target}</small> : null}
                       {item.executingBy && item.executingBy.length > 0 && (
                         <div className="chat-message__executing">
-                          {item.executingBy.map((name) => (
-                            <span key={name}>● {name} 执行中</span>
+                          {item.executingBy.map((agent) => (
+                            <span key={agent.name} className={`executing-status executing-${agent.status}`}>
+                              {agent.status === "completed" ? "✓" : agent.status === "failed" || agent.status === "timeout" ? "✗" : "●"} {agent.name} {statusLabel(agent.status)}
+                            </span>
                           ))}
                         </div>
                       )}

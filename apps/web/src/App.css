@@ -525,8 +525,23 @@ textarea {
 }
 
 .chat-message__executing span {
-  color: #9bc8ff;
   font-size: 11px;
+}
+
+.executing-status.executing-dispatched,
+.executing-status.executing-accepted,
+.executing-status.executing-running {
+  color: #9bc8ff;
+}
+
+.executing-status.executing-completed {
+  color: #9df6b5;
+}
+
+.executing-status.executing-failed,
+.executing-status.executing-timeout,
+.executing-status.executing-cancelled {
+  color: #ff9e9e;
 }
 
 .employee-message {
