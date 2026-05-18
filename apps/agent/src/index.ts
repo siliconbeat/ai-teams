@@ -227,6 +227,10 @@ const isCli = process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToP
 if (isCli) {
   const args = process.argv.slice(2);
 
+  if (args.includes("--version") || args.includes("-v")) {
+    console.log("0.1.3");
+    process.exit(0);
+  }
   if (args.includes("--help") || args.includes("-h")) {
     console.log(`ai-teams-agent — AI Teams 员工代理
 
@@ -240,6 +244,7 @@ if (isCli) {
   --workspace <dir>     工作目录
   --runner <mode>       Runner 模式 (claude/fake)
   --config              重新运行配置向导
+  -v, --version         显示版本号
   -h, --help            显示帮助
 `);
     process.exit(0);
