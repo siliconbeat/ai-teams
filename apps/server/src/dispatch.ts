@@ -350,18 +350,14 @@ export function createDispatch(ctx: DispatchContext) {
       return;
     }
 
-    while (state.sharedTaskQueue.length > 0) {
-      const taskId = state.sharedTaskQueue.shift()!;
+    for (let i = 0; i < state.sharedTaskQueue.length; i++) {
+      const taskId = state.sharedTaskQueue[i]!;
       const task = state.tasks.get(taskId);
-      if (task && task.status === "queued" && task.targetMode === "queue") {
-        if (retryDelays.has(taskId)) {
-          // Put it back at the front and skip dispatch — still in retry cooldown
-          state.sharedTaskQueue.unshift(taskId);
-          return;
-        }
-        dispatchTask(task, employeeId);
-        return;
-      }
+      if (!task || task.status !== "queued" || task.targetMode !== "queue") continue;
+      if (retryDelays.has(taskId)) continue;
+      state.sharedTaskQueue.splice(i, 1);
+      dispatchTask(task, employeeId);
+      return;
     }
   }
 
@@ -551,11 +547,13 @@ export function createDispatch(ctx: DispatchContext) {
     requiredLabels?: string[] | null,
   ) {
     const leaderCommandId = randomUUID();
+    const resolvedPriority = message.priority ?? priority;
+    const resolvedRequiredLabels = message.requiredLabels ?? requiredLabels;
     if (message.atAgents === "queue") {
       return {
         ok: true as const,
         leaderCommandId,
-        tasks: [createTask(null, message.prompt, message.workspace, message.timeoutSec, leaderCommandId, "queue", webhookUrl, cliConfig, message.priority, message.requiredLabels)],
+        tasks: [createTask(null, message.prompt, message.workspace, message.timeoutSec, leaderCommandId, "queue", webhookUrl, cliConfig, resolvedPriority, resolvedRequiredLabels)],
       };
     }
 
@@ -573,7 +571,7 @@ export function createDispatch(ctx: DispatchContext) {
       ok: true as const,
       leaderCommandId,
       tasks: targetIds.map((employeeId) =>
-        createTask(employeeId, message.prompt, message.workspace, message.timeoutSec, leaderCommandId, targetMode, webhookUrl, cliConfig, message.priority, message.requiredLabels),
+        createTask(employeeId, message.prompt, message.workspace, message.timeoutSec, leaderCommandId, targetMode, webhookUrl, cliConfig, resolvedPriority, resolvedRequiredLabels),
       ),
     };
   }
@@ -589,6 +587,17 @@ export function createDispatch(ctx: DispatchContext) {
     if (disconnectTimer) {
       clearTimeout(disconnectTimer);
       state.disconnectTimers.delete(message.employeeId);
+    }
+
+    // Clear any retry delay timers for tasks previously owned by this employee
+    for (const prevTaskId of [previousMainTaskId, previousQueueTaskId]) {
+      if (prevTaskId) {
+        const timer = retryDelays.get(prevTaskId);
+        if (timer) {
+          clearTimeout(timer);
+          retryDelays.delete(prevTaskId);
+        }
+      }
     }
 
     state.agentSockets.set(message.employeeId, socket);
@@ -942,5 +951,11 @@ export function createDispatch(ctx: DispatchContext) {
     handleLeaderMessage,
     cancelTaskById,
     startDisconnectRecovery,
+    cleanup() {
+      for (const timer of retryDelays.values()) {
+        clearTimeout(timer);
+      }
+      retryDelays.clear();
+    },
   };
 }

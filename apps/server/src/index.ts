@@ -26,6 +26,26 @@ import { createInMemoryStateStore } from "./state-store.js";
 import { createEncryptor } from "./crypto.js";
 import { startScheduleJob, stopScheduleJob, type ScheduleDispatchFn } from "./scheduler.js";
 
+function scheduleToResponse(s: ScheduleRecord) {
+  return {
+    id: s.id,
+    name: s.name,
+    cron: s.cronExpr,
+    enabled: s.enabled,
+    targetMode: s.targetMode,
+    targetAgents: s.targetAgents,
+    prompt: s.prompt,
+    workspace: s.workspace,
+    timeoutSec: s.timeoutSec,
+    priority: s.priority,
+    requiredLabels: s.requiredLabels,
+    lastRunAt: s.lastRunAt,
+    nextRunAt: s.nextRunAt,
+    createdAt: s.createdAt,
+    updatedAt: s.updatedAt,
+  };
+}
+
 const DEFAULT_PORT = 3789;
 
 export type AiTeamsServerOptions = {
@@ -143,7 +163,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     disconnectGraceMs,
     encryptor: createEncryptor(process.env.AI_TEAMS_ENCRYPTION_KEY),
   };
-  const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage, cancelTaskById, startDisconnectRecovery } = createDispatch(dispatchCtx);
+  const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage, cancelTaskById, startDisconnectRecovery, cleanup: dispatchCleanup } = createDispatch(dispatchCtx);
 
   const scheduleDispatchFn: ScheduleDispatchFn = (message, webhookUrl, cliConfig, priority, requiredLabels) => {
     return dispatchLeaderCommand(message, webhookUrl, cliConfig, priority, requiredLabels);
@@ -630,7 +650,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     },
     async () => {
       const schedules = await getAllSchedules(db);
-      return { schedules };
+      return { schedules: schedules.map(scheduleToResponse) };
     },
   );
 
@@ -647,7 +667,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     async (request, reply) => {
       const schedule = await getScheduleById(db, request.params.scheduleId);
       if (!schedule) return reply.code(404).send({ error: "Schedule not found." });
-      return schedule;
+      return scheduleToResponse(schedule);
     },
   );
 
@@ -688,7 +708,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
           schedule.nextRunAt = state.scheduleJobs.get(id)?.nextDate()?.toISO() ?? null;
         }
         await upsertSchedule(db, schedule);
-        return reply.code(201).send(schedule);
+        return reply.code(201).send(scheduleToResponse(schedule));
       } catch (err) {
         stopScheduleJob(state.scheduleJobs, id);
         return reply.code(400).send({ error: err instanceof Error ? err.message : "Invalid schedule." });
@@ -704,7 +724,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
         summary: "Update a schedule",
         params: { type: "object", required: ["scheduleId"], properties: { scheduleId: { type: "string", minLength: 1 } } },
         body: updateScheduleRequestSchema,
-        response: { 200: scheduleResponseSchema, 404: errorResponseSchema, 401: errorResponseSchema },
+        response: { 200: scheduleResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema, 401: errorResponseSchema },
       },
     },
     async (request, reply) => {
@@ -723,13 +743,18 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
       if (request.body.requiredLabels !== undefined) fields.requiredLabels = request.body.requiredLabels;
       const updated = await updateScheduleFields(db, request.params.scheduleId, fields);
       if (!updated) return reply.code(404).send({ error: "Schedule not found." });
-      stopScheduleJob(state.scheduleJobs, request.params.scheduleId);
-      if (updated.enabled) {
-        startScheduleJob(updated, scheduleDispatchFn, state.scheduleJobs, onScheduleFire);
-        updated.nextRunAt = state.scheduleJobs.get(request.params.scheduleId)?.nextDate()?.toISO() ?? null;
-        await updateScheduleFields(db, request.params.scheduleId, { nextRunAt: updated.nextRunAt });
+      try {
+        stopScheduleJob(state.scheduleJobs, request.params.scheduleId);
+        if (updated.enabled) {
+          startScheduleJob(updated, scheduleDispatchFn, state.scheduleJobs, onScheduleFire);
+          updated.nextRunAt = state.scheduleJobs.get(request.params.scheduleId)?.nextDate()?.toISO() ?? null;
+          await updateScheduleFields(db, request.params.scheduleId, { nextRunAt: updated.nextRunAt });
+        }
+        return scheduleToResponse(updated);
+      } catch (err) {
+        stopScheduleJob(state.scheduleJobs, request.params.scheduleId);
+        return reply.code(400).send({ error: err instanceof Error ? err.message : "Invalid schedule." });
       }
-      return updated;
     },
   );
 
@@ -762,7 +787,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
         tags: ["schedules"],
         summary: "Manually trigger a schedule",
         params: { type: "object", required: ["scheduleId"], properties: { scheduleId: { type: "string", minLength: 1 } } },
-        response: { 200: scheduleResponseSchema, 404: errorResponseSchema, 401: errorResponseSchema },
+        response: { 200: scheduleResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema, 401: errorResponseSchema },
       },
     },
     async (request, reply) => {
@@ -779,7 +804,9 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
       );
       if (!result.ok) return reply.code(400).send({ error: result.message });
       await onScheduleFire(request.params.scheduleId);
-      return await getScheduleById(db, request.params.scheduleId);
+      const updated = await getScheduleById(db, request.params.scheduleId);
+      if (!updated) return reply.code(404).send({ error: "Schedule not found." });
+      return scheduleToResponse(updated);
     },
   );
 
@@ -878,8 +905,9 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
       for (const timer of state.heartbeatTimers.values()) {
         clearTimeout(timer);
       }
+      dispatchCleanup();
       await app.close();
-      db.close();
+      await db.close();
     },
   };
 }

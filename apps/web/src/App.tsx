@@ -97,7 +97,36 @@ type EmployeeTerminalLog = {
   seenFinishedTaskIds: string[];
 };
 
-type ActivePage = "monitor" | "tasks" | "employees" | "errors" | "stats";
+type ActivePage = "monitor" | "tasks" | "employees" | "errors" | "stats" | "schedules";
+
+type ScheduleItem = {
+  id: string;
+  name: string;
+  cron: string;
+  enabled: boolean;
+  targetMode: "queue" | "direct" | "broadcast";
+  targetAgents: string[];
+  prompt: string;
+  workspace: string | null;
+  timeoutSec: number | null;
+  priority: number;
+  requiredLabels: string[] | null;
+  lastRunAt: string | null;
+  nextRunAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type ScheduleFormData = {
+  name: string;
+  cron: string;
+  prompt: string;
+  targetMode: "queue" | "direct" | "broadcast";
+  targetAgents: string[];
+  workspace: string;
+  timeoutSec: string;
+  enabled: boolean;
+};
 
 const TASK_FILTERS: Array<TaskStatus | "all"> = ["all", "running", "failed", "completed", "cancelled"];
 const TOKEN_STORAGE_KEY = "ai-teams.auth-token";
@@ -179,6 +208,13 @@ export default function App() {
     workspace: "",
   });
   const [mobileTerminalEmployeeId, setMobileTerminalEmployeeId] = useState<string | null>(null);
+  const [schedules, setSchedules] = useState<ScheduleItem[]>([]);
+  const [scheduleModalOpen, setScheduleModalOpen] = useState(false);
+  const [editingSchedule, setEditingSchedule] = useState<ScheduleItem | null>(null);
+  const [scheduleForm, setScheduleForm] = useState<ScheduleFormData>({
+    name: "", cron: "", prompt: "", targetMode: "queue", targetAgents: [], workspace: "", timeoutSec: "", enabled: true,
+  });
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const logWindowRefs = useRef<Record<string, HTMLPreElement | null>>({});
   const chatListRef = useRef<HTMLDivElement | null>(null);
@@ -498,6 +534,115 @@ export default function App() {
     wsRef.current?.close();
   }
 
+  // ── Schedule API helpers ──
+
+  async function fetchSchedules() {
+    try {
+      const res = await fetch("/api/schedules", { headers: { Authorization: `Bearer ${authToken}` } });
+      if (res.ok) {
+        const data = await res.json() as { schedules: ScheduleItem[] };
+        setSchedules(data.schedules);
+      }
+    } catch { /* ignore */ }
+  }
+
+  async function saveSchedule() {
+    setScheduleError(null);
+    const body: Record<string, unknown> = {
+      name: scheduleForm.name,
+      cron: scheduleForm.cron,
+      prompt: scheduleForm.prompt,
+      targetMode: scheduleForm.targetMode,
+      enabled: scheduleForm.enabled,
+    };
+    if (scheduleForm.targetMode === "direct" && scheduleForm.targetAgents.length > 0) {
+      body.targetAgents = scheduleForm.targetAgents;
+    }
+    if (scheduleForm.workspace.trim()) body.workspace = scheduleForm.workspace.trim();
+    if (scheduleForm.timeoutSec && Number(scheduleForm.timeoutSec) > 0) body.timeoutSec = Number(scheduleForm.timeoutSec);
+
+    const url = editingSchedule ? `/api/schedules/${editingSchedule.id}` : "/api/schedules";
+    const method = editingSchedule ? "PATCH" : "POST";
+    try {
+      const res = await fetch(url, {
+        method,
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.json() as { error?: string };
+        setScheduleError(err.error || `请求失败 (${res.status})`);
+        return;
+      }
+      setScheduleModalOpen(false);
+      setEditingSchedule(null);
+      fetchSchedules();
+    } catch {
+      setScheduleError("网络请求失败");
+    }
+  }
+
+  async function deleteSchedule(id: string) {
+    try {
+      const res = await fetch(`/api/schedules/${id}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      if (!res.ok) return;
+      fetchSchedules();
+    } catch { /* ignore */ }
+  }
+
+  async function toggleScheduleEnabled(schedule: ScheduleItem) {
+    try {
+      const res = await fetch(`/api/schedules/${schedule.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
+        body: JSON.stringify({ enabled: !schedule.enabled }),
+      });
+      if (!res.ok) return;
+      fetchSchedules();
+    } catch { /* ignore */ }
+  }
+
+  async function triggerSchedule(id: string) {
+    try {
+      const res = await fetch(`/api/schedules/${id}/trigger`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      if (!res.ok) return;
+      fetchSchedules();
+    } catch { /* ignore */ }
+  }
+
+  function openCreateScheduleModal() {
+    setEditingSchedule(null);
+    setScheduleForm({ name: "", cron: "", prompt: "", targetMode: "queue", targetAgents: [], workspace: "", timeoutSec: "", enabled: true });
+    setScheduleError(null);
+    setScheduleModalOpen(true);
+  }
+
+  function openEditScheduleModal(schedule: ScheduleItem) {
+    setEditingSchedule(schedule);
+    setScheduleForm({
+      name: schedule.name,
+      cron: schedule.cron,
+      prompt: schedule.prompt,
+      targetMode: schedule.targetMode,
+      targetAgents: schedule.targetAgents,
+      workspace: schedule.workspace ?? "",
+      timeoutSec: schedule.timeoutSec && schedule.timeoutSec > 0 ? String(schedule.timeoutSec) : "",
+      enabled: schedule.enabled,
+    });
+    setScheduleError(null);
+    setScheduleModalOpen(true);
+  }
+
+  useEffect(() => {
+    if (authToken && activePage === "schedules") fetchSchedules();
+  }, [authToken, activePage]);
+
   function toggleTarget(employeeId: string) {
     setSelectedTarget((current) => {
       const currentIds = current === "all" || current === "queue" ? [] : current;
@@ -732,6 +877,12 @@ export default function App() {
             onClick={() => setActivePage("tasks")}
           >
             任务日志
+          </button>
+          <button
+            className={`nav-item ${activePage === "schedules" ? "active" : ""}`}
+            onClick={() => setActivePage("schedules")}
+          >
+            定时任务
           </button>
           <button
             className={`nav-item ${activePage === "errors" ? "active" : ""}`}
@@ -1172,6 +1323,187 @@ export default function App() {
             </main>
           );
         })()}
+        {activePage === "schedules" && (
+          <main className="task-log-page">
+            <section className="task-log-panel">
+              <div className="section-title-row">
+                <div>
+                  <h1>定时任务</h1>
+                  <p>管理 cron 定时调度，自动向 Agent 或队列派发任务。</p>
+                </div>
+                <button className="primary-button schedule-create-btn" onClick={openCreateScheduleModal}>
+                  + 新建
+                </button>
+              </div>
+              <div className="task-table">
+                {schedules.length === 0 ? (
+                  <div className="history-empty">暂无定时任务。点击"新建"创建第一个。</div>
+                ) : (
+                  schedules.map((schedule) => (
+                    <div className="task-row schedule-row" key={schedule.id}>
+                      <div className="task-row__main">
+                        <div className="schedule-row__header">
+                          <strong>{schedule.name}</strong>
+                          <span className={`schedule-target-badge schedule-target-${schedule.targetMode}`}>
+                            {schedule.targetMode === "queue" ? "队列" : schedule.targetMode === "broadcast" ? "广播" : "指定"}
+                          </span>
+                        </div>
+                        <p className="schedule-cron">{schedule.cron}</p>
+                        <p className="schedule-prompt">{schedule.prompt}</p>
+                      </div>
+                      <div className="task-row__side schedule-row__side">
+                        <div className="schedule-toggle" onClick={() => toggleScheduleEnabled(schedule)}>
+                          <div className={`schedule-toggle__track ${schedule.enabled ? "on" : "off"}`}>
+                            <div className="schedule-toggle__thumb" />
+                          </div>
+                          <small>{schedule.enabled ? "启用" : "禁用"}</small>
+                        </div>
+                        {schedule.lastRunAt && (
+                          <small title="上次执行">上次: {new Date(schedule.lastRunAt).toLocaleString()}</small>
+                        )}
+                        {schedule.nextRunAt && schedule.enabled && (
+                          <small title="下次执行">下次: {new Date(schedule.nextRunAt).toLocaleString()}</small>
+                        )}
+                        <div className="schedule-actions">
+                          <button className="secondary-button" onClick={() => triggerSchedule(schedule.id)}>
+                            触发
+                          </button>
+                          <button className="secondary-button" onClick={() => openEditScheduleModal(schedule)}>
+                            编辑
+                          </button>
+                          <button className="secondary-button schedule-delete-btn" onClick={() => {
+                            if (confirm(`确定删除定时任务"${schedule.name}"？`)) deleteSchedule(schedule.id);
+                          }}>
+                            删除
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
+
+            {scheduleModalOpen && (
+              <div className="modal-overlay" onClick={() => setScheduleModalOpen(false)}>
+                <div className="modal" onClick={(e) => e.stopPropagation()}>
+                  <div className="modal-header">
+                    <h2>{editingSchedule ? "编辑定时任务" : "新建定时任务"}</h2>
+                    <button className="secondary-button" onClick={() => setScheduleModalOpen(false)}>✕</button>
+                  </div>
+                  <div className="modal-body">
+                    {scheduleError && <div className="modal-error">{scheduleError}</div>}
+                    <label className="field">
+                      <span>名称</span>
+                      <input
+                        value={scheduleForm.name}
+                        onChange={(e) => setScheduleForm((f) => ({ ...f, name: e.target.value }))}
+                        placeholder="每日站会报告"
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Cron 表达式（5 字段）</span>
+                      <input
+                        value={scheduleForm.cron}
+                        onChange={(e) => setScheduleForm((f) => ({ ...f, cron: e.target.value }))}
+                        placeholder="0 9 * * 1-5"
+                        className="cron-input"
+                      />
+                      <small style={{ color: "#7f93b5", marginTop: 2 }}>
+                        格式: 分 时 日 月 星期 &nbsp; 例: {scheduleForm.cron ? "" : "0 9 * * 1-5 (工作日早9点)"}
+                      </small>
+                    </label>
+                    <label className="field">
+                      <span>目标模式</span>
+                      <select
+                        value={scheduleForm.targetMode}
+                        onChange={(e) => setScheduleForm((f) => ({ ...f, targetMode: e.target.value as ScheduleFormData["targetMode"] }))}
+                      >
+                        <option value="queue">队列（空闲 Agent 执行）</option>
+                        <option value="direct">指定 Agent</option>
+                        <option value="broadcast">广播（所有 Agent）</option>
+                      </select>
+                    </label>
+                    {scheduleForm.targetMode === "direct" && (
+                      <div className="field">
+                        <span>目标 Agents</span>
+                        <div className="target-picker" style={{ marginTop: 4 }}>
+                          {employeeList.map((emp) => {
+                            const selected = scheduleForm.targetAgents.includes(emp.id);
+                            return (
+                              <button
+                                key={emp.id}
+                                className={`target-chip ${selected ? "active" : ""}`}
+                                onClick={() => setScheduleForm((f) => ({
+                                  ...f,
+                                  targetAgents: selected
+                                    ? f.targetAgents.filter((id) => id !== emp.id)
+                                    : [...f.targetAgents, emp.id],
+                                }))}
+                              >
+                                {emp.name}
+                              </button>
+                            );
+                          })}
+                          {employeeList.length === 0 && <small style={{ color: "#7f93b5" }}>暂无在线员工</small>}
+                        </div>
+                      </div>
+                    )}
+                    <label className="field">
+                      <span>Prompt</span>
+                      <textarea
+                        value={scheduleForm.prompt}
+                        onChange={(e) => setScheduleForm((f) => ({ ...f, prompt: e.target.value }))}
+                        placeholder="输入要执行的任务指令..."
+                        rows={4}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>工作目录（可选）</span>
+                      <input
+                        value={scheduleForm.workspace}
+                        onChange={(e) => setScheduleForm((f) => ({ ...f, workspace: e.target.value }))}
+                        placeholder="/Users/junhang/workspace/project"
+                      />
+                    </label>
+                    <label className="field">
+                      <span>超时秒数（可选）</span>
+                      <input
+                        type="number"
+                        value={scheduleForm.timeoutSec}
+                        onChange={(e) => setScheduleForm((f) => ({ ...f, timeoutSec: e.target.value }))}
+                        placeholder="600"
+                      />
+                    </label>
+                    <label className="field schedule-enable-field">
+                      <span>立即启用</span>
+                      <div
+                        className="schedule-toggle"
+                        onClick={() => setScheduleForm((f) => ({ ...f, enabled: !f.enabled }))}
+                      >
+                        <div className={`schedule-toggle__track ${scheduleForm.enabled ? "on" : "off"}`}>
+                          <div className="schedule-toggle__thumb" />
+                        </div>
+                        <small>{scheduleForm.enabled ? "启用" : "禁用"}</small>
+                      </div>
+                    </label>
+                  </div>
+                  <div className="modal-footer">
+                    <button className="secondary-button" onClick={() => setScheduleModalOpen(false)}>取消</button>
+                    <button
+                      className="primary-button"
+                      style={{ width: "auto", marginTop: 0, padding: "8px 20px" }}
+                      onClick={saveSchedule}
+                      disabled={!scheduleForm.name || !scheduleForm.cron || !scheduleForm.prompt}
+                    >
+                      {editingSchedule ? "保存" : "创建"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </main>
+        )}
       </div>
 
       <aside className="command-panel">

@@ -13,6 +13,7 @@ import {
   EMPLOYEE_ID,
   MAX_ERROR_TAIL,
   RUNNER_MODE,
+  reinitializeConfig,
   type ActiveTask,
   type AgentState,
 } from "./config.js";
@@ -201,16 +202,20 @@ function gracefulShutdown(signal: string) {
   shuttingDown = true;
   console.log(`[agent:${EMPLOYEE_ID}] received ${signal}, shutting down...`);
 
+  const children: Array<NonNullable<ActiveTask["child"]>> = [];
   for (const task of [mainTask, queueTask]) {
     if (!task) continue;
     task.cancelRequested = true;
+    if (task.child) children.push(task.child);
     task.child?.kill("SIGTERM");
     send({ type: "task.cancelled", taskId: task.taskId });
   }
+  mainTask = null;
+  queueTask = null;
 
   setTimeout(() => {
-    for (const task of [mainTask, queueTask]) {
-      task?.child?.kill("SIGKILL");
+    for (const child of children) {
+      child.kill("SIGKILL");
     }
   }, 2000);
 
@@ -221,7 +226,7 @@ function gracefulShutdown(signal: string) {
     connState.socket.close(1000, "agent shutting down");
   }
 
-  setTimeout(() => process.exit(0), 500);
+  setTimeout(() => process.exit(0), 3000);
 }
 
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
@@ -380,6 +385,7 @@ if (isCli) {
         }
 
         applyCliArgsToEnv();
+        reinitializeConfig();
         console.log("  ✓ 正在连接服务器...");
         connect();
       })();

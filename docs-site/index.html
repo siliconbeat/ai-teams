@@ -212,6 +212,7 @@ td code { background: none; padding: 0; }
     <div class="nav-section">部署</div>
     <a href="#deployment">部署指南</a>
     <a href="#npm-install">npm 安装</a>
+    <a href="#cli-commands">CLI 命令</a>
     <a href="#env-server">环境变量</a>
     <div class="nav-section">接口文档</div>
     <a href="#rest-api">REST API</a>
@@ -221,6 +222,10 @@ td code { background: none; padding: 0; }
     <a href="#agent-guide">Agent 使用</a>
     <a href="#web-console">Web 控制台</a>
     <a href="#advanced">高级功能</a>
+    <div class="nav-section">运维</div>
+    <a href="#daemon">守护进程</a>
+    <a href="#fault-tolerance">容错机制</a>
+    <a href="#schedules">定时任务</a>
   </nav>
 </aside>
 
@@ -263,7 +268,7 @@ td code { background: none; padding: 0; }
       <div class="card">
         <div class="card-icon">&#x1F504;</div>
         <h4>高可用</h4>
-        <p>Agent 自动重连、心跳检测、任务断线续跑、Webhook 回调。</p>
+        <p>守护进程自动重启、Agent 断线任务恢复（最多重试 3 次）、心跳检测、Webhook 回调。</p>
       </div>
     </div>
 
@@ -366,16 +371,15 @@ cd apps/web && pnpm build</code></pre>
     <pre><code class="language-bash"># 设置认证 Token（必填）
 export AI_TEAMS_AUTH_TOKEN="your-secret-token"
 
-# 启动 Server
-pnpm start:server
-# 或指定参数
-node apps/server/dist/index.js --token "your-secret-token" --port 3789
+# 启动 Server（守护进程模式）
+ai-teams-server start --token "your-secret-token" --port 3789
 
-# 启动 Agent（另一个终端）
-AI_TEAMS_AUTH_TOKEN="your-secret-token" \
-EMPLOYEE_ID=alice \
-EMPLOYEE_NAME="Alice" \
-SERVER_URL=ws://localhost:3789 \
+# 启动 Agent（守护进程模式）
+ai-teams-agent start --server ws://localhost:3789 --token "your-secret-token" \
+  --id alice --name "Alice"
+
+# 或使用 pnpm（开发模式）
+pnpm start:server
 pnpm start:agent:alice
 
 # 启动 Web 控制台
@@ -402,24 +406,32 @@ npm install -g @csdwd/ai-teams-server
 npm install -g @csdwd/ai-teams-agent</code></pre>
 
     <p>安装后即可直接使用 CLI 命令：</p>
-    <pre><code class="language-bash"># 启动 Server
-ai-teams-server --token "your-secret-token" --port 3789
+    <pre><code class="language-bash"># 以守护进程方式启动 Server（推荐）
+ai-teams-server start --token "your-secret-token" --port 3789
 
-# 启动 Agent（首次运行自动进入配置向导）
-ai-teams-agent</code></pre>
+# 以守护进程方式启动 Agent（首次运行自动进入配置向导）
+ai-teams-agent start</code></pre>
 
     <h3>使用 npx（无需安装）</h3>
     <pre><code class="language-bash"># 直接运行 Server
-npx @csdwd/ai-teams-server --token "your-secret-token"
+npx @csdwd/ai-teams-server start --token "your-secret-token"
 
 # 直接运行 Agent
-npx @csdwd/ai-teams-agent</code></pre>
+npx @csdwd/ai-teams-agent start</code></pre>
 
-    <h3>CLI 参数</h3>
+    <h3>CLI 命令</h3>
 
     <div class="card-grid">
       <div class="card">
         <h4><code>ai-teams-server</code></h4>
+        <table>
+          <tr><th>子命令</th><th>说明</th></tr>
+          <tr><td><code>start [选项]</code></td><td>以守护进程方式启动</td></tr>
+          <tr><td><code>stop</code></td><td>停止守护进程</td></tr>
+          <tr><td><code>restart [选项]</code></td><td>重启守护进程</td></tr>
+          <tr><td><code>status</code></td><td>查看运行状态和 PID</td></tr>
+          <tr><td><code>update</code></td><td>从 npm 更新到最新版本</td></tr>
+        </table>
         <table>
           <tr><th>参数</th><th>说明</th></tr>
           <tr><td><code>--token &lt;token&gt;</code></td><td>认证 Token（必填）</td></tr>
@@ -429,11 +441,20 @@ npx @csdwd/ai-teams-agent</code></pre>
           <tr><td><code>--db-path &lt;path&gt;</code></td><td>数据库路径</td></tr>
           <tr><td><code>--log-level &lt;level&gt;</code></td><td>日志级别（默认 info）</td></tr>
           <tr><td><code>--log-dir &lt;dir&gt;</code></td><td>日志文件目录</td></tr>
+          <tr><td><code>-v, --version</code></td><td>显示版本号</td></tr>
           <tr><td><code>-h, --help</code></td><td>显示帮助</td></tr>
         </table>
       </div>
       <div class="card">
         <h4><code>ai-teams-agent</code></h4>
+        <table>
+          <tr><th>子命令</th><th>说明</th></tr>
+          <tr><td><code>start [选项]</code></td><td>以守护进程方式启动</td></tr>
+          <tr><td><code>stop</code></td><td>停止守护进程</td></tr>
+          <tr><td><code>restart [选项]</code></td><td>重启守护进程</td></tr>
+          <tr><td><code>status</code></td><td>查看运行状态和 PID</td></tr>
+          <tr><td><code>update</code></td><td>从 npm 更新到最新版本</td></tr>
+        </table>
         <table>
           <tr><th>参数</th><th>说明</th></tr>
           <tr><td><code>--server &lt;url&gt;</code></td><td>Server WebSocket 地址</td></tr>
@@ -443,23 +464,40 @@ npx @csdwd/ai-teams-agent</code></pre>
           <tr><td><code>--workspace &lt;dir&gt;</code></td><td>默认工作目录</td></tr>
           <tr><td><code>--runner &lt;mode&gt;</code></td><td>执行模式（claude / fake）</td></tr>
           <tr><td><code>--config</code></td><td>重新运行配置向导</td></tr>
+          <tr><td><code>-v, --version</code></td><td>显示版本号</td></tr>
           <tr><td><code>-h, --help</code></td><td>显示帮助</td></tr>
         </table>
       </div>
     </div>
 
-    <h3>多 Agent 部署示例</h3>
-    <pre><code class="language-bash"># 终端 1 — 启动 Server
-ai-teams-server --token "my-secret"
+    <div class="note tip">
+      <p><strong>配置持久化：</strong>首次使用 <code>start</code> 时传入的参数（token、server、id 等）会自动保存到配置文件。后续使用 <code>start</code>、<code>restart</code> 无需重复指定。</p>
+      <ul>
+        <li>Server 配置：<code>~/.ai-teams/server-config.json</code></li>
+        <li>Agent 配置：<code>~/.ai-teams/config.json</code></li>
+      </ul>
+    </div>
 
-# 终端 2 — 启动 Agent Alice
-ai-teams-agent --server ws://localhost:3789 --token "my-secret" \
+    <h3>多 Agent 部署示例</h3>
+    <pre><code class="language-bash"># 启动 Server（后台守护进程）
+ai-teams-server start --token "my-secret"
+
+# 启动 Agent Alice（后台守护进程）
+ai-teams-agent start --server ws://localhost:3789 --token "my-secret" \
   --id alice --name "Alice" --workspace ~/projects/project-a
 
-# 终端 3 — 启动 Agent Bob
-ai-teams-agent --server ws://localhost:3789 --token "my-secret" \
+# 启动 Agent Bob
+ai-teams-agent start --server ws://localhost:3789 --token "my-secret" \
   --id bob --name "Bob" --workspace ~/projects/project-b \
-  --labels "backend,python"</code></pre>
+  --labels "backend,python"
+
+# 查看运行状态
+ai-teams-server status
+ai-teams-agent status
+
+# 更新到最新版本
+ai-teams-agent update
+ai-teams-agent restart  # 应用更新</code></pre>
 
     <div class="note">
       <p><strong>包说明：</strong></p>
@@ -646,6 +684,18 @@ ai-teams-agent --server ws://localhost:3789 --token "my-secret" \
       <p class="endpoint-desc">列出指定 Agent 工作区下的 Claude Code 会话列表。</p>
     </div>
 
+    <h3>定时任务 API</h3>
+    <p>完整的 CRUD + 手动触发接口，详见<a href="#schedules">定时任务</a>章节。</p>
+    <table>
+      <tr><th>方法</th><th>路径</th><th>说明</th></tr>
+      <tr><td><span class="method get">GET</span></td><td><code>/api/schedules</code></td><td>列出所有定时任务</td></tr>
+      <tr><td><span class="method get">GET</span></td><td><code>/api/schedules/:id</code></td><td>获取单个定时任务</td></tr>
+      <tr><td><span class="method post">POST</span></td><td><code>/api/schedules</code></td><td>创建定时任务</td></tr>
+      <tr><td><span class="method patch">PATCH</span></td><td><code>/api/schedules/:id</code></td><td>更新定时任务</td></tr>
+      <tr><td><span class="method delete">DELETE</span></td><td><code>/api/schedules/:id</code></td><td>删除定时任务</td></tr>
+      <tr><td><span class="method post">POST</span></td><td><code>/api/schedules/:id/trigger</code></td><td>手动触发一次执行</td></tr>
+    </table>
+
     <!-- WebSocket -->
     <h2 id="websocket">WebSocket 协议</h2>
     <p>两个 WebSocket 通道均需要 Token 认证（Header 或 <code>?token=</code> 参数）。未授权连接将被关闭（code 1008）。</p>
@@ -724,6 +774,7 @@ ai-teams-agent --server ws://localhost:3789 --token "my-secret" \
       <tr><td>totalCostUsd</td><td>number | null</td><td>总费用（USD）</td></tr>
       <tr><td>usageInputTokens / usageOutputTokens</td><td>number | null</td><td>Token 用量</td></tr>
       <tr><td>usageCacheReadTokens / usageCacheCreationTokens</td><td>number | null</td><td>缓存 Token 用量</td></tr>
+      <tr><td>retryCount</td><td>number</td><td>断线重试次数（上限 3 次）</td></tr>
     </table>
 
     <h3>EmployeeSnapshot</h3>
@@ -754,8 +805,15 @@ ai-teams-agent --server ws://localhost:3789 --token "my-secret" \
     <!-- Agent Guide -->
     <h2 id="agent-guide">Agent 使用</h2>
 
-    <h3>CLI 参数</h3>
-    <pre><code class="language-bash">node dist/index.js [选项]
+    <h3>守护进程命令</h3>
+    <pre><code class="language-bash">ai-teams-agent &lt;command&gt; [选项]
+
+命令:
+  start [选项]          后台启动守护进程
+  stop                  停止守护进程
+  restart [选项]        重启守护进程
+  status                查看运行状态
+  update                更新到最新版本
 
 选项:
   --server &lt;url&gt;       Server WebSocket 地址
@@ -797,7 +855,7 @@ ai-teams-agent --server ws://localhost:3789 --token "my-secret" \
     <!-- Web Console -->
     <h2 id="web-console">Web 控制台</h2>
 
-    <h3>五个功能页面</h3>
+    <h3>六个功能页面</h3>
     <div class="card-grid">
       <div class="card">
         <div class="card-icon">&#x1F4BB;</div>
@@ -823,6 +881,11 @@ ai-teams-agent --server ws://localhost:3789 --token "my-secret" \
         <div class="card-icon">&#x1F4CA;</div>
         <h4>统计分析</h4>
         <p>总任务、完成率、费用汇总、平均耗时。按 Agent 维度展示详细统计。</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">&#x23F0;</div>
+        <h4>定时任务</h4>
+        <p>创建和管理 cron 定时任务，启用/禁用、手动触发、查看执行历史。</p>
       </div>
     </div>
 
@@ -895,14 +958,6 @@ export AI_TEAMS_ENCRYPTION_KEY="生成的密钥"</code></pre>
     <pre><code>x-ai-teams-signature: sha256=&lt;HMAC-SHA256&gt;</code></pre>
     <p>密钥为 <code>AI_TEAMS_AUTH_TOKEN</code>，用于验证请求来源。失败重试最多 3 次，间隔 1 秒。</p>
 
-    <h3>Agent 健康检查</h3>
-    <p>Server 为每个 Agent 维护 30 秒心跳超时计时器：</p>
-    <ul>
-      <li>每收到 <code>agent.heartbeat</code> 重置计时器</li>
-      <li>超时后自动标记 Agent 为 <code>offline</code></li>
-      <li>回收该 Agent 未执行的队列任务，重新调度给其他 Agent</li>
-    </ul>
-
     <h3>数据库</h3>
     <p>默认使用 SQLite（<code>node:sqlite</code>），设置 <code>DATABASE_URL</code> 可切换到 PostgreSQL。</p>
     <table>
@@ -911,8 +966,199 @@ export AI_TEAMS_ENCRYPTION_KEY="生成的密钥"</code></pre>
       <tr><td>tasks</td><td>任务记录（完整字段）</td></tr>
       <tr><td>task_logs</td><td>任务输出日志（按 task_id + seq）</td></tr>
       <tr><td>task_webhooks</td><td>任务 Webhook URL</td></tr>
+      <tr><td>schedules</td><td>定时任务配置（cron 表达式、目标、提示词）</td></tr>
+      <tr><td>schema_meta</td><td>Schema 元信息（版本号、游标等）</td></tr>
     </table>
     <p>Server 启动时从数据库恢复状态，标记所有 Agent 为 offline，重新入队未完成任务。</p>
+
+    <!-- Daemon -->
+    <h2 id="daemon">守护进程</h2>
+
+    <p>Server 和 Agent 均支持守护进程模式，使用三阶段进程模型确保稳定性：</p>
+
+    <div class="arch-diagram">
+<pre>
+  用户执行 start
+       │
+       ▼
+  ┌──────────┐   fork (detached)   ┌──────────┐   fork (env: WORKER=1)   ┌──────────┐
+  │ Launcher │ ──────────────────► │ Watchdog │ ───────────────────────► │  Worker  │
+  │ (退出)    │                    │ 写 PID    │                         │ 业务逻辑  │
+  └──────────┘                    │ 监控存活  │                         │ connect()│
+                                  │ 自动重启  │                         └──────────┘
+                                  └──────────┘
+</pre>
+    </div>
+
+    <h3>常用命令</h3>
+    <pre><code class="language-bash"># 启动（后台运行）
+ai-teams-server start --token "your-token"
+ai-teams-agent start --server ws://localhost:3789 --token "your-token"
+
+# 查看状态
+ai-teams-server status    # → running (PID 12345)
+ai-teams-agent status
+
+# 重启
+ai-teams-server restart
+ai-teams-agent restart
+
+# 停止
+ai-teams-server stop
+ai-teams-agent stop
+
+# 更新版本
+ai-teams-server update    # npm 全局更新
+ai-teams-agent update     # 更新后提示 restart</code></pre>
+
+    <h3>自动恢复</h3>
+    <p>Watchdog 进程监控 Worker，异常退出时自动重启（每分钟最多 10 次）。PID 文件位于工作目录下：</p>
+    <ul>
+      <li>Server：<code>&lt;data-dir&gt;/.ai-teams/server/server.pid</code></li>
+      <li>Agent：<code>&lt;workspace&gt;/.ai-teams/agents/&lt;id&gt;/agent.pid</code></li>
+    </ul>
+    <p>日志输出到各守护进程的 <code>logs/</code> 目录，可用 <code>status</code> 命令查看路径。</p>
+
+    <div class="note">
+      <p><strong>配置持久化：</strong>CLI 参数在首次 <code>start</code> 时保存到配置文件（Server: <code>~/.ai-teams/server-config.json</code>，Agent: <code>~/.ai-teams/config.json</code>）。后续 <code>start</code>、<code>restart</code> 自动加载已保存配置，无需重复指定。不带子命令运行仍为前台模式。</p>
+    </div>
+
+    <!-- Fault Tolerance -->
+    <h2 id="fault-tolerance">容错机制</h2>
+
+    <h3>断线任务恢复</h3>
+    <p>当 Agent 意外断开连接时，Server 执行以下恢复流程：</p>
+    <ol>
+      <li><strong>宽限期等待</strong>（默认 15 秒）— 如果 Agent 在宽限期内重连，任务继续执行</li>
+      <li><strong>自动重新入队</strong> — 宽限期过后，未完成任务重新进入队列</li>
+      <li><strong>重试次数限制</strong> — 每个任务最多重试 3 次，超过后标记为 failed</li>
+    </ol>
+
+    <div class="lifecycle">
+      <span class="state">running</span><span class="arrow">&rarr;</span>
+      <span class="state">Agent 断线</span><span class="arrow">&rarr;</span>
+      <span class="state">宽限期 15s</span><span class="arrow">&rarr;</span>
+      <span class="state">queued</span><span class="arrow">&rarr;</span>
+      <span class="state">重新分发</span>
+      <span class="state terminal">retry > 3 → failed</span>
+    </div>
+
+    <h3>重试策略</h3>
+    <table>
+      <tr><th>重试次数</th><th>行为</th><th>调度延迟</th></tr>
+      <tr><td>第 1 次 (retryCount=1)</td><td>重新入队并立即调度</td><td>无延迟</td></tr>
+      <tr><td>第 2 次 (retryCount=2)</td><td>重新入队，延迟后调度</td><td>5 秒</td></tr>
+      <tr><td>第 3 次 (retryCount=3)</td><td>重新入队，延迟后调度</td><td>10 秒</td></tr>
+      <tr><td>第 4 次 (retryCount>3)</td><td>标记为 failed</td><td>-</td></tr>
+    </table>
+
+    <h3>心跳检测</h3>
+    <p>Server 为每个在线 Agent 维护 30 秒心跳超时：</p>
+    <ul>
+      <li>Agent 每 10 秒发送 <code>agent.heartbeat</code></li>
+      <li>超过 30 秒无心跳自动标记为 <code>offline</code></li>
+      <li>回收未执行的队列任务到共享队列</li>
+    </ul>
+
+    <h3>Server 重启恢复</h3>
+    <p>Server 重启时从数据库恢复全部状态：</p>
+    <ul>
+      <li>所有 Agent 标记为 <code>offline</code>，等待重新注册</li>
+      <li>未完成的任务重新入队（不受重试次数限制）</li>
+      <li>Agent 重连后可恢复原有任务（通过 <code>activeMainTaskId</code> / <code>activeQueueTaskId</code>）</li>
+    </ul>
+
+    <!-- Schedules -->
+    <h2 id="schedules">定时任务</h2>
+
+    <p>通过 REST API 创建 cron 定时任务，Server 会按计划自动执行。支持所有任务调度模式（queue / direct / broadcast）。</p>
+
+    <h3>创建定时任务</h3>
+    <pre><code class="language-json">POST /api/schedules
+{
+  "name": "每日代码审查",
+  "cron": "0 9 * * 1-5",
+  "enabled": true,
+  "targetMode": "queue",
+  "prompt": "检查最近的代码变更并生成审查报告",
+  "workspace": "/path/to/project",
+  "priority": 1,
+  "requiredLabels": ["backend"]
+}</code></pre>
+    <p>返回包含 <code>nextRunAt</code> 字段，表示下次执行时间。</p>
+
+    <h3>Schedule REST API</h3>
+
+    <div class="endpoint">
+      <div class="endpoint-header">
+        <span class="method get">GET</span>
+        <span class="endpoint-path">/api/schedules</span>
+      </div>
+      <p class="endpoint-desc">列出所有定时任务。</p>
+    </div>
+
+    <div class="endpoint">
+      <div class="endpoint-header">
+        <span class="method get">GET</span>
+        <span class="endpoint-path">/api/schedules/:scheduleId</span>
+      </div>
+      <p class="endpoint-desc">获取单个定时任务详情。</p>
+    </div>
+
+    <div class="endpoint">
+      <div class="endpoint-header">
+        <span class="method post">POST</span>
+        <span class="endpoint-path">/api/schedules</span>
+      </div>
+      <p class="endpoint-desc">创建定时任务。必填：<code>name</code>、<code>cron</code>（cron 表达式）、<code>prompt</code>。</p>
+    </div>
+
+    <div class="endpoint">
+      <div class="endpoint-header">
+        <span class="method patch">PATCH</span>
+        <span class="endpoint-path">/api/schedules/:scheduleId</span>
+      </div>
+      <p class="endpoint-desc">更新定时任务。可修改 <code>enabled</code>、<code>cron</code>、<code>prompt</code> 等字段。</p>
+    </div>
+
+    <div class="endpoint">
+      <div class="endpoint-header">
+        <span class="method delete">DELETE</span>
+        <span class="endpoint-path">/api/schedules/:scheduleId</span>
+      </div>
+      <p class="endpoint-desc">删除定时任务。</p>
+    </div>
+
+    <div class="endpoint">
+      <div class="endpoint-header">
+        <span class="method post">POST</span>
+        <span class="endpoint-path">/api/schedules/:scheduleId/trigger</span>
+      </div>
+      <p class="endpoint-desc">手动触发一次定时任务执行（不受 cron 计划限制）。</p>
+    </div>
+
+    <h3>Schedule 数据模型</h3>
+    <table>
+      <tr><th>字段</th><th>类型</th><th>说明</th></tr>
+      <tr><td>id</td><td>string</td><td>定时任务 ID</td></tr>
+      <tr><td>name</td><td>string</td><td>名称</td></tr>
+      <tr><td>cronExpr</td><td>string</td><td>Cron 表达式（如 <code>0 9 * * 1-5</code> = 工作日 9 点）</td></tr>
+      <tr><td>enabled</td><td>boolean</td><td>是否启用</td></tr>
+      <tr><td>targetMode</td><td>"queue" | "direct" | "broadcast"</td><td>调度模式</td></tr>
+      <tr><td>targetAgents</td><td>string[]</td><td>direct 模式的目标 Agent 列表</td></tr>
+      <tr><td>prompt</td><td>string</td><td>任务提示词</td></tr>
+      <tr><td>workspace</td><td>string | null</td><td>工作目录</td></tr>
+      <tr><td>timeoutSec</td><td>number | null</td><td>超时时间</td></tr>
+      <tr><td>priority</td><td>number (0-3)</td><td>优先级</td></tr>
+      <tr><td>requiredLabels</td><td>string[] | null</td><td>标签筛选</td></tr>
+      <tr><td>lastRunAt</td><td>string | null</td><td>上次执行时间</td></tr>
+      <tr><td>nextRunAt</td><td>string | null</td><td>下次计划执行时间</td></tr>
+      <tr><td>createdAt / updatedAt</td><td>string</td><td>创建 / 更新时间</td></tr>
+    </table>
+
+    <div class="note tip">
+      <p><strong>提示：</strong>修改 <code>enabled</code>、<code>cron</code> 等字段后，Server 自动重启定时器，无需手动重启服务。更新和删除操作立即生效。</p>
+    </div>
 
   </div>
 

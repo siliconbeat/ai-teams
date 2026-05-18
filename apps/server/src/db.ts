@@ -224,13 +224,13 @@ export async function hydrateState(db: Database, state: StateStore, defaultTimeo
       if (task.targetMode === "queue" || !task.employeeId) {
         state.sharedTaskQueue.push(task.id);
       } else {
-        const queue = state.taskQueues.get(task.employeeId!) ?? [];
+        const queue = state.mainTaskQueues.get(task.employeeId!) ?? [];
         queue.push(task.id);
-        state.taskQueues.set(task.employeeId!, queue);
+        state.mainTaskQueues.set(task.employeeId!, queue);
       }
     } else if (task.employeeId && !TERMINAL_STATUSES.has(task.status)) {
       task.status = "queued";
-      persistTask(db, task);
+      await persistTask(db, task);
       if (task.targetMode === "queue") {
         state.sharedTaskQueue.push(task.id);
       } else {
@@ -388,12 +388,25 @@ export async function deleteTask(db: Database, taskId: string): Promise<boolean>
   return true;
 }
 
+const UPDATABLE_TASK_FIELDS = new Set([
+  "status", "timeoutSec", "cliConfig", "priority", "requiredLabels",
+  "prompt", "workspace", "employeeId", "sessionId",
+  "exitCode", "summary", "error", "durationMs", "durationApiMs",
+  "numTurns", "totalCostUsd", "usageInputTokens", "usageOutputTokens",
+  "usageCacheReadTokens", "usageCacheCreationTokens",
+]);
+
 export async function updateTaskFields(db: Database, taskId: string, fields: Record<string, unknown>): Promise<DbTaskRow | undefined> {
-  const entries = Object.entries(fields);
+  const entries = Object.entries(fields).filter(([key]) => UPDATABLE_TASK_FIELDS.has(key));
   if (entries.length === 0) return getTaskById(db, taskId);
 
   const setClauses = entries.map(([key], i) => `${toSnakeCase(key)} = $${i + 2}`).join(", ");
-  const values = entries.map(([, val]) => val);
+  const values = entries.map(([key, val]) => {
+    if ((key === "cliConfig" || key === "requiredLabels") && val != null) {
+      return JSON.stringify(val);
+    }
+    return val;
+  });
   await db.run(
     `UPDATE tasks SET ${setClauses} WHERE id = $1`,
     [taskId, ...values],
@@ -432,6 +445,7 @@ export type DbTaskRow = {
   usage_output_tokens: number | null;
   usage_cache_read_tokens: number | null;
   usage_cache_creation_tokens: number | null;
+  retry_count: number;
 };
 
 export function dbRowToTask(row: DbTaskRow, defaultTimeoutSec: number): TaskRecord {
@@ -448,7 +462,7 @@ export function dbRowToTask(row: DbTaskRow, defaultTimeoutSec: number): TaskReco
     priority: row.priority ?? 1,
     requiredLabels: row.required_labels ? JSON.parse(row.required_labels) : null,
     status: (row.status || "queued") as TaskRecord["status"],
-    retryCount: (row as Record<string, unknown>).retry_count as number ?? 0,
+    retryCount: row.retry_count ?? 0,
     createdAt: row.created_at,
     startedAt: row.started_at,
     finishedAt: row.finished_at,

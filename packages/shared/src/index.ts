@@ -200,6 +200,8 @@ export function parseLeaderToServerMessage(value: unknown): LeaderToServerMessag
       prompt: nonEmptyStringField(message, "prompt"),
       workspace: optionalStringField(message, "workspace"),
       timeoutSec: optionalPositiveNumberField(message, "timeoutSec"),
+      priority: optionalNonNegativeNumberField(message, "priority"),
+      requiredLabels: optionalStringArrayField(message, "requiredLabels"),
     };
   }
 
@@ -467,6 +469,15 @@ function nullableStringField(record: Record<string, unknown>, key: string): stri
 
 function stringArrayField(record: Record<string, unknown>, key: string): string[] {
   const value = record[key];
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new ProtocolError(`${key} must be a string array.`);
+  }
+  return value;
+}
+
+function optionalStringArrayField(record: Record<string, unknown>, key: string): string[] | undefined {
+  const value = record[key];
+  if (value === undefined) return undefined;
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
     throw new ProtocolError(`${key} must be a string array.`);
   }
