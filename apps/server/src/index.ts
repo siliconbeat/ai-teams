@@ -714,7 +714,7 @@ if (isCli) {
     return args[idx + 1];
   }
   if (args.includes("--version") || args.includes("-v")) {
-    console.log("0.1.3");
+    console.log("0.1.4");
     process.exit(0);
   }
   if (args.includes("--help") || args.includes("-h")) {

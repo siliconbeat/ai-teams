@@ -228,7 +228,7 @@ if (isCli) {
   const args = process.argv.slice(2);
 
   if (args.includes("--version") || args.includes("-v")) {
-    console.log("0.1.3");
+    console.log("0.1.4");
     process.exit(0);
   }
   if (args.includes("--help") || args.includes("-h")) {
