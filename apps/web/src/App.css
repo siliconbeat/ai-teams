@@ -495,9 +495,38 @@ textarea {
 }
 
 .leader-message {
-  align-self: flex-end;
   border-bottom-right-radius: 6px;
   background: linear-gradient(135deg, rgba(104, 182, 255, 0.28), rgba(121, 255, 209, 0.12));
+}
+
+.leader-message-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  width: fit-content;
+  max-width: 88%;
+  align-self: flex-end;
+}
+
+.chat-message__time-outside {
+  color: #90a1be;
+  font-size: 11px;
+  margin-top: 2px;
+  padding-right: 4px;
+}
+
+.chat-message__executing {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.chat-message__executing span {
+  color: #9bc8ff;
+  font-size: 11px;
 }
 
 .employee-message {
@@ -906,6 +935,18 @@ textarea {
   }
 
   .mobile-chat-feed .chat-message small {
+    font-size: 10px;
+  }
+
+  .mobile-chat-feed .leader-message-wrapper {
+    max-width: 88%;
+  }
+
+  .mobile-chat-feed .chat-message__time-outside {
+    font-size: 10px;
+  }
+
+  .mobile-chat-feed .chat-message__executing span {
     font-size: 10px;
   }
 

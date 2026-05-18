@@ -82,6 +82,7 @@ type ChatFeedItem = {
   createdAt: string;
   createdAtMs: number;
   status?: TaskStatus;
+  executingBy?: string[];
 };
 
 type EmployeeTerminalLog = {
@@ -371,6 +372,9 @@ export default function App() {
           .filter(Boolean)
           .join(" ");
       }
+      const executingBy = groupTasks
+        .filter((t) => t.employeeId && (t.status === "dispatched" || t.status === "accepted" || t.status === "running"))
+        .map((t) => employees[t.employeeId!]?.name ?? t.employeeId!);
       leaderItems.push({
         id: `leader-${first.leaderCommandId}`,
         side: "leader",
@@ -379,6 +383,7 @@ export default function App() {
         content: first.prompt,
         createdAt: new Date(first.createdAt).toLocaleTimeString(),
         createdAtMs: new Date(first.createdAt).getTime(),
+        executingBy: executingBy.length > 0 ? executingBy : undefined,
       });
     }
 
@@ -773,16 +778,32 @@ export default function App() {
         {chatFeed.length === 0 ? (
           <div className="mobile-chat-empty">还没有发送过指令。</div>
         ) : (
-          chatFeed.map((item) => (
-            <div className={`chat-message ${item.side}-message ${item.status ? `task-${item.status}` : ""}`} key={item.id}>
-              <div className="chat-message__meta">
-                <strong>{item.author}</strong>
-                <span>{item.createdAt}</span>
+          chatFeed.map((item) =>
+            item.side === "leader" ? (
+              <div className="leader-message-wrapper" key={item.id}>
+                <div className={`chat-message leader-message ${item.status ? `task-${item.status}` : ""}`}>
+                  <p>{item.content}</p>
+                  {item.target ? <small>{item.target}</small> : null}
+                  {item.executingBy && item.executingBy.length > 0 && (
+                    <div className="chat-message__executing">
+                      {item.executingBy.map((name) => (
+                        <span key={name}>● {name} 执行中</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <span className="chat-message__time-outside">{item.createdAt}</span>
               </div>
-              <p>{item.content}</p>
-              {item.target ? <small>{item.target}</small> : null}
-            </div>
-          ))
+            ) : (
+              <div className={`chat-message employee-message ${item.status ? `task-${item.status}` : ""}`} key={item.id}>
+                <div className="chat-message__meta">
+                  <strong>{item.author}</strong>
+                  <span>{item.createdAt}</span>
+                </div>
+                <p>{item.content}</p>
+              </div>
+            )
+          )
         )}
       </div>
 
@@ -1149,16 +1170,32 @@ export default function App() {
             {chatFeed.length === 0 ? (
               <div className="chat-empty">还没有发送过指令。</div>
             ) : (
-              chatFeed.map((item) => (
-                <div className={`chat-message ${item.side}-message ${item.status ? `task-${item.status}` : ""}`} key={item.id}>
-                  <div className="chat-message__meta">
-                    <strong>{item.author}</strong>
-                    <span>{item.createdAt}</span>
+              chatFeed.map((item) =>
+                item.side === "leader" ? (
+                  <div className="leader-message-wrapper" key={item.id}>
+                    <div className={`chat-message leader-message ${item.status ? `task-${item.status}` : ""}`}>
+                      <p>{item.content}</p>
+                      {item.target ? <small>{item.target}</small> : null}
+                      {item.executingBy && item.executingBy.length > 0 && (
+                        <div className="chat-message__executing">
+                          {item.executingBy.map((name) => (
+                            <span key={name}>● {name} 执行中</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <span className="chat-message__time-outside">{item.createdAt}</span>
                   </div>
-                  <p>{item.content}</p>
-                  {item.target ? <small>{item.target}</small> : null}
-                </div>
-              ))
+                ) : (
+                  <div className={`chat-message employee-message ${item.status ? `task-${item.status}` : ""}`} key={item.id}>
+                    <div className="chat-message__meta">
+                      <strong>{item.author}</strong>
+                      <span>{item.createdAt}</span>
+                    </div>
+                    <p>{item.content}</p>
+                  </div>
+                )
+              )
             )}
           </div>
           <div className="chat-composer">
