@@ -513,32 +513,6 @@ textarea {
   border-bottom-right-radius: 6px;
   background: linear-gradient(135deg, rgba(104, 182, 255, 0.28), rgba(121, 255, 209, 0.12));
   max-width: none;
-  position: relative;
-  overflow: hidden;
-}
-
-.leader-message.task-running::before,
-.leader-message.task-dispatched::before,
-.leader-message.task-accepted::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    105deg,
-    transparent 30%,
-    rgba(121, 255, 209, 0.18) 45%,
-    rgba(104, 182, 255, 0.22) 55%,
-    transparent 70%
-  );
-  background-size: 250% 100%;
-  animation: shimmer 2.5s ease-in-out infinite;
-  pointer-events: none;
-  border-radius: inherit;
-}
-
-@keyframes shimmer {
-  0%   { background-position: 200% 0; }
-  100% { background-position: -50% 0; }
 }
 
 .leader-message small,
@@ -578,6 +552,12 @@ textarea {
 .executing-status.executing-accepted,
 .executing-status.executing-running {
   color: #9bc8ff;
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.7; text-shadow: 0 0 4px rgba(155, 200, 255, 0.3); }
+  50%      { opacity: 1;   text-shadow: 0 0 10px rgba(155, 200, 255, 0.7), 0 0 20px rgba(155, 200, 255, 0.3); }
 }
 
 .executing-status.executing-completed {
