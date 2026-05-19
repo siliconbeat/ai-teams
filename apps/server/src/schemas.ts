@@ -17,7 +17,8 @@ export type WebhookEventType =
   | "task.completed"
   | "task.failed"
   | "task.cancelled"
-  | "task.timeout";
+  | "task.timeout"
+  | "queue.updated";
 
 export const errorResponseSchema = {
   type: "object",

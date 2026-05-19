@@ -153,8 +153,17 @@ export function createDispatch(ctx: DispatchContext) {
 
     const body = JSON.stringify(payload);
     void deliverWebhook(webhookUrl, body, signWebhookPayload(body), task.id);
-    if (event !== "task.started" && event !== "task.output") {
+    if (event !== "task.started" && event !== "task.output" && event !== "queue.updated") {
       state.taskWebhooks.delete(task.id);
+    }
+  }
+
+  function notifySharedQueueWebhooks() {
+    const queue = state.sharedTaskQueue;
+    for (let i = 0; i < queue.length; i++) {
+      const task = state.tasks.get(queue[i]);
+      if (!task || !state.taskWebhooks.has(task.id)) continue;
+      postTaskWebhook(task, "queue.updated", { queuePosition: i, queueLength: queue.length });
     }
   }
 
@@ -289,12 +298,14 @@ export function createDispatch(ctx: DispatchContext) {
       }
     }
     state.sharedTaskQueue.splice(insertAt, 0, taskId);
+    notifySharedQueueWebhooks();
   }
 
   function removeFromSharedQueue(taskId: string) {
     const index = state.sharedTaskQueue.indexOf(taskId);
     if (index !== -1) {
       state.sharedTaskQueue.splice(index, 1);
+      notifySharedQueueWebhooks();
     }
   }
 
