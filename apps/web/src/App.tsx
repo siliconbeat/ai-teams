@@ -924,6 +924,14 @@ export default function App() {
           >
             统计分析
           </button>
+          <a
+            className="nav-item"
+            href="/docs-site/index.html"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            文档
+          </a>
         </nav>
         <button className="secondary-button mobile-logout" onClick={clearToken}>
           ⏻

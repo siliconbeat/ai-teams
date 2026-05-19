@@ -141,6 +141,12 @@ textarea {
   color: #fff;
 }
 
+a.nav-item {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+
 .workspace-panel {
   grid-area: workspace;
   display: flex;
