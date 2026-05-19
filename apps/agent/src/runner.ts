@@ -75,7 +75,7 @@ export function handleClaudeJsonLine(
         task.sawStreamText = true;
         task.summary.push(event.delta.text);
       }
-      emitOutput(taskId, "stdout", event.delta.text);
+      emitOutput(taskId, "stdout", event.delta.text, true);
     }
     return;
   }

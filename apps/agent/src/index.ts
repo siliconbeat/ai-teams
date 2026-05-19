@@ -57,7 +57,7 @@ function send(payload: EmployeeToServerMessage) {
   connectionSend(connState, payload);
 }
 
-function emitOutput(taskId: string, stream: "stdout" | "stderr", content: string) {
+function emitOutput(taskId: string, stream: "stdout" | "stderr", content: string, delta = false) {
   const task = findActiveTask(taskId);
   if (!task || !content) return;
   task.seq += 1;
@@ -67,6 +67,7 @@ function emitOutput(taskId: string, stream: "stdout" | "stderr", content: string
     stream,
     seq: task.seq,
     content,
+    ...(delta ? { delta: true } : {}),
   });
 }
 

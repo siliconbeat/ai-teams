@@ -77,6 +77,7 @@ export interface TaskOutputChunk {
   seq: number;
   content: string;
   createdAt: string;
+  delta?: boolean;
 }
 
 export interface StateSnapshot {
@@ -115,7 +116,7 @@ export type EmployeeToServerMessage =
   | { type: "agent.request_task"; employeeId: string }
   | { type: "task.accepted"; taskId: string }
   | { type: "task.started"; taskId: string; pid: number; sessionId?: string | null }
-  | { type: "task.output"; taskId: string; stream: "stdout" | "stderr"; seq: number; content: string }
+  | { type: "task.output"; taskId: string; stream: "stdout" | "stderr"; seq: number; content: string; delta?: boolean }
   | {
       type: "task.completed";
       taskId: string;

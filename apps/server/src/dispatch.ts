@@ -118,6 +118,7 @@ export function createDispatch(ctx: DispatchContext) {
           "x-ai-teams-signature": signature,
         },
         body,
+        signal: AbortSignal.timeout(10_000),
       });
       if (!response.ok && attempt < 3) {
         await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -152,6 +153,9 @@ export function createDispatch(ctx: DispatchContext) {
 
     const body = JSON.stringify(payload);
     void deliverWebhook(webhookUrl, body, signWebhookPayload(body), task.id);
+    if (event !== "task.started" && event !== "task.output") {
+      state.taskWebhooks.delete(task.id);
+    }
   }
 
   function clearTaskTimeout(taskId: string) {
@@ -231,7 +235,9 @@ export function createDispatch(ctx: DispatchContext) {
     state.taskLogs.set(chunk.taskId, history);
     persistTaskLog(db, chunk, ctx.maxLogChunksPerTask).catch((error) => log.error({ error, taskId: chunk.taskId, seq: chunk.seq }, "Failed to persist task log"));
     broadcastToLeaders({ type: "task.output", chunk });
-    postTaskWebhook(task, "task.output", { chunk });
+    if (!chunk.delta) {
+      postTaskWebhook(task, "task.output", { chunk });
+    }
   }
 
   function markTaskTimeout(task: TaskRecord) {
