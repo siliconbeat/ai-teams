@@ -745,6 +745,7 @@ export function createDispatch(ctx: DispatchContext) {
           seq: message.seq,
           content: message.content,
           createdAt: nowIso(),
+          ...(message.delta ? { delta: true } : {}),
         });
         break;
       case "task.completed":
