@@ -276,12 +276,14 @@ export function parseEmployeeToServerMessage(value: unknown): EmployeeToServerMe
     if (stream !== "stdout" && stream !== "stderr") {
       throw new ProtocolError("task.output.stream must be stdout or stderr.");
     }
+    const delta = message.delta === true;
     return {
       type,
       taskId: nonEmptyStringField(message, "taskId"),
       stream,
       seq: positiveIntegerField(message, "seq"),
       content: stringField(message, "content"),
+      ...(delta ? { delta: true } : {}),
     };
   }
 
