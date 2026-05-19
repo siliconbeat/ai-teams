@@ -1124,7 +1124,7 @@ export default function App() {
                   }
 
                   return (
-                    <article className="employee-card" key={employee.id}>
+                    <article className={`employee-card${presence.className === "busy" ? " card-busy" : ""}`} key={employee.id}>
                       <div className="employee-card__header">
                         <div>
                           <div className="employee-card__title">

@@ -216,6 +216,22 @@ a.nav-item {
 
 .employee-card {
   padding: 10px;
+  transition: border-color 0.3s, box-shadow 0.3s;
+}
+
+.employee-card.card-busy {
+  animation: card-breathe 2.5s ease-in-out infinite;
+}
+
+@keyframes card-breathe {
+  0%, 100% {
+    border-color: rgba(93, 166, 255, 0.15);
+    box-shadow: 0 12px 30px rgba(1, 8, 20, 0.24);
+  }
+  50% {
+    border-color: rgba(93, 166, 255, 0.45);
+    box-shadow: 0 12px 30px rgba(1, 8, 20, 0.24), 0 0 20px rgba(93, 166, 255, 0.15);
+  }
 }
 
 .task-log-panel {
