@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   isEncryptedEnvelope,
   parseJsonMessage,
@@ -210,6 +210,126 @@ function isTerminalStatus(status: TaskStatus) {
   return status === "completed" || status === "failed" || status === "cancelled" || status === "timeout";
 }
 
+function getAgentPresence(employee: EmployeeSnapshot, activeTask?: TaskRecord) {
+  if (employee.status === "offline") {
+    return { label: "离线", className: "offline" };
+  }
+  if (!activeTask) {
+    return { label: "在线", className: "online" };
+  }
+  if (activeTask.status === "dispatched") {
+    return { label: "派发中", className: "dispatched" };
+  }
+  if (activeTask.status === "accepted") {
+    return { label: "已接单", className: "accepted" };
+  }
+  if (activeTask.status === "running") {
+    return { label: "任务中", className: "busy" };
+  }
+  return { label: "在线", className: "online" };
+}
+
+function formatElapsed(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+function SlotStrip({ label, task, onCancel }: { label: string; task: TaskRecord | undefined; onCancel: (id: string) => void }) {
+  const isActive = task && (task.status === "running" || task.status === "accepted" || task.status === "dispatched");
+  const startedAt = task?.startedAt;
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!isActive || !startedAt) return;
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [isActive, startedAt]);
+
+  const elapsed = isActive && startedAt ? formatElapsed(Date.now() - new Date(startedAt).getTime()) : null;
+
+  return (
+    <div className={`task-strip ${task ? `task-${task.status}` : ""}`}>
+      <span title={task ? `[${label}] ${task.prompt}` : undefined}>
+        {task ? `[${label}] ${task.prompt}` : `[${label}] 空闲`}
+      </span>
+      {isActive ? (
+        <>
+          {elapsed != null && <span className="task-elapsed">[{elapsed}]</span>}
+          <button className="secondary-button" onClick={() => onCancel(task.id)}>
+            取消
+          </button>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+const EmployeeCard = memo(function EmployeeCard({
+  employee,
+  mainTask,
+  queueTask,
+  displayTask,
+  terminalText,
+  cancelTask,
+}: {
+  employee: EmployeeSnapshot;
+  mainTask: TaskRecord | undefined;
+  queueTask: TaskRecord | undefined;
+  displayTask: TaskRecord | undefined;
+  terminalText: string;
+  cancelTask: (taskId: string) => void;
+}) {
+  const logRef = useRef<HTMLPreElement | null>(null);
+  const prevTerminalText = useRef(terminalText);
+
+  const activeTask = mainTask ?? queueTask;
+  const taskStatus = activeTask?.status ?? displayTask?.status ?? "idle";
+  const presence = getAgentPresence(employee, activeTask);
+
+  useEffect(() => {
+    if (prevTerminalText.current !== terminalText) {
+      prevTerminalText.current = terminalText;
+      const el = logRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    }
+  }, [terminalText]);
+
+  return (
+    <article className={`employee-card${presence.className === "busy" ? " card-busy" : ""}`}>
+      <div className="employee-card__header">
+        <div>
+          <div className="employee-card__title">
+            <h2>{employee.name}</h2>
+            <span className={`task-state-badge task-${taskStatus}`}>{taskStatus}</span>
+          </div>
+        </div>
+        <div className={`status-pill agent-presence ${presence.className}`}>
+          {presence.label}
+        </div>
+      </div>
+      <div className="employee-meta">
+        <span>{employee.hostname}</span>
+        <span>ID: {employee.id}</span>
+        <span>标签: {employee.labels.join(", ") || "未设置"}</span>
+      </div>
+      <SlotStrip label="主任务" task={mainTask} onCancel={cancelTask} />
+      <SlotStrip label="队列" task={queueTask} onCancel={cancelTask} />
+      <pre className="log-window" ref={logRef}>
+        {renderTerminalContent(terminalText)}
+      </pre>
+    </article>
+  );
+}, (prev, next) => {
+  if (prev.terminalText !== next.terminalText) return false;
+  if (prev.cancelTask !== next.cancelTask) return false;
+  if (prev.mainTask !== next.mainTask || prev.queueTask !== next.queueTask || prev.displayTask !== next.displayTask) return false;
+  const pe = prev.employee, ne = next.employee;
+  if (pe.status !== ne.status || pe.mainTaskId !== ne.mainTaskId || pe.queueTaskId !== ne.queueTaskId || pe.name !== ne.name || pe.consecutiveQueueFailures !== ne.consecutiveQueueFailures) return false;
+  if (pe.labels.length !== ne.labels.length || pe.labels.some((l, i) => l !== ne.labels[i])) return false;
+  return true;
+});
+
 export default function App() {
   const [authToken, setAuthToken] = useState(getInitialToken);
   const [tokenDraft, setTokenDraft] = useState(authToken);
@@ -238,7 +358,6 @@ export default function App() {
   });
   const [scheduleError, setScheduleError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const logWindowRefs = useRef<Record<string, HTMLPreElement | null>>({});
   const chatListRef = useRef<HTMLDivElement | null>(null);
   const mobileChatRef = useRef<HTMLDivElement | null>(null);
   const mobileTerminalRef = useRef<HTMLPreElement | null>(null);
@@ -508,25 +627,6 @@ export default function App() {
     }
   }
 
-  function getAgentPresence(employee: EmployeeSnapshot, activeTask?: TaskRecord) {
-    if (employee.status === "offline") {
-      return { label: "离线", className: "offline" };
-    }
-    if (!activeTask) {
-      return { label: "在线", className: "online" };
-    }
-    if (activeTask.status === "dispatched") {
-      return { label: "派发中", className: "dispatched" };
-    }
-    if (activeTask.status === "accepted") {
-      return { label: "已接单", className: "accepted" };
-    }
-    if (activeTask.status === "running") {
-      return { label: "任务中", className: "busy" };
-    }
-    return { label: "在线", className: "online" };
-  }
-
   function buildTaskHeader(task: TaskRecord) {
     const receivedAt = new Date(task.createdAt).toLocaleTimeString();
     return [
@@ -729,14 +829,6 @@ export default function App() {
       wsRef.current?.send(encrypted);
     });
   }
-
-  useEffect(() => {
-    for (const element of Object.values(logWindowRefs.current)) {
-      if (element) {
-        element.scrollTop = element.scrollHeight;
-      }
-    }
-  }, [terminalLogs]);
 
   useEffect(() => {
     localStorage.setItem(TERMINAL_LOG_STORAGE_KEY, JSON.stringify(terminalLogs));
@@ -1088,70 +1180,17 @@ export default function App() {
               ) : (
                 employeeList.map((employee) => {
                   const slots = activeTasksByEmployee[employee.id];
-                  const mainTask = slots?.main;
-                  const queueTask = slots?.queue;
-                  const activeTask = mainTask ?? queueTask;
-                  const task = displayTasksByEmployee[employee.id];
-                  const taskStatus = activeTask?.status ?? task?.status ?? "idle";
-                  const presence = getAgentPresence(employee, activeTask);
                   const terminalText = terminalLogs[employee.id]?.content || "等待输出...";
-                  const isCancellable =
-                    activeTask &&
-                    (activeTask.status === "running" ||
-                      activeTask.status === "accepted" ||
-                      activeTask.status === "dispatched");
-
-                  function buildSlotStrip(label: string, slotTask: TaskRecord | undefined) {
-                    const isActive =
-                      slotTask &&
-                      (slotTask.status === "running" ||
-                        slotTask.status === "accepted" ||
-                        slotTask.status === "dispatched");
-                    return (
-                      <div className={`task-strip ${slotTask ? `task-${slotTask.status}` : ""}`}>
-                        <span>
-                          {slotTask
-                            ? `[${label}] ${slotTask.prompt}`
-                            : `[${label}] 空闲`}
-                        </span>
-                        {isActive ? (
-                          <button className="secondary-button" onClick={() => cancelTask(slotTask.id)}>
-                            取消
-                          </button>
-                        ) : null}
-                      </div>
-                    );
-                  }
-
                   return (
-                    <article className={`employee-card${presence.className === "busy" ? " card-busy" : ""}`} key={employee.id}>
-                      <div className="employee-card__header">
-                        <div>
-                          <div className="employee-card__title">
-                            <h2>{employee.name}</h2>
-                            <span className={`task-state-badge task-${taskStatus}`}>{taskStatus}</span>
-                          </div>
-                        </div>
-                        <div className={`status-pill agent-presence ${presence.className}`}>
-                          {presence.label}
-                        </div>
-                      </div>
-                      <div className="employee-meta">
-                        <span>{employee.hostname}</span>
-                        <span>ID: {employee.id}</span>
-                        <span>标签: {employee.labels.join(", ") || "未设置"}</span>
-                      </div>
-                      {buildSlotStrip("主任务", mainTask)}
-                      {buildSlotStrip("队列", queueTask)}
-                      <pre
-                        className="log-window"
-                        ref={(element) => {
-                          logWindowRefs.current[employee.id] = element;
-                        }}
-                      >
-                        {renderTerminalContent(terminalText)}
-                      </pre>
-                    </article>
+                    <EmployeeCard
+                      key={employee.id}
+                      employee={employee}
+                      mainTask={slots?.main}
+                      queueTask={slots?.queue}
+                      displayTask={displayTasksByEmployee[employee.id]}
+                      terminalText={terminalText}
+                      cancelTask={cancelTask}
+                    />
                   );
                 })
               )}

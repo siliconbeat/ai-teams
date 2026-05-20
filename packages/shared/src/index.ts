@@ -38,6 +38,7 @@ export interface EmployeeSnapshot {
   queueTaskId: string | null;
   queueTaskPrompt: string | null;
   lastSeenAt: string;
+  consecutiveQueueFailures: number;
 }
 
 export interface TaskRecord {
@@ -98,7 +99,9 @@ export type ServerToEmployeeMessage =
       timeoutSec: number;
       cliConfig: TaskCliConfig | null;
     }
-  | { type: "task.cancel"; taskId: string };
+  | { type: "task.cancel"; taskId: string }
+  | { type: "queue.resume" }
+  | { type: "agent.registered"; consecutiveQueueFailures: number };
 
 export type EmployeeToServerMessage =
   | {
@@ -331,6 +334,14 @@ export function parseServerToEmployeeMessage(value: unknown): ServerToEmployeeMe
 
   if (type === "task.cancel") {
     return { type, taskId: nonEmptyStringField(message, "taskId") };
+  }
+
+  if (type === "queue.resume") {
+    return { type };
+  }
+
+  if (type === "agent.registered") {
+    return { type, consecutiveQueueFailures: nonNegativeNumberField(message, "consecutiveQueueFailures") };
   }
 
   throw new ProtocolError(`Unsupported server-to-employee message type: ${type}`);

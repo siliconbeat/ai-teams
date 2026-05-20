@@ -163,7 +163,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     disconnectGraceMs,
     encryptor: createEncryptor(process.env.AI_TEAMS_ENCRYPTION_KEY),
   };
-  const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage, cancelTaskById, startDisconnectRecovery, cleanup: dispatchCleanup } = createDispatch(dispatchCtx);
+  const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage, cancelTaskById, startDisconnectRecovery, resumeAgentQueue, cleanup: dispatchCleanup } = createDispatch(dispatchCtx);
 
   const scheduleDispatchFn: ScheduleDispatchFn = (message, webhookUrl, cliConfig, priority, requiredLabels) => {
     return dispatchLeaderCommand(message, webhookUrl, cliConfig, priority, requiredLabels);
@@ -634,6 +634,35 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
         return reply.code(409).send({ error: "Task is not in a terminal status." });
       }
       return { deleted: true };
+    },
+  );
+
+  // ── Agent Routes ─────────────────────────────────────────────────────
+
+  app.post<{ Params: { employeeId: string } }>(
+    "/api/agents/:employeeId/resume-queue",
+    {
+      schema: {
+        tags: ["agents"],
+        summary: "Resume an agent's queue dispatch after consecutive failures",
+        params: {
+          type: "object",
+          required: ["employeeId"],
+          properties: { employeeId: { type: "string", minLength: 1 } },
+        },
+        response: {
+          200: { type: "object", required: ["ok"], properties: { ok: { type: "boolean" } } },
+          404: errorResponseSchema,
+          401: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const result = resumeAgentQueue(request.params.employeeId);
+      if (!result.ok) {
+        return reply.code(404).send({ error: result.message });
+      }
+      return { ok: true };
     },
   );
 

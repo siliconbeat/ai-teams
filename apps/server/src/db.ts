@@ -213,7 +213,11 @@ export async function hydrateState(db: Database, state: StateStore, defaultTimeo
   for (const row of employeeRows) {
     const employee = JSON.parse(row.payload_json) as EmployeeSnapshot;
     employee.status = "offline";
+    employee.consecutiveQueueFailures = employee.consecutiveQueueFailures ?? 0;
     state.employees.set(employee.id, employee);
+    if (employee.consecutiveQueueFailures > 0) {
+      state.consecutiveQueueFailures.set(employee.id, employee.consecutiveQueueFailures);
+    }
   }
 
   const taskRows = await db.all<DbTaskRow>("SELECT * FROM tasks");
