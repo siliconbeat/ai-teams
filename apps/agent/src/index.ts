@@ -32,6 +32,8 @@ declare const PKG_VERSION: string;
 let mainTask: ActiveTask | null = null;
 let queueTask: ActiveTask | null = null;
 let agentState = loadState();
+let consecutiveQueueFailures = 0;
+const MAX_CONSECUTIVE_QUEUE_FAILURES = 5;
 
 const connState: ConnectionState = {
   socket: null,
@@ -90,7 +92,9 @@ function finishTask(taskId: string, status: "completed" | "failed" | "cancelled"
   recordTaskFinish(current, status, payload);
 
   if (status === "completed") {
-    if (current.targetMode !== "queue") {
+    if (current.targetMode === "queue") {
+      consecutiveQueueFailures = 0;
+    } else {
       agentState.sessionReady = true;
       persistState(agentState);
     }
@@ -116,7 +120,14 @@ function finishTask(taskId: string, status: "completed" | "failed" | "cancelled"
     taskId,
     error: typeof payload === "string" ? payload : "任务执行失败。",
   });
-  if (current.targetMode === "queue") requestTask();
+  if (current.targetMode === "queue") {
+    consecutiveQueueFailures += 1;
+    if (consecutiveQueueFailures >= MAX_CONSECUTIVE_QUEUE_FAILURES) {
+      console.log(`[agent:${EMPLOYEE_ID}] 连续 ${consecutiveQueueFailures} 次队列任务失败，暂停接受新的队列任务。等待手动恢复。`);
+      return;
+    }
+    requestTask();
+  }
 }
 
 const runnerDeps = {
@@ -130,6 +141,15 @@ const runnerDeps = {
 };
 
 function startTask(message: Extract<ServerToEmployeeMessage, { type: "task.dispatch" }>) {
+  if (message.targetMode === "queue" && consecutiveQueueFailures >= MAX_CONSECUTIVE_QUEUE_FAILURES) {
+    send({
+      type: "task.failed",
+      taskId: message.taskId,
+      error: `Agent 连续 ${consecutiveQueueFailures} 次队列任务失败，暂停接受新队列任务，等待手动恢复。`,
+    });
+    return;
+  }
+
   const slot = slotForTargetMode(message.targetMode);
   if (slot.get()) {
     send({
@@ -187,6 +207,22 @@ function cancelTask(taskId: string) {
 function handleServerMessage(message: ServerToEmployeeMessage) {
   if (message.type === "task.dispatch") {
     startTask(message);
+    return;
+  }
+  if (message.type === "agent.registered") {
+    const serverCount = message.consecutiveQueueFailures;
+    if (serverCount > consecutiveQueueFailures) {
+      consecutiveQueueFailures = serverCount;
+      if (consecutiveQueueFailures >= MAX_CONSECUTIVE_QUEUE_FAILURES) {
+        console.log(`[agent:${EMPLOYEE_ID}] 从服务器同步连续失败计数 ${consecutiveQueueFailures}，暂停接受队列任务。`);
+      }
+    }
+    return;
+  }
+  if (message.type === "queue.resume") {
+    consecutiveQueueFailures = 0;
+    console.log(`[agent:${EMPLOYEE_ID}] 队列任务已恢复，重新开始接受任务。`);
+    requestTask();
     return;
   }
   cancelTask(message.taskId);

@@ -124,6 +124,7 @@ const employeeSnapshotSchema = {
     "queueTaskId",
     "queueTaskPrompt",
     "lastSeenAt",
+    "consecutiveQueueFailures",
   ],
   properties: {
     id: { type: "string" },
@@ -137,6 +138,7 @@ const employeeSnapshotSchema = {
     queueTaskId: { anyOf: [{ type: "string" }, { type: "null" }] },
     queueTaskPrompt: { anyOf: [{ type: "string" }, { type: "null" }] },
     lastSeenAt: { type: "string", format: "date-time" },
+    consecutiveQueueFailures: { type: "number" },
   },
 } as const;
 

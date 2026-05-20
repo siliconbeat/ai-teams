@@ -197,22 +197,71 @@ export function createDispatch(ctx: DispatchContext) {
     upsertEmployee(employee);
   }
 
+  const MAX_QUEUE_RETRY = 3;
+  const MAX_CONSECUTIVE_QUEUE_FAILURES = 5;
+
+  function trackQueueFailure(employeeId: string) {
+    const prev = state.consecutiveQueueFailures.get(employeeId) ?? 0;
+    const next = prev + 1;
+    state.consecutiveQueueFailures.set(employeeId, next);
+    const emp = state.employees.get(employeeId);
+    if (emp) {
+      emp.consecutiveQueueFailures = next;
+      upsertEmployee(emp);
+    }
+    if (next >= MAX_CONSECUTIVE_QUEUE_FAILURES) {
+      log.warn({ employeeId, consecutiveFailures: next }, "Agent paused for queue tasks due to consecutive failures");
+    }
+  }
+
+  function reEnqueueOrTerminalFail(task: TaskRecord, employeeId: string | null, error: string): true | false {
+    if (task.retryCount < MAX_QUEUE_RETRY) {
+      task.retryCount += 1;
+      task.status = "queued";
+      task.employeeId = null;
+      task.startedAt = null;
+      task.finishedAt = null;
+      task.error = error;
+      task.summary = task.summary ?? error;
+      log.info({ taskId: task.id, retryCount: task.retryCount, error, previousEmployeeId: employeeId }, "Queue task re-enqueued after failure");
+      upsertTask(task);
+      if (employeeId) {
+        setQueueTask(employeeId, null, null);
+      }
+      enqueueSharedTask(task.id);
+      dispatchSharedQueuedTasks();
+      return true;
+    }
+    return false;
+  }
+
   function markTaskFailed(taskId: string, error: string) {
     const task = state.tasks.get(taskId);
     if (!task || TERMINAL_STATUSES.has(task.status)) {
       return;
     }
     clearTaskTimeout(taskId);
+    const employeeId = task.employeeId;
+    const isQueueTask = task.targetMode === "queue";
+
+    if (isQueueTask && employeeId) {
+      trackQueueFailure(employeeId);
+    }
+
+    if (isQueueTask && reEnqueueOrTerminalFail(task, employeeId, error)) {
+      return;
+    }
+
+    // Terminal failure (direct/broadcast, or queue task exceeded retries)
     task.status = "failed";
     task.error = error;
     task.summary = task.summary ?? error;
     task.finishedAt = nowIso();
-    log.warn({ taskId, employeeId: task.employeeId, error }, "Task failed");
+    log.warn({ taskId, employeeId, error }, "Task failed");
     upsertTask(task);
     postTaskWebhook(task, "task.failed");
-    if (task.employeeId) {
-      const employeeId = task.employeeId;
-      const isMainSlot = task.targetMode !== "queue";
+    if (employeeId) {
+      const isMainSlot = !isQueueTask;
       if (isMainSlot) {
         setMainTask(employeeId, null, null);
         dispatchNextMainQueuedTask(employeeId);
@@ -258,28 +307,36 @@ export function createDispatch(ctx: DispatchContext) {
     if (socket) {
       sendJson<ServerToEmployeeMessage>(socket, { type: "task.cancel", taskId: task.id }, ctx.encryptor);
     }
+    clearTaskTimeout(task.id);
+
+    const employeeId = task.employeeId;
+    const isQueueTask = task.targetMode === "queue";
+    const error = `任务超过 ${task.timeoutSec} 秒未完成，已超时。`;
+
+    if (isQueueTask && employeeId) {
+      trackQueueFailure(employeeId);
+    }
+
+    if (isQueueTask && reEnqueueOrTerminalFail(current, employeeId, error)) {
+      return;
+    }
+
+    // Terminal timeout (direct/broadcast, or queue task exceeded retries)
     current.status = "timeout";
     current.finishedAt = nowIso();
-    current.error = `任务超过 ${task.timeoutSec} 秒未完成，已超时。`;
-    log.warn({ taskId: task.id, employeeId: task.employeeId, timeoutSec: task.timeoutSec }, "Task timed out");
-    current.summary = current.error;
+    current.error = error;
+    current.summary = error;
+    log.warn({ taskId: task.id, employeeId, timeoutSec: task.timeoutSec }, "Task timed out");
     upsertTask(current);
     postTaskWebhook(current, "task.timeout");
-    if (task.employeeId) {
-      const isMainSlot = task.targetMode !== "queue";
+    if (employeeId) {
+      const isMainSlot = !isQueueTask;
       if (isMainSlot) {
-        setMainTask(task.employeeId, null, null);
+        setMainTask(employeeId, null, null);
+        dispatchNextMainQueuedTask(employeeId);
       } else {
-        setQueueTask(task.employeeId, null, null);
-      }
-    }
-    clearTaskTimeout(task.id);
-    if (task.employeeId) {
-      const isMainSlot = task.targetMode !== "queue";
-      if (isMainSlot) {
-        dispatchNextMainQueuedTask(task.employeeId);
-      } else {
-        dispatchNextQueuedTask(task.employeeId);
+        setQueueTask(employeeId, null, null);
+        dispatchNextQueuedTask(employeeId);
       }
     }
   }
@@ -314,6 +371,9 @@ export function createDispatch(ctx: DispatchContext) {
       .filter((employee) => {
         const socket = state.agentSockets.get(employee.id);
         if (employee.status !== "online" || employee.queueTaskId || socket?.readyState !== WebSocket.OPEN) {
+          return false;
+        }
+        if ((state.consecutiveQueueFailures.get(employee.id) ?? 0) >= MAX_CONSECUTIVE_QUEUE_FAILURES) {
           return false;
         }
         if (requiredLabels && requiredLabels.length > 0) {
@@ -359,6 +419,15 @@ export function createDispatch(ctx: DispatchContext) {
 
     const employeeId = preferredEmployeeId ?? pickAvailableEmployeeIdForQueue(requiredLabels);
     if (!employeeId) {
+      if (state.sharedTaskQueue.length > 0) {
+        const onlineEmployees = [...state.employees.values()].filter((e) => e.status === "online");
+        const allPaused = onlineEmployees.length > 0 && onlineEmployees.every(
+          (e) => (state.consecutiveQueueFailures.get(e.id) ?? 0) >= MAX_CONSECUTIVE_QUEUE_FAILURES,
+        );
+        if (allPaused) {
+          log.warn({ queueLength: state.sharedTaskQueue.length }, "All online agents are paused for queue tasks — queue stalled");
+        }
+      }
       return;
     }
 
@@ -659,7 +728,13 @@ export function createDispatch(ctx: DispatchContext) {
       queueTaskId,
       queueTaskPrompt,
       lastSeenAt: nowIso(),
+      consecutiveQueueFailures: state.consecutiveQueueFailures.get(message.employeeId) ?? 0,
     });
+
+    sendJson<ServerToEmployeeMessage>(socket, {
+      type: "agent.registered",
+      consecutiveQueueFailures: state.consecutiveQueueFailures.get(message.employeeId) ?? 0,
+    }, ctx.encryptor);
 
     if (!mainTaskId) {
       dispatchNextMainQueuedTask(message.employeeId);
@@ -777,6 +852,18 @@ export function createDispatch(ctx: DispatchContext) {
         upsertTask(task);
         postTaskWebhook(task, "task.completed");
         log.info({ taskId: task.id, employeeId: task.employeeId, exitCode: task.exitCode, durationMs: task.durationMs, numTurns: task.numTurns, totalCostUsd: task.totalCostUsd }, "Task completed");
+        if (task.employeeId && task.targetMode === "queue") {
+          const prev = state.consecutiveQueueFailures.get(task.employeeId) ?? 0;
+          if (prev > 0) {
+            state.consecutiveQueueFailures.set(task.employeeId, 0);
+            const emp = state.employees.get(task.employeeId);
+            if (emp) {
+              emp.consecutiveQueueFailures = 0;
+              upsertEmployee(emp);
+            }
+            log.info({ employeeId: task.employeeId }, "Consecutive queue failure count reset after successful task");
+          }
+        }
         if (task.employeeId) {
           const isMainSlot = task.targetMode !== "queue";
           if (isMainSlot) {
@@ -913,9 +1000,9 @@ export function createDispatch(ctx: DispatchContext) {
         task.employeeId = null;
         task.retryCount += 1;
 
-        if (task.retryCount > 3) {
+        if (task.retryCount >= MAX_QUEUE_RETRY) {
           task.status = "failed";
-          task.error = `任务重试次数超过上限（3次），已终止。`;
+          task.error = `任务重试次数超过上限（${MAX_QUEUE_RETRY}次），已终止。`;
           task.finishedAt = nowIso();
           upsertTask(task);
           log.warn({ taskId, employeeId, retryCount: task.retryCount }, "Task exceeded max retry count, marked failed");
@@ -963,12 +1050,30 @@ export function createDispatch(ctx: DispatchContext) {
     state.disconnectTimers.set(employeeId, timer);
   }
 
+  function resumeAgentQueue(employeeId: string): { ok: true } | { ok: false; message: string } {
+    const employee = state.employees.get(employeeId);
+    if (!employee) {
+      return { ok: false, message: "员工不存在。" };
+    }
+    state.consecutiveQueueFailures.set(employeeId, 0);
+    employee.consecutiveQueueFailures = 0;
+    upsertEmployee(employee);
+    log.info({ employeeId }, "Agent queue resumed, consecutive failure count reset");
+    const socket = state.agentSockets.get(employeeId);
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      sendJson<ServerToEmployeeMessage>(socket, { type: "queue.resume" }, ctx.encryptor);
+    }
+    dispatchSharedQueuedTasks();
+    return { ok: true };
+  }
+
   return {
     dispatchLeaderCommand,
     handleAgentMessage,
     handleLeaderMessage,
     cancelTaskById,
     startDisconnectRecovery,
+    resumeAgentQueue,
     cleanup() {
       for (const timer of retryDelays.values()) {
         clearTimeout(timer);
