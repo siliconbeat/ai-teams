@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   isEncryptedEnvelope,
   parseJsonMessage,
@@ -322,8 +322,7 @@ const EmployeeCard = memo(function EmployeeCard({
   );
 }, (prev, next) => {
   if (prev.terminalText !== next.terminalText) return false;
-  if (prev.cancelTask !== next.cancelTask) return false;
-  if (prev.mainTask !== next.mainTask || prev.queueTask !== next.queueTask || prev.displayTask !== next.displayTask) return false;
+  if (prev.mainTask?.id !== next.mainTask?.id || prev.queueTask?.id !== next.queueTask?.id || prev.displayTask?.id !== next.displayTask?.id) return false;
   const pe = prev.employee, ne = next.employee;
   if (pe.status !== ne.status || pe.mainTaskId !== ne.mainTaskId || pe.queueTaskId !== ne.queueTaskId || pe.name !== ne.name || pe.consecutiveQueueFailures !== ne.consecutiveQueueFailures) return false;
   if (pe.labels.length !== ne.labels.length || pe.labels.some((l, i) => l !== ne.labels[i])) return false;
@@ -820,7 +819,7 @@ export default function App() {
     if (mobileTextareaRef.current) mobileTextareaRef.current.style.height = "auto";
   }
 
-  function cancelTask(taskId: string) {
+  const cancelTask = useCallback((taskId: string) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       return;
     }
@@ -828,7 +827,7 @@ export default function App() {
     webCryptoEncrypt(JSON.stringify(payload)).then((encrypted) => {
       wsRef.current?.send(encrypted);
     });
-  }
+  }, []);
 
   useEffect(() => {
     localStorage.setItem(TERMINAL_LOG_STORAGE_KEY, JSON.stringify(terminalLogs));
