@@ -214,6 +214,7 @@ export async function hydrateState(db: Database, state: StateStore, defaultTimeo
     const employee = JSON.parse(row.payload_json) as EmployeeSnapshot;
     employee.status = "offline";
     employee.consecutiveQueueFailures = employee.consecutiveQueueFailures ?? 0;
+    employee.weight = employee.weight ?? 1;
     state.employees.set(employee.id, employee);
     if (employee.consecutiveQueueFailures > 0) {
       state.consecutiveQueueFailures.set(employee.id, employee.consecutiveQueueFailures);

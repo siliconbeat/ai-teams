@@ -16,7 +16,7 @@ import {
 } from "@ai-teams/shared";
 import type { Database } from "./db.js";
 import type { StateStore } from "./state-store.js";
-import { persistEmployee, persistTask, persistTaskLog, persistTaskWebhook, persistSharedQueueCursor } from "./db.js";
+import { persistEmployee, persistTask, persistTaskLog, persistTaskWebhook } from "./db.js";
 import type { WebhookEventType } from "./schemas.js";
 import type { MaybeEncryptor } from "./crypto.js";
 
@@ -415,7 +415,7 @@ export function createDispatch(ctx: DispatchContext) {
       return a.id.localeCompare(b.id);
     });
 
-    // Among equally-loaded agents, use round-robin
+    // Among equally-loaded agents, use weighted random selection
     const minLoad = (available[0].mainTaskId ? 1 : 0) + (available[0].queueTaskId ? 1 : 0);
     const lightest = available.filter((e) => (e.mainTaskId ? 1 : 0) + (e.queueTaskId ? 1 : 0) === minLoad);
 

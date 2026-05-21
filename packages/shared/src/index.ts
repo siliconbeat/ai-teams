@@ -259,6 +259,7 @@ export function parseEmployeeToServerMessage(value: unknown): EmployeeToServerMe
       activeMainTaskId: optionalNullableStringField(message, "activeMainTaskId"),
       activeQueueTaskId: optionalNullableStringField(message, "activeQueueTaskId"),
       lastOutputSeq: optionalNonNegativeNumberField(message, "lastOutputSeq"),
+      weight: optionalNonNegativeNumberField(message, "weight"),
     };
   }
 
