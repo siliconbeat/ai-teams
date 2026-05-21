@@ -370,7 +370,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     {
       schema: {
         tags: ["tasks"],
-        summary: "Get current employees and tasks",
+        summary: "Get current employees and tasks (logs not included, use WebSocket task.output or GET /api/sessions/:sessionId/history)",
         response: {
           200: snapshotSchema,
           401: errorResponseSchema,
