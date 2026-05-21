@@ -28,6 +28,7 @@ import {
 import { runSetup, loadConfigFile } from "./setup.js";
 
 declare const PKG_VERSION: string;
+const version: string = typeof PKG_VERSION !== "undefined" ? PKG_VERSION : "dev";
 
 let mainTask: ActiveTask | null = null;
 let queueTask: ActiveTask | null = null;
@@ -280,7 +281,7 @@ if (isCli) {
   const args = process.argv.slice(2);
 
   if (args.includes("--version") || args.includes("-v")) {
-    console.log(PKG_VERSION);
+    console.log(version);
     process.exit(0);
   }
   if (args.includes("--help") || args.includes("-h")) {

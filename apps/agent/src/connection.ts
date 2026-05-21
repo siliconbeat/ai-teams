@@ -21,6 +21,7 @@ import {
 } from "./config.js";
 
 declare const PKG_VERSION: string;
+const version: string = typeof PKG_VERSION !== "undefined" ? PKG_VERSION : "dev";
 
 // ---------------------------------------------------------------------------
 // Encryption helper
@@ -130,7 +131,7 @@ export function registerAgent(
     machineId: EMPLOYEE_ID,
     hostname: os.hostname(),
     labels: EMPLOYEE_LABELS,
-    version: PKG_VERSION,
+    version: version,
     activeMainTaskId: mainTask?.taskId ?? null,
     activeQueueTaskId: queueTask?.taskId ?? null,
     lastOutputSeq: Math.max(mainTask?.seq ?? 0, queueTask?.seq ?? 0),
