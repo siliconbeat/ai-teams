@@ -13,7 +13,7 @@ import {
   TaskStatus,
 } from "@ai-teams/shared";
 import { XProvider } from "@ant-design/x";
-import { Avatar, ConfigProvider, theme } from "antd";
+import { App as AntApp, Avatar, ConfigProvider, theme } from "antd";
 import { Bubble, ThoughtChain, Sender, Suggestion } from "@ant-design/x";
 import type { BubbleProps } from "@ant-design/x";
 import { XMarkdown } from "@ant-design/x-markdown";
@@ -380,6 +380,7 @@ const EmployeeCard = memo(function EmployeeCard({
 export default function App() {
   const [authToken, setAuthToken] = useState(getInitialToken);
   const [tokenDraft, setTokenDraft] = useState(authToken);
+  const modalRef = useRef<ReturnType<typeof AntApp.useApp>["modal"] | null>(null);
   const [connected, setConnected] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [showReconnect, setShowReconnect] = useState(false);
@@ -711,7 +712,7 @@ export default function App() {
     })
   , [chatFeed]);
 
-  const getSuggestionItems = (keyword?: string) => {
+  const getSuggestionItems = useCallback((keyword?: string) => {
     if (!keyword) return [];
     if (keyword.startsWith("/")) {
       const search = keyword.slice(1).toLowerCase();
@@ -732,15 +733,12 @@ export default function App() {
           disabled: emp.status === "offline",
         })),
     ];
-  };
+  }, [employeeList]);
 
   const handleSuggestionSelect = (value: string) => {
     let insertText: string;
     if (value === "/code-review") {
       insertText = "/code-review ";
-    } else if (value === "queue") {
-      setSelectedTarget("queue");
-      insertText = "@任务队列 ";
     } else if (value === "all") {
       setSelectedTarget("all");
       insertText = "@所有员工 ";
@@ -785,17 +783,6 @@ export default function App() {
     return `任务状态：${status}`;
   }
 
-  function statusLabel(status: TaskStatus) {
-    switch (status) {
-      case "dispatched": case "accepted": return "等待中";
-      case "running": return "执行中";
-      case "completed": return "已完成";
-      case "failed": return "失败";
-      case "timeout": return "超时";
-      case "cancelled": return "已取消";
-      default: return status;
-    }
-  }
 
   function thoughtChainStatus(status: TaskStatus): "success" | "error" | "loading" | undefined {
     if (status === "completed") return "success";
@@ -1168,7 +1155,9 @@ export default function App() {
 
   return (
     <ConfigProvider theme={{ algorithm: theme.darkAlgorithm }}>
-      <XProvider>
+      <AntApp>
+        <XProvider>
+        <ModalBridge modalRef={modalRef} />
         <div className="app-shell">
           {showReconnect && !connected && (
             <div className="reconnect-overlay" onClick={() => window.location.reload()}>
@@ -1229,7 +1218,7 @@ export default function App() {
             文档
           </a>
         </nav>
-        <button className="secondary-button mobile-logout" onClick={() => { if (confirm("确认退出当前连接？")) clearToken(); }}>
+        <button className="secondary-button mobile-logout" onClick={() => { modalRef.current?.confirm({ title: "确认退出", content: "确认退出当前连接？", okText: "退出", cancelText: "取消", onOk: clearToken }); }}>
           ⏻
         </button>
       </header>
@@ -1368,7 +1357,7 @@ export default function App() {
                 }
                 onKeyDown(e);
                 if (e.key === "Enter" && !e.altKey && !e.nativeEvent.isComposing) {
-                  if (e.defaultPrevented) return;
+                  if (e.defaultPrevented || suggestionOpen) return;
                   e.preventDefault();
                   sendCommand();
                 }
@@ -1641,7 +1630,7 @@ export default function App() {
                             编辑
                           </button>
                           <button className="secondary-button schedule-delete-btn" onClick={() => {
-                            if (confirm(`确定删除定时任务"${schedule.name}"？`)) deleteSchedule(schedule.id);
+                            modalRef.current?.confirm({ title: "删除定时任务", content: `确定删除定时任务"${schedule.name}"？`, okText: "删除", cancelText: "取消", onOk: () => deleteSchedule(schedule.id) });
                           }}>
                             删除
                           </button>
@@ -1782,7 +1771,7 @@ export default function App() {
               <h2>Leader 群聊指挥中心</h2>
               <p>输入 <code>@</code> 选择目标，或直接发送到任务队列。</p>
             </div>
-            <button className="secondary-button" onClick={() => { if (confirm("确认退出当前连接？")) clearToken(); }}>
+            <button className="secondary-button" onClick={() => { modalRef.current?.confirm({ title: "确认退出", content: "确认退出当前连接？", okText: "退出", cancelText: "取消", onOk: clearToken }); }}>
               切换 Token
             </button>
           </div>
@@ -1889,7 +1878,7 @@ export default function App() {
                     }
                     onKeyDown(e);
                     if (e.key === "Enter" && !e.altKey && !e.nativeEvent.isComposing) {
-                      if (e.defaultPrevented) return;
+                      if (e.defaultPrevented || suggestionOpen) return;
                       e.preventDefault();
                       sendCommand();
                     }
@@ -1914,6 +1903,13 @@ export default function App() {
       </aside>
         </div>
       </XProvider>
+      </AntApp>
     </ConfigProvider>
   );
+}
+
+function ModalBridge({ modalRef }: { modalRef: React.MutableRefObject<ReturnType<typeof AntApp.useApp>["modal"] | null> }) {
+  const { modal } = AntApp.useApp();
+  modalRef.current = modal;
+  return null;
 }
