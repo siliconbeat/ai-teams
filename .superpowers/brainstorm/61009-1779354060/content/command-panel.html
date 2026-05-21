@@ -1,0 +1,211 @@
+<h2>Leader 群聊指挥中心 — Full @ant-design/x Stack</h2>
+<p class="subtitle">Mockup of the redesigned command panel with Bubble.List, ThoughtChain, Sender + Suggestion</p>
+
+<div class="section">
+  <div class="label">Command Panel — Right Sidebar</div>
+  <div class="mockup">
+    <div class="mockup-header">Command Panel Preview</div>
+    <div class="mockup-body" style="display:flex;flex-direction:column;height:720px;background:#141414;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,sans-serif;">
+
+      <!-- Header -->
+      <div style="padding:12px 16px;border-bottom:1px solid #303030;display:flex;align-items:center;justify-content:space-between;">
+        <span style="font-weight:600;font-size:14px;">Leader 群聊指挥中心</span>
+        <span style="font-size:12px;color:#888;">切换 Token</span>
+      </div>
+
+      <!-- Chat Feed (Bubble.List) -->
+      <div style="flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:16px;">
+
+        <!-- Employee message (Bubble role=ai, placement=start) -->
+        <div style="display:flex;gap:8px;align-items:flex-start;">
+          <div style="width:32px;height:32px;border-radius:50%;background:#1677ff;display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;flex-shrink:0;">A</div>
+          <div style="max-width:80%;">
+            <div style="font-size:12px;color:#888;margin-bottom:4px;">Alice · 14:23</div>
+            <div style="background:#1a1a1a;border:1px solid #303030;border-radius:8px;padding:10px 14px;font-size:13px;line-height:1.5;">
+              任务已完成：重构了认证模块，所有测试通过 ✅
+            </div>
+          </div>
+        </div>
+
+        <!-- Leader message (Bubble role=user, placement=end) with ThoughtChain -->
+        <div style="display:flex;gap:8px;align-items:flex-start;flex-direction:row-reverse;">
+          <div style="width:32px;height:32px;border-radius:50%;background:#52c41a;display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;flex-shrink:0;">L</div>
+          <div style="max-width:80%;display:flex;flex-direction:column;align-items:flex-end;">
+            <div style="font-size:12px;color:#888;margin-bottom:4px;">我 · 14:25 · @所有员工</div>
+            <div style="background:#1677ff;border-radius:8px;padding:10px 14px;font-size:13px;line-height:1.5;color:#fff;">
+              请所有人对 src/auth 目录做一次安全审查
+            </div>
+            <!-- ThoughtChain for task execution status -->
+            <div style="margin-top:8px;width:100%;background:#1a1a1a;border:1px solid #303030;border-radius:8px;padding:12px;">
+              <div style="font-size:11px;color:#888;margin-bottom:8px;">执行状态</div>
+              <!-- Chain items -->
+              <div style="display:flex;flex-direction:column;gap:2px;">
+                <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+                  <div style="width:18px;height:18px;border-radius:50%;background:#52c41a;display:flex;align-items:center;justify-content:center;">
+                    <span style="color:#fff;font-size:10px;">✓</span>
+                  </div>
+                  <div>
+                    <div style="font-size:12px;">Alice — completed</div>
+                    <div style="font-size:11px;color:#888;">安全审查完成，发现 2 个中风险问题</div>
+                  </div>
+                </div>
+                <div style="width:1px;height:8px;background:#303030;margin-left:9px;"></div>
+                <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+                  <div style="width:18px;height:18px;border-radius:50%;background:#1677ff;display:flex;align-items:center;justify-content:center;">
+                    <div style="width:6px;height:6px;border-radius:50%;background:#fff;animation:pulse 1.5s infinite;"></div>
+                  </div>
+                  <div>
+                    <div style="font-size:12px;">Bob — running</div>
+                    <div style="font-size:11px;color:#888;">正在执行...</div>
+                  </div>
+                </div>
+                <div style="width:1px;height:8px;background:#303030;margin-left:9px;"></div>
+                <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+                  <div style="width:18px;height:18px;border-radius:50%;background:#666;display:flex;align-items:center;justify-content:center;">
+                    <span style="color:#aaa;font-size:10px;">○</span>
+                  </div>
+                  <div>
+                    <div style="font-size:12px;color:#888;">Carol — queued</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Another employee response -->
+        <div style="display:flex;gap:8px;align-items:flex-start;">
+          <div style="width:32px;height:32px;border-radius:50%;background:#eb2f96;display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;flex-shrink:0;">B</div>
+          <div style="max-width:80%;">
+            <div style="font-size:12px;color:#888;margin-bottom:4px;">Bob · 14:26</div>
+            <div style="background:#1a1a1a;border:1px solid #303030;border-radius:8px;padding:10px 14px;font-size:13px;line-height:1.5;">
+              收到，开始审查认证模块...
+            </div>
+          </div>
+        </div>
+
+        <!-- Leader direct message -->
+        <div style="display:flex;gap:8px;align-items:flex-start;flex-direction:row-reverse;">
+          <div style="width:32px;height:32px;border-radius:50%;background:#52c41a;display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;flex-shrink:0;">L</div>
+          <div style="max-width:80%;display:flex;flex-direction:column;align-items:flex-end;">
+            <div style="font-size:12px;color:#888;margin-bottom:4px;">我 · 14:28 · @Alice</div>
+            <div style="background:#1677ff;border-radius:8px;padding:10px 14px;font-size:13px;line-height:1.5;color:#fff;">
+              把你发现的 2 个中风险问题详细列一下
+            </div>
+            <!-- Single agent ThoughtChain -->
+            <div style="margin-top:8px;width:100%;background:#1a1a1a;border:1px solid #303030;border-radius:8px;padding:12px;">
+              <div style="display:flex;align-items:center;gap:8px;">
+                <div style="width:18px;height:18px;border-radius:50%;background:#faad14;display:flex;align-items:center;justify-content:center;">
+                  <span style="color:#000;font-size:10px;">⏳</span>
+                </div>
+                <div style="font-size:12px;">Alice — dispatched</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Failed employee message -->
+        <div style="display:flex;gap:8px;align-items:flex-start;">
+          <div style="width:32px;height:32px;border-radius:50%;background:#eb2f96;display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;flex-shrink:0;">B</div>
+          <div style="max-width:80%;">
+            <div style="font-size:12px;color:#888;margin-bottom:4px;">Bob · 14:30</div>
+            <div style="background:#2a1215;border:1px solid #58181c;border-radius:8px;padding:10px 14px;font-size:13px;line-height:1.5;color:#ff4d4f;">
+              任务失败：连接超时，无法访问 auth service
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Sender with Suggestion -->
+      <div style="border-top:1px solid #303030;padding:12px 16px;">
+        <!-- Suggestion dropdown preview -->
+        <div style="position:relative;">
+          <div style="display:flex;gap:8px;margin-bottom:8px;">
+            <div style="background:#1a1a1a;border:1px solid #303030;border-radius:6px;padding:4px 10px;font-size:12px;color:#888;">
+              💬 @Alice <span style="color:#52c41a;">进行中...</span>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:flex-end;">
+            <div style="flex:1;background:#1a1a1a;border:1px solid #303030;border-radius:8px;padding:10px 12px;font-size:13px;min-height:40px;color:#888;">
+              <span style="color:#52c41a;">@Alice</span> 请把安全报告整理成文档
+            </div>
+            <button style="background:#1677ff;color:#fff;border:none;border-radius:6px;padding:8px 16px;font-size:13px;cursor:pointer;white-space:nowrap;">发送</button>
+          </div>
+          <!-- Suggestion dropdown -->
+          <div style="position:absolute;bottom:100%;left:0;margin-bottom:8px;background:#1f1f1f;border:1px solid #303030;border-radius:8px;padding:4px;min-width:220px;box-shadow:0 4px 12px rgba(0,0,0,0.4);">
+            <div style="font-size:11px;color:#888;padding:4px 8px;">选择目标</div>
+            <div style="padding:6px 8px;border-radius:4px;background:#1677ff20;display:flex;align-items:center;gap:8px;cursor:pointer;">
+              <span style="font-size:14px;">📋</span>
+              <div>
+                <div style="font-size:12px;">任务队列</div>
+                <div style="font-size:10px;color:#888;">Round-robin to idle agents</div>
+              </div>
+            </div>
+            <div style="padding:6px 8px;border-radius:4px;display:flex;align-items:center;gap:8px;cursor:pointer;">
+              <span style="font-size:14px;">📢</span>
+              <div>
+                <div style="font-size:12px;">@所有员工</div>
+                <div style="font-size:10px;color:#888;">Broadcast to all online agents</div>
+              </div>
+            </div>
+            <div style="padding:6px 8px;border-radius:4px;display:flex;align-items:center;gap:8px;cursor:pointer;">
+              <span style="font-size:14px;">🤖</span>
+              <div>
+                <div style="font-size:12px;">@Alice</div>
+                <div style="font-size:10px;color:#888;">Direct — online</div>
+              </div>
+            </div>
+            <div style="padding:6px 8px;border-radius:4px;display:flex;align-items:center;gap:8px;cursor:pointer;">
+              <span style="font-size:14px;">🤖</span>
+              <div>
+                <div style="font-size:12px;">@Bob</div>
+                <div style="font-size:10px;color:#888;">Direct — online</div>
+              </div>
+            </div>
+            <div style="padding:6px 8px;border-radius:4px;display:flex;align-items:center;gap:8px;cursor:pointer;opacity:0.5;">
+              <span style="font-size:14px;">🤖</span>
+              <div>
+                <div style="font-size:12px;">@Carol</div>
+                <div style="font-size:10px;color:#888;">Direct — offline</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:24px;">
+  <h3>Component Mapping</h3>
+  <div class="pros-cons">
+    <div class="pros">
+      <h4>Replaced by @ant-design/x</h4>
+      <ul>
+        <li><code>Bubble.List</code> → chat message feed with role presets</li>
+        <li><code>Bubble</code> → individual messages (leader=role:user, employee=role:ai)</li>
+        <li><code>ThoughtChain</code> → task execution status per agent</li>
+        <li><code>Sender</code> → input box with auto-resize</li>
+        <li><code>Suggestion</code> → @mention target picker dropdown</li>
+      </ul>
+    </div>
+    <div class="cons">
+      <h4>UX Changes from Current</h4>
+      <ul>
+        <li>Target selection: chip buttons → type @ to trigger dropdown</li>
+        <li>Execution progress: inline status → collapsible ThoughtChain</li>
+        <li>Failed messages: red CSS class → Bubble with error variant</li>
+        <li>Auto-scroll: manual useEffect → Bubble.List built-in</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<style>
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+</style>
