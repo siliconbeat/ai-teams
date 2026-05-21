@@ -302,6 +302,7 @@ if (isCli) {
   --name <name>         员工名称
   --workspace <dir>     工作目录
   --runner <mode>       Runner 模式 (claude/fake)
+  --weight <number>     队列任务分配权重 (默认 1)
   --config              重新运行配置向导
   -v, --version         显示版本号
   -h, --help            显示帮助
@@ -346,6 +347,8 @@ if (isCli) {
     if (cliName) process.env.EMPLOYEE_NAME = cliName;
     if (cliWorkspace) process.env.DEFAULT_WORKSPACE = cliWorkspace;
     if (cliRunner) process.env.RUNNER_MODE = cliRunner;
+    const cliWeight = getArgValue("--weight");
+    if (cliWeight) process.env.EMPLOYEE_WEIGHT = cliWeight;
   }
 
   if (args.includes("--config")) {

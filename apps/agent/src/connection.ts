@@ -14,6 +14,7 @@ import {
   EMPLOYEE_ID,
   EMPLOYEE_NAME,
   EMPLOYEE_LABELS,
+  EMPLOYEE_WEIGHT,
   RECONNECT_MS,
   SERVER_URL,
   MAX_BUFFERED_MESSAGES,
@@ -135,6 +136,7 @@ export function registerAgent(
     activeMainTaskId: mainTask?.taskId ?? null,
     activeQueueTaskId: queueTask?.taskId ?? null,
     lastOutputSeq: Math.max(mainTask?.seq ?? 0, queueTask?.seq ?? 0),
+    weight: EMPLOYEE_WEIGHT,
   });
 }
 

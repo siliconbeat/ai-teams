@@ -11,6 +11,7 @@ export let AUTH_TOKEN = process.env.AI_TEAMS_AUTH_TOKEN || fileConfig?.authToken
 export let EMPLOYEE_ID = process.env.EMPLOYEE_ID || fileConfig?.employeeId || "emp_local";
 export let EMPLOYEE_NAME = process.env.EMPLOYEE_NAME || fileConfig?.employeeName || "Local Agent";
 export let EMPLOYEE_LABELS = process.env.EMPLOYEE_LABELS?.split(",").map((item) => item.trim()).filter(Boolean) ?? [];
+export let EMPLOYEE_WEIGHT = Math.max(1, Number(process.env.EMPLOYEE_WEIGHT) || 1);
 export let RECONNECT_MS = Number(process.env.RECONNECT_MS) || 5000;
 export let RUNNER_MODE = process.env.RUNNER_MODE || fileConfig?.runnerMode || "claude";
 export let DEFAULT_WORKSPACE = process.env.DEFAULT_WORKSPACE || fileConfig?.workspace || process.cwd();
@@ -38,6 +39,7 @@ export function reinitializeConfig(): void {
   EMPLOYEE_ID = process.env.EMPLOYEE_ID || fileConfig?.employeeId || "emp_local";
   EMPLOYEE_NAME = process.env.EMPLOYEE_NAME || fileConfig?.employeeName || "Local Agent";
   EMPLOYEE_LABELS = process.env.EMPLOYEE_LABELS?.split(",").map((item) => item.trim()).filter(Boolean) ?? [];
+  EMPLOYEE_WEIGHT = Math.max(1, Number(process.env.EMPLOYEE_WEIGHT) || 1);
   RECONNECT_MS = Number(process.env.RECONNECT_MS) || 5000;
   RUNNER_MODE = process.env.RUNNER_MODE || fileConfig?.runnerMode || "claude";
   DEFAULT_WORKSPACE = process.env.DEFAULT_WORKSPACE || fileConfig?.workspace || process.cwd();
