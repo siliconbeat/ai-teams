@@ -395,10 +395,7 @@ export default function App() {
   const terminalLogsRef = useRef(terminalLogs);
   terminalLogsRef.current = terminalLogs;
   const wsRef = useRef<WebSocket | null>(null);
-  const chatListRef = useRef<HTMLDivElement | null>(null);
-  const mobileChatRef = useRef<HTMLDivElement | null>(null);
   const mobileTerminalRef = useRef<HTMLPreElement | null>(null);
-  const mobileTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     if (!authToken) {
@@ -711,12 +708,6 @@ export default function App() {
     })),
   ], [employeeList]);
 
-  const handleSuggestionTrigger = (inputText: string) => {
-    const atIndex = inputText.lastIndexOf("@");
-    if (atIndex === -1) return false;
-    return inputText.slice(atIndex + 1);
-  };
-
   const handleSuggestionSelect = (value: string) => {
     if (value === "queue") {
       setSelectedTarget("queue");
@@ -926,24 +917,6 @@ export default function App() {
     if (authToken && activePage === "schedules") fetchSchedules();
   }, [authToken, activePage]);
 
-  function toggleTarget(employeeId: string) {
-    setSelectedTarget((current) => {
-      const currentIds = current === "all" || current === "queue" ? [] : current;
-      const next = currentIds.includes(employeeId)
-        ? currentIds.filter((id) => id !== employeeId)
-        : [...currentIds, employeeId];
-      return next.length === 0 ? "queue" : next;
-    });
-  }
-
-  function selectQueueTarget() {
-    setSelectedTarget("queue");
-  }
-
-  function selectAllTargets() {
-    setSelectedTarget("all");
-  }
-
   function sendCommand() {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !draft.prompt.trim()) {
       return;
@@ -972,7 +945,6 @@ export default function App() {
       },
     ]);
     setDraft((current) => ({ ...current, prompt: "" }));
-    if (mobileTextareaRef.current) mobileTextareaRef.current.style.height = "auto";
   }
 
   const cancelTask = useCallback((taskId: string) => {
@@ -1096,18 +1068,6 @@ export default function App() {
       return changed ? next : current;
     });
   }, [logs, tasks]);
-
-  function scrollToBottom(ref: React.RefObject<HTMLDivElement | null>) {
-    requestAnimationFrame(() => {
-      const el = ref.current;
-      if (el) el.scrollTop = el.scrollHeight;
-    });
-  }
-
-  useEffect(() => {
-    scrollToBottom(chatListRef);
-    scrollToBottom(mobileChatRef);
-  }, [chatFeed]);
 
   useEffect(() => {
     if (mobileTerminalEmployeeId && mobileTerminalRef.current) {
@@ -1273,7 +1233,7 @@ export default function App() {
       })()}
 
       {/* Mobile: chat feed */}
-      <div className="mobile-chat-feed" ref={mobileChatRef}>
+      <div className="mobile-chat-feed">
         {chatFeed.length === 0 ? (
           <div className="mobile-chat-empty">还没有发送过指令。</div>
         ) : (
@@ -1779,7 +1739,7 @@ export default function App() {
               切换 Token
             </button>
           </div>
-          <div className="chat-list" ref={chatListRef}>
+          <div className="chat-list">
             {chatFeed.length === 0 ? (
               <div className="chat-empty">还没有发送过指令。</div>
             ) : (
