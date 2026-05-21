@@ -290,6 +290,59 @@ a.nav-item {
   margin-bottom: 8px;
 }
 
+.card-menu {
+  position: relative;
+  flex-shrink: 0;
+}
+.card-menu-btn {
+  background: none;
+  border: 1px solid transparent;
+  color: #7f93b5;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.card-menu-btn:hover {
+  color: #e8eefc;
+  background: rgba(255,255,255,0.06);
+  border-color: rgba(255,255,255,0.1);
+}
+.card-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+}
+.card-menu-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 100;
+  background: #1a2332;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  min-width: 120px;
+  padding: 4px;
+}
+.card-menu-item {
+  display: block;
+  width: 100%;
+  background: none;
+  border: none;
+  color: #c5d0e0;
+  font-size: 13px;
+  padding: 6px 10px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.card-menu-item:hover {
+  background: rgba(99,102,241,0.15);
+  color: #fff;
+}
+
 .employee-card__title {
   display: flex;
   flex-wrap: wrap;

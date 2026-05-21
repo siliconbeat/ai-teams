@@ -225,6 +225,12 @@ function handleServerMessage(message: ServerToEmployeeMessage) {
     requestTask();
     return;
   }
+  if (message.type === "session.reset") {
+    agentState = resetClaudeSession();
+    console.log(`[agent:${EMPLOYEE_ID}] 会话已重置，新 session: ${agentState.claudeSessionId}`);
+    send({ type: "session.reset.ack", employeeId: EMPLOYEE_ID });
+    return;
+  }
   cancelTask(message.taskId);
 }
 
