@@ -404,7 +404,6 @@ export default function App() {
     name: "", cron: "", prompt: "", targetMode: "queue", targetAgents: [], workspace: "", timeoutSec: "", enabled: true,
   });
   const [scheduleError, setScheduleError] = useState<string | null>(null);
-  const [suggestionOpen, setSuggestionOpen] = useState(false);
   const terminalLogsRef = useRef(terminalLogs);
   terminalLogsRef.current = terminalLogs;
   const wsRef = useRef<WebSocket | null>(null);
@@ -710,20 +709,34 @@ export default function App() {
     })
   , [chatFeed]);
 
-  const suggestionItems = useMemo(() => [
-    { label: "任务队列", value: "queue", description: "Round-robin to idle agents" },
-    { label: "@所有员工", value: "all", description: "Broadcast to all online agents" },
-    ...employeeList.map((emp) => ({
-      label: `@${emp.name}`,
-      value: emp.id,
-      description: `Direct — ${emp.status === "online" ? "online" : "offline"}`,
-      disabled: emp.status === "offline",
-    })),
-  ], [employeeList]);
+  const getSuggestionItems = (keyword?: string) => {
+    if (!keyword) return [];
+    if (keyword.startsWith("/")) {
+      const search = keyword.slice(1).toLowerCase();
+      return [
+        { label: "/code-review", value: "/code-review", description: "请求代码审查" },
+      ].filter((item) => item.value.toLowerCase().includes(search));
+    }
+    const search = keyword.startsWith("@") ? keyword.slice(1).toLowerCase() : keyword.toLowerCase();
+    return [
+      { label: "@任务队列", value: "queue", description: "Round-robin to idle agents" },
+      { label: "@所有员工", value: "all", description: "Broadcast to all online agents" },
+      ...employeeList
+        .filter((emp) => emp.name.toLowerCase().includes(search))
+        .map((emp) => ({
+          label: `@${emp.name}`,
+          value: emp.id,
+          description: `Direct — ${emp.status === "online" ? "online" : "offline"}`,
+          disabled: emp.status === "offline",
+        })),
+    ];
+  };
 
   const handleSuggestionSelect = (value: string) => {
     let insertText: string;
-    if (value === "queue") {
+    if (value === "/code-review") {
+      insertText = "/code-review ";
+    } else if (value === "queue") {
       setSelectedTarget("queue");
       insertText = "@任务队列 ";
     } else if (value === "all") {
@@ -739,10 +752,9 @@ export default function App() {
       insertText = `@${emp.name} `;
     }
     setDraft((c) => {
-      const prompt = c.prompt.replace(/@[^@\s]*$/, insertText);
+      const prompt = c.prompt.replace(/[@/][^@\s/]*$/, insertText);
       return { ...c, prompt };
     });
-    setSuggestionOpen(false);
   };
 
   function formatTarget(target: AgentTarget, employeeMap: Record<string, EmployeeSnapshot>) {
@@ -1332,9 +1344,7 @@ export default function App() {
       {/* Mobile: command input */}
       <div className="mobile-input-bar">
         <Suggestion
-          items={suggestionItems}
-          open={suggestionOpen}
-          onOpenChange={setSuggestionOpen}
+          items={getSuggestionItems}
           onSelect={handleSuggestionSelect}
         >
           {({ onTrigger, onKeyDown }) => (
@@ -1342,14 +1352,20 @@ export default function App() {
               value={draft.prompt}
               onChange={(val) => {
                 setDraft((c) => ({ ...c, prompt: val }));
-                if (val.match(/@[^@\s]*$/)) {
-                  onTrigger(val);
+                const match = val.match(/([@/][^@\s/]*)$/);
+                if (match) {
+                  onTrigger(match[1]);
                 }
               }}
-              onKeyDown={onKeyDown}
+              onKeyDown={(e) => {
+                if (e.key === "@" || e.key === "/") {
+                  onTrigger(e.key);
+                }
+                onKeyDown(e);
+              }}
               onSubmit={() => sendCommand()}
               submitType="enter"
-              placeholder="输入指令... @ 选择目标"
+              placeholder="输入指令... @ 目标 / 命令"
               style={{ flexShrink: 0 }}
             />
           )}
@@ -1843,9 +1859,7 @@ export default function App() {
           </div>
           <div className="chat-composer">
             <Suggestion
-              items={suggestionItems}
-              open={suggestionOpen}
-              onOpenChange={setSuggestionOpen}
+              items={getSuggestionItems}
               onSelect={handleSuggestionSelect}
             >
               {({ onTrigger, onKeyDown }) => (
@@ -1853,13 +1867,20 @@ export default function App() {
                   value={draft.prompt}
                   onChange={(val) => {
                     setDraft((c) => ({ ...c, prompt: val }));
-                    if (val.match(/@[^@\s]*$/)) {
-                      onTrigger(val);
+                    const match = val.match(/([@/][^@\s/]*)$/);
+                    if (match) {
+                      onTrigger(match[1]);
                     }
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "@" || e.key === "/") {
+                      onTrigger(e.key);
+                    }
+                    onKeyDown(e);
                   }}
                   onSubmit={() => sendCommand()}
                   submitType="enter"
-                  placeholder="按 Enter 发送；Option/Alt + Enter 换行。输入 @ 选择目标..."
+                  placeholder="按 Enter 发送；@ 选择目标 / 使用命令..."
                   header={
                     <Sender.Header title="工作目录" open={false}>
                       <input
