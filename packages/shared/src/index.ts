@@ -40,6 +40,7 @@ export interface EmployeeSnapshot {
   lastSeenAt: string;
   consecutiveQueueFailures: number;
   version?: string;
+  weight: number;
 }
 
 export interface TaskRecord {
@@ -118,6 +119,7 @@ export type EmployeeToServerMessage =
       activeMainTaskId?: string | null;
       activeQueueTaskId?: string | null;
       lastOutputSeq?: number;
+      weight?: number;
     }
   | { type: "agent.heartbeat"; employeeId: string }
   | { type: "agent.request_task"; employeeId: string }
