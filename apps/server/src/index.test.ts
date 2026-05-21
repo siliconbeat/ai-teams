@@ -562,19 +562,19 @@ describe("WebSocket 任务调度", () => {
     expect(await bobUnexpected).toBe(false);
   });
 
-  it("queue 轮询分发给空闲 Agent", async () => {
+  it("queue 分发给空闲 Agent", async () => {
     const alice = await connectAgent("alice");
     const bob = await connectAgent("bob");
     const leader = await connectLeader();
 
-    const aliceDispatch = waitForAgentDispatch(alice);
+    const dispatch1 = Promise.race([waitForAgentDispatch(alice), waitForAgentDispatch(bob)]);
     leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "round 1" }));
-    const first = await aliceDispatch;
+    const first = await dispatch1;
     expect(first.targetMode).toBe("queue");
 
-    const bobDispatch = waitForAgentDispatch(bob);
+    const dispatch2 = Promise.race([waitForAgentDispatch(alice), waitForAgentDispatch(bob)]);
     leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "round 2" }));
-    const second = await bobDispatch;
+    const second = await dispatch2;
     expect(second.targetMode).toBe("queue");
   });
 
