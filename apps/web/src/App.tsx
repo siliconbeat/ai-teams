@@ -245,7 +245,7 @@ function getAgentPresence(employee: EmployeeSnapshot, activeTask?: TaskRecord) {
     return { label: "派发中", className: "dispatched" };
   }
   if (activeTask.status === "accepted") {
-    return { label: "已接单", className: "accepted" };
+    return { label: "已接收", className: "accepted" };
   }
   if (activeTask.status === "running") {
     return { label: "任务中", className: "busy" };
