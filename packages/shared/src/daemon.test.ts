@@ -77,7 +77,7 @@ describe("spawnWorker", () => {
       `import fs from "node:fs"; fs.writeFileSync("${readyFile}", "ok"); process.exit(0);`
     );
 
-    const child = spawnWorker(workerScript, [], dir);
+    const child = spawnWorker(workerScript, [], path.join(dir, "agent.log"));
     const exitCode = await new Promise<number>((resolve) => child.on("exit", resolve));
     expect(exitCode).toBe(0);
     expect(fs.existsSync(readyFile)).toBe(true);

@@ -41,9 +41,8 @@ export function isProcessRunning(pid: number): boolean {
 /**
  * Spawn a worker child process with stdout/stderr redirected to a log file.
  */
-export function spawnWorker(script: string, args: string[], logDir: string): ChildProcess {
-  fs.mkdirSync(logDir, { recursive: true });
-  const logFile = path.join(logDir, "worker.log");
+export function spawnWorker(script: string, args: string[], logFile: string): ChildProcess {
+  fs.mkdirSync(path.dirname(logFile), { recursive: true });
   const logStream = fs.openSync(logFile, "a");
 
   const child = spawn(process.execPath, [script, ...args], {
@@ -68,11 +67,11 @@ const RESTART_DELAY_MS = 3000;
 export async function runWatchdog(opts: {
   name: string;
   pidFile: string;
-  logDir: string;
+  logFile: string;
   workerScript: string;
   workerArgs: string[];
 }): Promise<void> {
-  const { name, pidFile, logDir, workerScript, workerArgs } = opts;
+  const { name, pidFile, logFile, workerScript, workerArgs } = opts;
 
   writePidFile(pidFile, process.pid);
 
@@ -98,7 +97,7 @@ export async function runWatchdog(opts: {
   // Main watchdog loop
   while (!shuttingDown) {
     await new Promise<void>((resolve) => {
-      worker = spawnWorker(workerScript, workerArgs, logDir);
+      worker = spawnWorker(workerScript, workerArgs, logFile);
 
       worker.on("exit", (code, signal) => {
         worker = null;
@@ -208,7 +207,7 @@ export function daemonize(opts: DaemonOptions): Promise<void> {
     return runWatchdog({
       name: opts.name,
       pidFile: opts.pidFile,
-      logDir: path.dirname(opts.logFile),
+      logFile: opts.logFile,
       workerScript: process.argv[1]!,
       workerArgs: process.argv.slice(2),
     });
