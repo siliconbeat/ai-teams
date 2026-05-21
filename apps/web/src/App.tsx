@@ -16,6 +16,7 @@ import { XProvider } from "@ant-design/x";
 import { Avatar, ConfigProvider, theme } from "antd";
 import { Bubble, ThoughtChain, Sender, Suggestion } from "@ant-design/x";
 import type { BubbleProps } from "@ant-design/x";
+import { XMarkdown } from "@ant-design/x-markdown";
 
 // ---------------------------------------------------------------------------
 // Web Crypto E2E decryption (AES-256-GCM)
@@ -975,6 +976,7 @@ export default function App() {
       },
     ]);
     setDraft((current) => ({ ...current, prompt: "" }));
+    setSelectedTarget("queue");
   }
 
   const cancelTask = useCallback((taskId: string) => {
@@ -1227,7 +1229,7 @@ export default function App() {
             文档
           </a>
         </nav>
-        <button className="secondary-button mobile-logout" onClick={clearToken}>
+        <button className="secondary-button mobile-logout" onClick={() => { if (confirm("确认退出当前连接？")) clearToken(); }}>
           ⏻
         </button>
       </header>
@@ -1332,9 +1334,10 @@ export default function App() {
                 contentRender: (_content: any, info: any) => {
                   const item = info.extraInfo;
                   const isError = item.taskStatus === "failed" || item.taskStatus === "timeout";
-                  return <div style={isError ? { color: "#ff4d4f", fontSize: 12 } : { fontSize: 12 }}>{String(_content)}</div>;
+                  return <div style={isError ? { color: "#ff4d4f", fontSize: 12 } : { fontSize: 12 }}><XMarkdown content={String(_content)} /></div>;
                 },
-                styles: { content: { background: "rgba(255, 255, 255, 0.06)", border: "1px solid rgba(255, 255, 255, 0.08)" } },
+                styles: { root: { width: "100%" },
+                      body: { width: "100%" }, content: { background: "rgba(255, 255, 255, 0.06)", border: "1px solid rgba(255, 255, 255, 0.08)" } },
               },
             }}
           />
@@ -1779,7 +1782,7 @@ export default function App() {
               <h2>Leader 群聊指挥中心</h2>
               <p>输入 <code>@</code> 选择目标，或直接发送到任务队列。</p>
             </div>
-            <button className="secondary-button" onClick={clearToken}>
+            <button className="secondary-button" onClick={() => { if (confirm("确认退出当前连接？")) clearToken(); }}>
               切换 Token
             </button>
           </div>
@@ -1846,11 +1849,13 @@ export default function App() {
                       const isError = item.taskStatus === "failed" || item.taskStatus === "timeout";
                       return (
                         <div style={isError ? { color: "#ff4d4f" } : undefined}>
-                          {String(_content)}
+                          <XMarkdown content={String(_content)} />
                         </div>
                       );
                     },
                     styles: {
+                      root: { width: "100%" },
+                      body: { width: "100%" },
                       content: {
                         background: "rgba(255, 255, 255, 0.06)",
                         border: "1px solid rgba(255, 255, 255, 0.08)",

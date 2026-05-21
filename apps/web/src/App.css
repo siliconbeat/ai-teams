@@ -38,7 +38,7 @@ textarea {
   height: 100dvh;
   min-height: 0;
   overflow: hidden;
-  grid-template-columns: minmax(0, 1fr) 500px;
+  grid-template-columns: minmax(0, 1fr) 535px;
   grid-template-rows: auto minmax(0, 1fr);
   grid-template-areas:
     "topbar topbar"
