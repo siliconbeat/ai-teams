@@ -199,6 +199,7 @@ export function createDispatch(ctx: DispatchContext) {
 
   const MAX_QUEUE_RETRY = 3;
   const MAX_CONSECUTIVE_QUEUE_FAILURES = 5;
+  const AUTO_RESUME_MS = 10 * 60 * 1000; // 10 minutes
 
   function trackQueueFailure(employeeId: string) {
     const prev = state.consecutiveQueueFailures.get(employeeId) ?? 0;
@@ -210,6 +211,7 @@ export function createDispatch(ctx: DispatchContext) {
       upsertEmployee(emp);
     }
     if (next >= MAX_CONSECUTIVE_QUEUE_FAILURES) {
+      state.failureTimestamps.set(employeeId, Date.now());
       log.warn({ employeeId, consecutiveFailures: next }, "Agent paused for queue tasks due to consecutive failures");
     }
   }
@@ -379,8 +381,21 @@ export function createDispatch(ctx: DispatchContext) {
         if (employee.status !== "online" || employee.queueTaskId || socket?.readyState !== WebSocket.OPEN) {
           return false;
         }
-        if ((state.consecutiveQueueFailures.get(employee.id) ?? 0) >= MAX_CONSECUTIVE_QUEUE_FAILURES) {
-          return false;
+        const failures = state.consecutiveQueueFailures.get(employee.id) ?? 0;
+        if (failures >= MAX_CONSECUTIVE_QUEUE_FAILURES) {
+          const failureTs = state.failureTimestamps.get(employee.id);
+          if (failureTs && (Date.now() - failureTs) > AUTO_RESUME_MS) {
+            state.consecutiveQueueFailures.set(employee.id, 0);
+            state.failureTimestamps.delete(employee.id);
+            const emp = state.employees.get(employee.id);
+            if (emp) {
+              emp.consecutiveQueueFailures = 0;
+              upsertEmployee(emp);
+            }
+            log.info({ employeeId: employee.id }, "Agent auto-resumed after timeout, failure count reset");
+          } else {
+            return false;
+          }
         }
         if (requiredLabels && requiredLabels.length > 0) {
           return requiredLabels.every((label) => employee.labels.includes(label));
@@ -1077,6 +1092,7 @@ export function createDispatch(ctx: DispatchContext) {
       return { ok: false, message: "员工不存在。" };
     }
     state.consecutiveQueueFailures.set(employeeId, 0);
+    state.failureTimestamps.delete(employeeId);
     employee.consecutiveQueueFailures = 0;
     upsertEmployee(employee);
     log.info({ employeeId }, "Agent queue resumed, consecutive failure count reset");
