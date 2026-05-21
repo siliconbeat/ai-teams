@@ -1304,7 +1304,6 @@ export default function App() {
                           items={item.executingBy.map((agent: ExecutingAgent) => ({
                             key: agent.name,
                             title: agent.name,
-                            description: statusLabel(agent.status),
                             status: thoughtChainStatus(agent.status),
                           }))}
                         />
@@ -1816,7 +1815,6 @@ export default function App() {
                               items={item.executingBy.map((agent: ExecutingAgent) => ({
                                 key: agent.name,
                                 title: agent.name,
-                                description: statusLabel(agent.status),
                                 status: thoughtChainStatus(agent.status),
                                 collapsible: item.executingBy.length > 2,
                               }))}
