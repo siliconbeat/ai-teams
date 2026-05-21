@@ -17,7 +17,6 @@ export interface StateStore {
   taskQueues: Map<string, string[]>;
   mainTaskQueues: Map<string, string[]>;
   sharedTaskQueue: string[];
-  sharedQueueCursor: number;
   scheduleJobs: Map<string, CronJobLike>;
   consecutiveQueueFailures: Map<string, number>;
   failureTimestamps: Map<string, number>;
@@ -38,7 +37,6 @@ export function createInMemoryStateStore(): StateStore {
     taskQueues: new Map(),
     mainTaskQueues: new Map(),
     sharedTaskQueue: [],
-    sharedQueueCursor: 0,
     scheduleJobs: new Map(),
     consecutiveQueueFailures: new Map(),
     failureTimestamps: new Map(),

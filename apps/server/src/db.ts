@@ -268,10 +268,6 @@ export async function hydrateState(db: Database, state: StateStore, defaultTimeo
     state.taskWebhooks.set(row.task_id, row.webhook_url);
   }
 
-  const cursorRow = await db.get<{ value: string }>("SELECT value FROM schema_meta WHERE key = 'sharedQueueCursor'");
-  if (cursorRow) {
-    state.sharedQueueCursor = Number(cursorRow.value) || 0;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -318,14 +314,6 @@ export async function persistTaskWebhook(db: Database, taskId: string, webhookUr
   );
 }
 
-export async function persistSharedQueueCursor(db: Database, cursor: number) {
-  await db.run(
-    `INSERT INTO schema_meta (key, value)
-     VALUES ('sharedQueueCursor', $1)
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-    [String(cursor)],
-  );
-}
 
 export async function persistTaskLog(db: Database, chunk: TaskOutputChunk, maxLogChunksPerTask: number) {
   await db.run(

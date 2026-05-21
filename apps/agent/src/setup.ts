@@ -14,6 +14,7 @@ export type AgentConfig = {
   employeeName: string;
   workspace: string;
   runnerMode: string;
+  weight?: number;
 };
 
 export function getConfigPath() {

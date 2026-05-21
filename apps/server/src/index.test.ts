@@ -578,6 +578,34 @@ describe("WebSocket 任务调度", () => {
     expect(second.targetMode).toBe("queue");
   });
 
+  it("queue 加权随机分配", async () => {
+    // Run multiple rounds to verify weighted distribution statistically
+    let aliceCount = 0;
+    const rounds = 20;
+
+    for (let r = 0; r < rounds; r++) {
+      const alice = await connectAgent(`alice-r${r}`, undefined, { weight: 3 });
+      const bob = await connectAgent(`bob-r${r}`, undefined, { weight: 1 });
+      const leader = await connectLeader();
+
+      leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: `weighted ${r}` }));
+      await delay(30);
+
+      const snap = server.buildSnapshot();
+      const task = snap.tasks.find(t => t.prompt === `weighted ${r}`);
+      if (task?.employeeId?.startsWith("alice")) aliceCount++;
+
+      // cleanup
+      alice.close();
+      bob.close();
+      leader.close();
+      await delay(20);
+    }
+
+    // With weight 3:1, alice should get the majority (> 10/20)
+    expect(aliceCount).toBeGreaterThan(rounds / 2);
+  });
+
   it("WebSocket task.cancel 取消运行中的任务", async () => {
     const agent = await connectAgent("alice");
     const leader = await connectLeader();
@@ -1053,7 +1081,7 @@ async function connectLeader() {
   return connectWs(`${baseUrl}/ws/leader?token=${TOKEN}`);
 }
 
-async function connectAgent(employeeId: string, activeTaskId?: string) {
+async function connectAgent(employeeId: string, activeTaskId?: string, opts?: { weight?: number }) {
   const socket = await connectWs(`${baseUrl}/ws/agent?token=${TOKEN}`);
   socket.send(
     JSON.stringify({
@@ -1063,6 +1091,7 @@ async function connectAgent(employeeId: string, activeTaskId?: string) {
       machineId: employeeId,
       hostname: "test-host",
       labels: [],
+      weight: opts?.weight,
       activeMainTaskId: activeTaskId ?? null,
       activeQueueTaskId: null,
       lastOutputSeq: 0,
