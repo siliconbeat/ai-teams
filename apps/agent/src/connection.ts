@@ -20,6 +20,8 @@ import {
   type ActiveTask,
 } from "./config.js";
 
+declare const PKG_VERSION: string;
+
 // ---------------------------------------------------------------------------
 // Encryption helper
 // ---------------------------------------------------------------------------
@@ -128,6 +130,7 @@ export function registerAgent(
     machineId: EMPLOYEE_ID,
     hostname: os.hostname(),
     labels: EMPLOYEE_LABELS,
+    version: PKG_VERSION,
     activeMainTaskId: mainTask?.taskId ?? null,
     activeQueueTaskId: queueTask?.taskId ?? null,
     lastOutputSeq: Math.max(mainTask?.seq ?? 0, queueTask?.seq ?? 0),

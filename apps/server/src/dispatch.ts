@@ -735,6 +735,7 @@ export function createDispatch(ctx: DispatchContext) {
       queueTaskPrompt,
       lastSeenAt: nowIso(),
       consecutiveQueueFailures: state.consecutiveQueueFailures.get(message.employeeId) ?? 0,
+      version: message.version,
     });
 
     sendJson<ServerToEmployeeMessage>(socket, {

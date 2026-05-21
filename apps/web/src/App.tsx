@@ -342,7 +342,7 @@ const EmployeeCard = memo(function EmployeeCard({
       </div>
       <div className="employee-meta">
         <span>{employee.hostname}</span>
-        <span>ID: {employee.id}</span>
+        <span>ID: {employee.id}{employee.version ? ` · v${employee.version}` : ""}</span>
         <span>标签: {employee.labels.join(", ") || "未设置"}</span>
       </div>
       <SlotStrip label="主任务" task={mainTask} onCancel={cancelTask} />
@@ -354,7 +354,7 @@ const EmployeeCard = memo(function EmployeeCard({
   if (prev.terminalText !== next.terminalText) return false;
   if (prev.mainTask?.id !== next.mainTask?.id || prev.queueTask?.id !== next.queueTask?.id || prev.displayTask?.id !== next.displayTask?.id) return false;
   const pe = prev.employee, ne = next.employee;
-  if (pe.status !== ne.status || pe.mainTaskId !== ne.mainTaskId || pe.queueTaskId !== ne.queueTaskId || pe.name !== ne.name || pe.consecutiveQueueFailures !== ne.consecutiveQueueFailures) return false;
+  if (pe.status !== ne.status || pe.mainTaskId !== ne.mainTaskId || pe.queueTaskId !== ne.queueTaskId || pe.name !== ne.name || pe.consecutiveQueueFailures !== ne.consecutiveQueueFailures || pe.version !== ne.version) return false;
   if (pe.labels.length !== ne.labels.length || pe.labels.some((l, i) => l !== ne.labels[i])) return false;
   return true;
 });
@@ -366,6 +366,7 @@ export default function App() {
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [showReconnect, setShowReconnect] = useState(false);
   const [employees, setEmployees] = useState<Record<string, EmployeeSnapshot>>({});
+  const [serverVersion, setServerVersion] = useState<string>("");
   const [tasks, setTasks] = useState<Record<string, TaskRecord>>({});
   const [logs, setLogs] = useState<Record<string, TaskOutputChunk[]>>({});
   const [terminalLogs, setTerminalLogs] = useState<Record<string, EmployeeTerminalLog>>(loadTerminalLogs);
@@ -488,6 +489,7 @@ export default function App() {
         setEmployees(Object.fromEntries(message.snapshot.employees.map((item) => [item.id, item])));
         setTasks(capTasks(Object.fromEntries(message.snapshot.tasks.map((item) => [item.id, item])), MAX_TASKS));
         setLogs(message.snapshot.logs);
+        if (message.snapshot.serverVersion) setServerVersion(message.snapshot.serverVersion);
         break;
       }
       case "employee.upsert": {
@@ -1088,7 +1090,7 @@ export default function App() {
         <div className="brand">
           <span className="brand-badge">AI</span>
           <div>
-            <strong>AI Teams</strong>
+            <strong>AI Teams{serverVersion ? ` v${serverVersion}` : ""}</strong>
             <p>员工协作控制台</p>
           </div>
         </div>

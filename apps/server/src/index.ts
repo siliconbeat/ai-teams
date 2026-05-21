@@ -197,6 +197,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
       employees: [...state.employees.values()],
       tasks: [...state.tasks.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
       logs: {},
+      serverVersion: typeof PKG_VERSION !== "undefined" ? PKG_VERSION : undefined,
     };
   }
 

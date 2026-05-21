@@ -39,6 +39,7 @@ export interface EmployeeSnapshot {
   queueTaskPrompt: string | null;
   lastSeenAt: string;
   consecutiveQueueFailures: number;
+  version?: string;
 }
 
 export interface TaskRecord {
@@ -85,6 +86,7 @@ export interface StateSnapshot {
   employees: EmployeeSnapshot[];
   tasks: TaskRecord[];
   logs: Record<string, TaskOutputChunk[]>;
+  serverVersion?: string;
 }
 
 export type ServerToEmployeeMessage =
@@ -112,6 +114,7 @@ export type EmployeeToServerMessage =
       machineId: string;
       hostname: string;
       labels: string[];
+      version?: string;
       activeMainTaskId?: string | null;
       activeQueueTaskId?: string | null;
       lastOutputSeq?: number;
@@ -184,6 +187,7 @@ export function createEmptySnapshot(): StateSnapshot {
     employees: [],
     tasks: [],
     logs: {},
+    serverVersion: undefined,
   };
 }
 
@@ -249,6 +253,7 @@ export function parseEmployeeToServerMessage(value: unknown): EmployeeToServerMe
       machineId: nonEmptyStringField(message, "machineId"),
       hostname: nonEmptyStringField(message, "hostname"),
       labels: stringArrayField(message, "labels"),
+      version: optionalStringField(message, "version"),
       activeMainTaskId: optionalNullableStringField(message, "activeMainTaskId"),
       activeQueueTaskId: optionalNullableStringField(message, "activeQueueTaskId"),
       lastOutputSeq: optionalNonNegativeNumberField(message, "lastOutputSeq"),
