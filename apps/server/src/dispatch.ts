@@ -419,10 +419,19 @@ export function createDispatch(ctx: DispatchContext) {
     const minLoad = (available[0].mainTaskId ? 1 : 0) + (available[0].queueTaskId ? 1 : 0);
     const lightest = available.filter((e) => (e.mainTaskId ? 1 : 0) + (e.queueTaskId ? 1 : 0) === minLoad);
 
-    const employee = lightest[state.sharedQueueCursor % lightest.length];
-    state.sharedQueueCursor = (state.sharedQueueCursor + 1) % Math.max(lightest.length, 1);
-    void persistSharedQueueCursor(db, state.sharedQueueCursor);
-    return employee.id;
+    if (lightest.length === 1) {
+      return lightest[0].id;
+    }
+
+    const totalWeight = lightest.reduce((sum, e) => sum + (e.weight ?? 1), 0);
+    let random = Math.random() * totalWeight;
+    for (const employee of lightest) {
+      random -= (employee.weight ?? 1);
+      if (random < 0) {
+        return employee.id;
+      }
+    }
+    return lightest[lightest.length - 1].id;
   }
 
   function dispatchSharedQueuedTask(preferredEmployeeId?: string) {
@@ -751,6 +760,7 @@ export function createDispatch(ctx: DispatchContext) {
       lastSeenAt: nowIso(),
       consecutiveQueueFailures: state.consecutiveQueueFailures.get(message.employeeId) ?? 0,
       version: message.version,
+      weight: message.weight ?? 1,
     });
 
     sendJson<ServerToEmployeeMessage>(socket, {
