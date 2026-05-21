@@ -362,6 +362,9 @@ const EmployeeCard = memo(function EmployeeCard({
         {employee.consecutiveQueueFailures >= 5 && (
           <span className="meta-warning">连续失败: {employee.consecutiveQueueFailures} 次</span>
         )}
+        {employee.weight > 1 && (
+          <span>权重: {employee.weight}</span>
+        )}
       </div>
       <SlotStrip label="主任务" task={mainTask} onCancel={cancelTask} />
       <SlotStrip label="队列" task={queueTask} onCancel={cancelTask} />
@@ -372,7 +375,7 @@ const EmployeeCard = memo(function EmployeeCard({
   if (prev.terminalText !== next.terminalText) return false;
   if (prev.mainTask?.id !== next.mainTask?.id || prev.queueTask?.id !== next.queueTask?.id || prev.displayTask?.id !== next.displayTask?.id) return false;
   const pe = prev.employee, ne = next.employee;
-  if (pe.status !== ne.status || pe.mainTaskId !== ne.mainTaskId || pe.queueTaskId !== ne.queueTaskId || pe.name !== ne.name || pe.consecutiveQueueFailures !== ne.consecutiveQueueFailures || pe.version !== ne.version) return false;
+  if (pe.status !== ne.status || pe.mainTaskId !== ne.mainTaskId || pe.queueTaskId !== ne.queueTaskId || pe.name !== ne.name || pe.consecutiveQueueFailures !== ne.consecutiveQueueFailures || pe.version !== ne.version || pe.weight !== ne.weight) return false;
   if (pe.labels.length !== ne.labels.length || pe.labels.some((l, i) => l !== ne.labels[i])) return false;
   return true;
 });
