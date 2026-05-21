@@ -404,6 +404,7 @@ export default function App() {
     name: "", cron: "", prompt: "", targetMode: "queue", targetAgents: [], workspace: "", timeoutSec: "", enabled: true,
   });
   const [scheduleError, setScheduleError] = useState<string | null>(null);
+  const [suggestionOpen, setSuggestionOpen] = useState(false);
   const terminalLogsRef = useRef(terminalLogs);
   terminalLogsRef.current = terminalLogs;
   const wsRef = useRef<WebSocket | null>(null);
@@ -1346,6 +1347,8 @@ export default function App() {
         <Suggestion
           items={getSuggestionItems}
           onSelect={handleSuggestionSelect}
+          open={suggestionOpen}
+          onOpenChange={setSuggestionOpen}
         >
           {({ onTrigger, onKeyDown }) => (
             <Sender
@@ -1362,6 +1365,9 @@ export default function App() {
                   onTrigger(e.key);
                 }
                 onKeyDown(e);
+                if (e.key === "Enter" && !e.defaultPrevented && suggestionOpen) {
+                  e.preventDefault();
+                }
               }}
               onSubmit={() => sendCommand()}
               submitType="enter"
@@ -1861,6 +1867,8 @@ export default function App() {
             <Suggestion
               items={getSuggestionItems}
               onSelect={handleSuggestionSelect}
+              open={suggestionOpen}
+              onOpenChange={setSuggestionOpen}
             >
               {({ onTrigger, onKeyDown }) => (
                 <Sender
@@ -1877,6 +1885,9 @@ export default function App() {
                       onTrigger(e.key);
                     }
                     onKeyDown(e);
+                    if (e.key === "Enter" && !e.defaultPrevented && suggestionOpen) {
+                      e.preventDefault();
+                    }
                   }}
                   onSubmit={() => sendCommand()}
                   submitType="enter"
