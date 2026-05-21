@@ -722,10 +722,13 @@ export default function App() {
   ], [employeeList]);
 
   const handleSuggestionSelect = (value: string) => {
+    let insertText: string;
     if (value === "queue") {
       setSelectedTarget("queue");
+      insertText = "@任务队列 ";
     } else if (value === "all") {
       setSelectedTarget("all");
+      insertText = "@所有员工 ";
     } else {
       const emp = employees[value];
       if (!emp) return;
@@ -733,11 +736,12 @@ export default function App() {
         const currentIds = current === "all" || current === "queue" ? [] : current;
         return currentIds.includes(value) ? currentIds : [...currentIds, value];
       });
-      const atName = `@${emp.name}`;
-      if (!draft.prompt.includes(atName)) {
-        setDraft((c) => ({ ...c, prompt: c.prompt ? `${c.prompt} ${atName}` : atName }));
-      }
+      insertText = `@${emp.name} `;
     }
+    setDraft((c) => {
+      const prompt = c.prompt.replace(/@[^@\s]*$/, insertText);
+      return { ...c, prompt };
+    });
     setSuggestionOpen(false);
   };
 
@@ -1338,12 +1342,8 @@ export default function App() {
               value={draft.prompt}
               onChange={(val) => {
                 setDraft((c) => ({ ...c, prompt: val }));
-                const lastAtIndex = val.lastIndexOf("@");
-                if (lastAtIndex !== -1) {
-                  const afterAt = val.slice(lastAtIndex + 1);
-                  if (!afterAt.includes(" ")) {
-                    onTrigger(val);
-                  }
+                if (val.match(/@[^@\s]*$/)) {
+                  onTrigger(val);
                 }
               }}
               onKeyDown={onKeyDown}
@@ -1853,15 +1853,10 @@ export default function App() {
                   value={draft.prompt}
                   onChange={(val) => {
                     setDraft((c) => ({ ...c, prompt: val }));
-                    const lastAtIndex = val.lastIndexOf("@");
-                    if (lastAtIndex !== -1) {
-                      const afterAt = val.slice(lastAtIndex + 1);
-                      if (!afterAt.includes(" ")) {
-                        onTrigger(val);
-                      }
+                    if (val.match(/@[^@\s]*$/)) {
+                      onTrigger(val);
                     }
                   }}
-                  onKeyDown={onKeyDown}
                   onSubmit={() => sendCommand()}
                   submitType="enter"
                   placeholder="按 Enter 发送；Option/Alt + Enter 换行。输入 @ 选择目标..."
