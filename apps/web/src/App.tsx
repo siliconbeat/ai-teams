@@ -78,26 +78,26 @@ type ExecutingAgent = {
   status: TaskStatus;
 };
 
-function renderTerminalContent(text: string) {
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function renderTerminalHtml(text: string): string {
   const lines = text.split("\n");
   return lines.map((line, i) => {
-    let cls = "term-output"; // Agent output — green (default)
+    const escaped = escapeHtml(line);
+    let cls = "term-output";
     if (line.startsWith("$ ") || line.startsWith("$\t")) {
-      cls = "term-meta"; // Task meta — dim cyan
+      cls = "term-meta";
     } else if (line.startsWith("[done]")) {
-      cls = "term-done"; // Claude done markers — gray
+      cls = "term-done";
     } else if (line.startsWith("[tool]")) {
-      cls = "term-tool"; // Tool usage — yellow
+      cls = "term-tool";
     } else if (line.startsWith("[agent]")) {
-      cls = "term-agent"; // Agent system — blue
+      cls = "term-agent";
     }
-    return (
-      <span key={i} className={cls}>
-        {line}
-        {i < lines.length - 1 ? "\n" : ""}
-      </span>
-    );
-  });
+    return `<span class="${cls}">${escaped}${i < lines.length - 1 ? "\n" : ""}</span>`;
+  }).join("");
 }
 
 type ChatFeedItem = {
@@ -155,6 +155,8 @@ const TOKEN_STORAGE_KEY = "ai-teams.auth-token";
 const TERMINAL_LOG_STORAGE_KEY = "ai-teams.employee-terminal-logs";
 const MAX_TERMINAL_LOG_CHARS_PER_EMPLOYEE = 200_000;
 const MAX_TERMINAL_LOG_MARKERS_PER_EMPLOYEE = 5000;
+const MAX_TASKS = 300;
+const CHAT_FEED_LIMIT = 200;
 
 function getInitialToken() {
   const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
@@ -208,6 +210,20 @@ function trimMarkers(markers: string[]) {
 
 function isTerminalStatus(status: TaskStatus) {
   return status === "completed" || status === "failed" || status === "cancelled" || status === "timeout";
+}
+
+function capTasks(map: Record<string, TaskRecord>, max: number): Record<string, TaskRecord> {
+  const entries = Object.entries(map);
+  if (entries.length <= max) return map;
+  const terminal = entries
+    .filter(([_, t]) => isTerminalStatus(t.status))
+    .sort((a, b) => a[1].createdAt.localeCompare(b[1].createdAt));
+  const toEvict = new Set(terminal.slice(0, entries.length - max + 20).map(([id]) => id));
+  const next: Record<string, TaskRecord> = {};
+  for (const [id, t] of entries) {
+    if (!toEvict.has(id)) next[id] = t;
+  }
+  return next;
 }
 
 function getAgentPresence(employee: EmployeeSnapshot, activeTask?: TaskRecord) {
@@ -315,9 +331,7 @@ const EmployeeCard = memo(function EmployeeCard({
       </div>
       <SlotStrip label="主任务" task={mainTask} onCancel={cancelTask} />
       <SlotStrip label="队列" task={queueTask} onCancel={cancelTask} />
-      <pre className="log-window" ref={logRef}>
-        {renderTerminalContent(terminalText)}
-      </pre>
+      <pre className="log-window" ref={logRef} dangerouslySetInnerHTML={{ __html: renderTerminalHtml(terminalText) }} />
     </article>
   );
 }, (prev, next) => {
@@ -356,6 +370,8 @@ export default function App() {
     name: "", cron: "", prompt: "", targetMode: "queue", targetAgents: [], workspace: "", timeoutSec: "", enabled: true,
   });
   const [scheduleError, setScheduleError] = useState<string | null>(null);
+  const terminalLogsRef = useRef(terminalLogs);
+  terminalLogsRef.current = terminalLogs;
   const wsRef = useRef<WebSocket | null>(null);
   const chatListRef = useRef<HTMLDivElement | null>(null);
   const mobileChatRef = useRef<HTMLDivElement | null>(null);
@@ -454,7 +470,7 @@ export default function App() {
     switch (message.type) {
       case "snapshot": {
         setEmployees(Object.fromEntries(message.snapshot.employees.map((item) => [item.id, item])));
-        setTasks(Object.fromEntries(message.snapshot.tasks.map((item) => [item.id, item])));
+        setTasks(capTasks(Object.fromEntries(message.snapshot.tasks.map((item) => [item.id, item])), MAX_TASKS));
         setLogs(message.snapshot.logs);
         break;
       }
@@ -464,6 +480,13 @@ export default function App() {
       }
       case "task.upsert": {
         setTasks((current) => ({ ...current, [message.task.id]: message.task }));
+        if (isTerminalStatus(message.task.status)) {
+          setLogs((current) => {
+            if (!(message.task.id in current)) return current;
+            const { [message.task.id]: _, ...rest } = current;
+            return rest;
+          });
+        }
         break;
       }
       case "task.output": {
@@ -533,6 +556,54 @@ export default function App() {
 
   const taskHasMore = taskListAll.length > taskDisplayLimit;
 
+  const tasksByEmployee = useMemo(() => {
+    const map = new Map<string, TaskRecord[]>();
+    for (const t of Object.values(tasks)) {
+      if (!t.employeeId) continue;
+      const list = map.get(t.employeeId);
+      if (list) list.push(t);
+      else map.set(t.employeeId, [t]);
+    }
+    return map;
+  }, [tasks]);
+
+  const errorTasks = useMemo(() => {
+    return Object.values(tasks)
+      .filter((t) => ["failed", "timeout", "cancelled"].includes(t.status))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }, [tasks]);
+
+  const statsData = useMemo(() => {
+    const allTasks = Object.values(tasks);
+    const total = allTasks.length;
+    const completed = allTasks.filter((t) => t.status === "completed").length;
+    const failed = allTasks.filter((t) => ["failed", "timeout", "cancelled"].includes(t.status)).length;
+    const running = allTasks.filter((t) => t.status === "running").length;
+    const totalCost = allTasks.reduce((sum, t) => sum + (t.totalCostUsd ?? 0), 0);
+    const totalDurationMs = allTasks.filter((t) => t.durationMs != null).reduce((sum, t) => sum + (t.durationMs ?? 0), 0);
+    const avgDuration = completed > 0 ? totalDurationMs / completed : 0;
+    const employeeStats = employeeList.map((emp) => {
+      const empTasks = tasksByEmployee.get(emp.id) ?? [];
+      const empCompleted = empTasks.filter((t) => t.status === "completed").length;
+      const empFailed = empTasks.filter((t) => ["failed", "timeout", "cancelled"].includes(t.status)).length;
+      const empCost = empTasks.reduce((s, t) => s + (t.totalCostUsd ?? 0), 0);
+      const empAvgMs = empCompleted > 0
+        ? empTasks.filter((t) => t.durationMs != null).reduce((s, t) => s + (t.durationMs ?? 0), 0) / empCompleted
+        : 0;
+      return { employee: emp, completed: empCompleted, failed: empFailed, cost: empCost, avgMs: empAvgMs };
+    });
+    return { total, completed, failed, running, totalCost, avgDuration, employeeStats };
+  }, [tasks, employeeList, tasksByEmployee]);
+
+  const employeesData = useMemo(() => {
+    return employeeList.map((emp) => {
+      const empTasks = tasksByEmployee.get(emp.id) ?? [];
+      const completed = empTasks.filter((t) => t.status === "completed").length;
+      const failed = empTasks.filter((t) => ["failed", "timeout", "cancelled"].includes(t.status)).length;
+      return { employee: emp, completed, failed, total: empTasks.length };
+    });
+  }, [employeeList, tasksByEmployee]);
+
   const chatFeed = useMemo<ChatFeedItem[]>(() => {
     // Group tasks by leaderCommandId to deduplicate broadcast commands
     const commandGroups = new Map<string, TaskRecord[]>();
@@ -585,7 +656,7 @@ export default function App() {
         status: task.status,
       }));
 
-    return [...leaderItems, ...employeeItems].sort((a, b) => a.createdAtMs - b.createdAtMs);
+    return [...leaderItems, ...employeeItems].sort((a, b) => a.createdAtMs - b.createdAtMs).slice(-CHAT_FEED_LIMIT);
   }, [employees, tasks]);
 
   function formatTarget(target: AgentTarget, employeeMap: Record<string, EmployeeSnapshot>) {
@@ -830,8 +901,21 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(TERMINAL_LOG_STORAGE_KEY, JSON.stringify(terminalLogs));
+    const timer = setTimeout(() => {
+      localStorage.setItem(TERMINAL_LOG_STORAGE_KEY, JSON.stringify(terminalLogs));
+    }, 500);
+    return () => clearTimeout(timer);
   }, [terminalLogs]);
+
+  useEffect(() => {
+    const handler = () => {
+      if (document.visibilityState === "hidden") {
+        localStorage.setItem(TERMINAL_LOG_STORAGE_KEY, JSON.stringify(terminalLogsRef.current));
+      }
+    };
+    document.addEventListener("visibilitychange", handler);
+    return () => document.removeEventListener("visibilitychange", handler);
+  }, []);
 
   useEffect(() => {
     const taskEntries = Object.values(tasks).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
@@ -852,6 +936,11 @@ export default function App() {
         const seenTaskIds = new Set(currentLog.seenTaskIds);
         const seenOutputIds = new Set(currentLog.seenOutputIds);
         const seenFinishedTaskIds = new Set(currentLog.seenFinishedTaskIds);
+
+        if (isTerminalStatus(task.status) && seenTaskIds.has(task.id) && seenFinishedTaskIds.has(task.id)) {
+          continue;
+        }
+
         let content = currentLog.content;
         let entryChanged = false;
 
@@ -861,7 +950,7 @@ export default function App() {
           entryChanged = true;
         }
 
-        const taskLogs = [...(logs[task.id] ?? [])].sort((a, b) => a.seq - b.seq);
+        const taskLogs = logs[task.id] ?? [];
         for (const chunk of taskLogs) {
           const outputId = `${task.id}:${chunk.seq}`;
           if (seenOutputIds.has(outputId)) {
@@ -1062,7 +1151,7 @@ export default function App() {
                 <span>{emp?.name ?? mobileTerminalEmployeeId}</span>
                 <button onClick={() => setMobileTerminalEmployeeId(null)}>✕</button>
               </div>
-              <pre className="mobile-terminal-content" ref={mobileTerminalRef}>{renderTerminalContent(text)}</pre>
+              <pre className="mobile-terminal-content" ref={mobileTerminalRef} dangerouslySetInnerHTML={{ __html: renderTerminalHtml(text) }} />
             </div>
           </div>
         );
@@ -1257,37 +1346,28 @@ export default function App() {
                 </div>
               </div>
               <div className="task-table">
-                {employeeList.length === 0 ? (
+                {employeesData.length === 0 ? (
                   <div className="history-empty">暂无员工注册。</div>
                 ) : (
-                  employeeList.map((emp) => {
-                    const empTasks = Object.values(tasks).filter((t) => t.employeeId === emp.id);
-                    const completed = empTasks.filter((t) => t.status === "completed").length;
-                    const failed = empTasks.filter((t) => ["failed", "timeout", "cancelled"].includes(t.status)).length;
-                    return (
-                      <div className="task-row" key={emp.id} style={{ gap: 12 }}>
-                        <div className="task-row__main">
-                          <strong>{emp.name} <small style={{ color: "#888" }}>({emp.id})</small></strong>
-                          <p>主机: {emp.hostname} | 标签: {emp.labels.length > 0 ? emp.labels.join(", ") : "无"}</p>
-                          <p>完成: {completed} | 失败: {failed} | 总任务: {empTasks.length}</p>
-                        </div>
-                        <div className="task-row__side">
-                          <span className={`status-pill ${emp.status}`}>{emp.status}</span>
-                          <small>{new Date(emp.lastSeenAt).toLocaleTimeString()}</small>
-                        </div>
+                  employeesData.map((ed) => (
+                    <div className="task-row" key={ed.employee.id} style={{ gap: 12 }}>
+                      <div className="task-row__main">
+                        <strong>{ed.employee.name} <small style={{ color: "#888" }}>({ed.employee.id})</small></strong>
+                        <p>主机: {ed.employee.hostname} | 标签: {ed.employee.labels.length > 0 ? ed.employee.labels.join(", ") : "无"}</p>
+                        <p>完成: {ed.completed} | 失败: {ed.failed} | 总任务: {ed.total}</p>
                       </div>
-                    );
-                  })
+                      <div className="task-row__side">
+                        <span className={`status-pill ${ed.employee.status}`}>{ed.employee.status}</span>
+                        <small>{new Date(ed.employee.lastSeenAt).toLocaleTimeString()}</small>
+                      </div>
+                    </div>
+                  ))
                 )}
               </div>
             </section>
           </main>
         )}
-        {activePage === "errors" && (() => {
-          const errorTasks = Object.values(tasks).filter(
-            (t) => ["failed", "timeout", "cancelled"].includes(t.status),
-          );
-          return (
+        {activePage === "errors" && (
             <main className="task-log-page">
               <section className="task-log-panel">
                 <div className="section-title-row">
@@ -1328,18 +1408,8 @@ export default function App() {
                 </div>
               </section>
             </main>
-          );
-        })()}
-        {activePage === "stats" && (() => {
-          const allTasks = Object.values(tasks);
-          const total = allTasks.length;
-          const completed = allTasks.filter((t) => t.status === "completed").length;
-          const failed = allTasks.filter((t) => ["failed", "timeout", "cancelled"].includes(t.status)).length;
-          const running = allTasks.filter((t) => t.status === "running").length;
-          const totalCost = allTasks.reduce((sum, t) => sum + (t.totalCostUsd ?? 0), 0);
-          const totalDurationMs = allTasks.filter((t) => t.durationMs != null).reduce((sum, t) => sum + (t.durationMs ?? 0), 0);
-          const avgDuration = completed > 0 ? totalDurationMs / completed : 0;
-          return (
+        )}
+        {activePage === "stats" && (
             <main className="task-log-page">
               <section className="task-log-panel">
                 <div className="section-title-row">
@@ -1350,12 +1420,12 @@ export default function App() {
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 12, marginBottom: 16 }}>
                   {[
-                    { label: "总任务", value: total, color: "#6366f1" },
-                    { label: "已完成", value: completed, color: "#22c55e" },
-                    { label: "失败/超时", value: failed, color: "#ef4444" },
-                    { label: "执行中", value: running, color: "#f59e0b" },
-                    { label: "总费用", value: `$${totalCost.toFixed(4)}`, color: "#8b5cf6" },
-                    { label: "平均耗时", value: avgDuration > 0 ? `${(avgDuration / 1000).toFixed(1)}s` : "-", color: "#06b6d4" },
+                    { label: "总任务", value: statsData.total, color: "#6366f1" },
+                    { label: "已完成", value: statsData.completed, color: "#22c55e" },
+                    { label: "失败/超时", value: statsData.failed, color: "#ef4444" },
+                    { label: "执行中", value: statsData.running, color: "#f59e0b" },
+                    { label: "总费用", value: `$${statsData.totalCost.toFixed(4)}`, color: "#8b5cf6" },
+                    { label: "平均耗时", value: statsData.avgDuration > 0 ? `${(statsData.avgDuration / 1000).toFixed(1)}s` : "-", color: "#06b6d4" },
                   ].map((card) => (
                     <div key={card.label} style={{ background: "#1e1e2e", borderRadius: 8, padding: 16, textAlign: "center" }}>
                       <div style={{ fontSize: 24, fontWeight: 700, color: card.color }}>{card.value}</div>
@@ -1370,32 +1440,22 @@ export default function App() {
                   {employeeList.length === 0 ? (
                     <div className="history-empty">暂无员工。</div>
                   ) : (
-                    employeeList.map((emp) => {
-                      const empTasks = allTasks.filter((t) => t.employeeId === emp.id);
-                      const empCompleted = empTasks.filter((t) => t.status === "completed").length;
-                      const empFailed = empTasks.filter((t) => ["failed", "timeout", "cancelled"].includes(t.status)).length;
-                      const empCost = empTasks.reduce((s, t) => s + (t.totalCostUsd ?? 0), 0);
-                      const empAvgMs = empCompleted > 0
-                        ? empTasks.filter((t) => t.durationMs != null).reduce((s, t) => s + (t.durationMs ?? 0), 0) / empCompleted
-                        : 0;
-                      return (
-                        <div className="task-row" key={emp.id} style={{ gap: 12 }}>
-                          <div className="task-row__main">
-                            <strong>{emp.name}</strong>
-                            <p>完成: {empCompleted} | 失败: {empFailed} | 费用: ${empCost.toFixed(4)} | 平均耗时: {empAvgMs > 0 ? `${(empAvgMs / 1000).toFixed(1)}s` : "-"}</p>
-                          </div>
-                          <div className="task-row__side">
-                            <span className={`status-pill ${emp.status}`}>{emp.status}</span>
-                          </div>
+                    statsData.employeeStats.map((es) => (
+                      <div className="task-row" key={es.employee.id} style={{ gap: 12 }}>
+                        <div className="task-row__main">
+                          <strong>{es.employee.name}</strong>
+                          <p>完成: {es.completed} | 失败: {es.failed} | 费用: ${es.cost.toFixed(4)} | 平均耗时: {es.avgMs > 0 ? `${(es.avgMs / 1000).toFixed(1)}s` : "-"}</p>
                         </div>
-                      );
-                    })
+                        <div className="task-row__side">
+                          <span className={`status-pill ${es.employee.status}`}>{es.employee.status}</span>
+                        </div>
+                      </div>
+                    ))
                   )}
                 </div>
               </section>
             </main>
-          );
-        })()}
+        )}
         {activePage === "schedules" && (
           <main className="task-log-page">
             <section className="task-log-panel">

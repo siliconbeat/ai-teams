@@ -196,7 +196,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     return {
       employees: [...state.employees.values()],
       tasks: [...state.tasks.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
-      logs: Object.fromEntries(state.taskLogs.entries()),
+      logs: {},
     };
   }
 
@@ -370,7 +370,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     {
       schema: {
         tags: ["tasks"],
-        summary: "Get current employees, tasks, and task logs",
+        summary: "Get current employees and tasks",
         response: {
           200: snapshotSchema,
           401: errorResponseSchema,
