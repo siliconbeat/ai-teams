@@ -13,7 +13,7 @@ import {
   TaskStatus,
 } from "@ai-teams/shared";
 import { XProvider } from "@ant-design/x";
-import { ConfigProvider, theme } from "antd";
+import { Avatar, ConfigProvider, theme } from "antd";
 import { Bubble, ThoughtChain, Sender, Suggestion } from "@ant-design/x";
 import type { BubbleProps } from "@ant-design/x";
 
@@ -689,11 +689,13 @@ export default function App() {
         key: item.id,
         role: isLeader ? "user" as const : "ai" as const,
         content: item.content,
-        ...(isLeader && item.executingBy?.length ? { executingBy: item.executingBy } : {}),
-        ...(!isLeader && item.status ? { taskStatus: item.status } : {}),
-        ...(isLeader && item.target ? { target: item.target } : {}),
-        createdAt: item.createdAt,
-        author: item.author,
+        extraInfo: {
+          executingBy: isLeader && item.executingBy?.length ? item.executingBy : undefined,
+          taskStatus: !isLeader && item.status ? item.status : undefined,
+          target: isLeader && item.target ? item.target : undefined,
+          createdAt: item.createdAt,
+          author: item.author,
+        },
       };
     })
   , [chatFeed]);
@@ -1275,91 +1277,101 @@ export default function App() {
         {chatFeed.length === 0 ? (
           <div className="mobile-chat-empty">还没有发送过指令。</div>
         ) : (
-          chatFeed.map((item) =>
-            item.side === "leader" ? (
-              <div className="leader-message-wrapper" key={item.id}>
-                <div className={`chat-message leader-message ${item.status ? `task-${item.status}` : ""}`}>
-                  <p>{item.content}</p>
-                  {item.executingBy && item.executingBy.length > 0 && (
-                    <div className="chat-message__executing">
-                      {item.executingBy.map((agent) => (
-                        <span key={agent.name} className={`executing-status executing-${agent.status}`}>
-                          {agent.status === "completed" ? "✓" : agent.status === "failed" || agent.status === "timeout" ? "✗" : "●"} {agent.name} {statusLabel(agent.status)}
-                        </span>
-                      ))}
+          <Bubble.List
+            style={{ height: "100%" }}
+            autoScroll
+            items={bubbleItems}
+            role={{
+              user: {
+                placement: "end",
+                avatar: <Avatar style={{ background: "#52c41a", fontSize: 11 }}>L</Avatar>,
+                header: (_content: any, info: any) => {
+                  const item = info.extraInfo;
+                  return (
+                    <div style={{ display: "flex", justifyContent: "flex-end", gap: 4, fontSize: 11, color: "#90a1be" }}>
+                      {item.target && <span>{item.target} · </span>}
+                      <span>{item.createdAt}</span>
                     </div>
-                  )}
-                </div>
-                <span className="chat-message__time-outside">{item.target ? `${item.target} · ` : ""}{item.createdAt}</span>
-              </div>
-            ) : (
-              <div className={`chat-message employee-message ${item.status ? `task-${item.status}` : ""}`} key={item.id}>
-                <div className="chat-message__meta">
-                  <strong>{item.author}</strong>
-                  <span>{item.createdAt}</span>
-                </div>
-                <p>{item.content}</p>
-              </div>
-            )
-          )
+                  );
+                },
+                contentRender: (_content: any, info: any) => {
+                  const item = info.extraInfo;
+                  return (
+                    <div>
+                      <div style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>{String(_content)}</div>
+                      {item.executingBy?.length > 0 && (
+                        <ThoughtChain
+                          style={{ marginTop: 6 }}
+                          items={item.executingBy.map((agent: ExecutingAgent) => ({
+                            key: agent.name,
+                            title: agent.name,
+                            description: statusLabel(agent.status),
+                            status: thoughtChainStatus(agent.status),
+                          }))}
+                        />
+                      )}
+                    </div>
+                  );
+                },
+                styles: { content: { background: "linear-gradient(135deg, rgba(104, 182, 255, 0.28), rgba(121, 255, 209, 0.12))" } },
+              },
+              ai: {
+                placement: "start",
+                avatar: (_content: any, info: any) => {
+                  const item = info.extraInfo;
+                  const initial = item.author?.[0] ?? "?";
+                  return <Avatar style={{ background: "#1677ff", fontSize: 11 }}>{initial}</Avatar>;
+                },
+                header: (_content: any, info: any) => {
+                  const item = info.extraInfo;
+                  return (
+                    <div style={{ fontSize: 11, color: "#90a1be", display: "flex", gap: 4 }}>
+                      <strong style={{ color: "#c9d6f2" }}>{item.author}</strong>
+                      <span>{item.createdAt}</span>
+                    </div>
+                  );
+                },
+                contentRender: (_content: any, info: any) => {
+                  const item = info.extraInfo;
+                  const isError = item.taskStatus === "failed" || item.taskStatus === "timeout";
+                  return <div style={isError ? { color: "#ff4d4f", fontSize: 12 } : { fontSize: 12 }}>{String(_content)}</div>;
+                },
+                styles: { content: { background: "rgba(255, 255, 255, 0.06)", border: "1px solid rgba(255, 255, 255, 0.08)" } },
+              },
+            }}
+          />
         )}
       </div>
 
       {/* Mobile: command input */}
       <div className="mobile-input-bar">
-        <div className="mobile-target-row">
-          <button
-            className={`target-chip ${selectedTarget === "queue" ? "active" : ""}`}
-            onClick={selectQueueTarget}
-          >
-            队列
-          </button>
-          <button
-            className={`target-chip ${selectedTarget === "all" ? "active" : ""}`}
-            onClick={selectAllTargets}
-          >
-            全部
-          </button>
-          {employeeList.map((employee) => {
-            const selected = selectedTarget !== "all" && selectedTarget !== "queue" && selectedTarget.includes(employee.id);
-            return (
-              <button
-                className={`target-chip ${selected ? "active" : ""}`}
-                key={employee.id}
-                onClick={() => toggleTarget(employee.id)}
-              >
-                {employee.name}
-              </button>
-            );
-          })}
-        </div>
-        <div className="mobile-input-row">
-          <textarea
-            ref={mobileTextareaRef}
-            value={draft.prompt}
-            onChange={(event) => {
-              setDraft((current) => ({ ...current, prompt: event.target.value }));
-              event.target.style.height = "auto";
-              event.target.style.height = Math.min(event.target.scrollHeight, 120) + "px";
-            }}
-            placeholder="输入指令..."
-            rows={1}
-            onKeyDown={(event) => {
-              if (event.key !== "Enter" || event.altKey || event.nativeEvent.isComposing) {
-                return;
-              }
-              event.preventDefault();
-              sendCommand();
-            }}
-          />
-          <button
-            className="send-btn"
-            onClick={sendCommand}
-            disabled={!draft.prompt.trim()}
-          >
-            ▲
-          </button>
-        </div>
+        <Suggestion
+          items={suggestionItems}
+          open={suggestionOpen}
+          onOpenChange={setSuggestionOpen}
+          onSelect={handleSuggestionSelect}
+        >
+          {({ onTrigger, onKeyDown }) => (
+            <Sender
+              value={draft.prompt}
+              onChange={(val) => {
+                setDraft((c) => ({ ...c, prompt: val }));
+                const lastAtIndex = val.lastIndexOf("@");
+                if (lastAtIndex !== -1) {
+                  const afterAt = val.slice(lastAtIndex + 1);
+                  if (!afterAt.includes(" ")) {
+                    onTrigger(val);
+                  }
+                }
+              }}
+              onKeyDown={onKeyDown}
+              onSubmit={() => sendCommand()}
+              submitType="enter"
+              placeholder="输入指令... @ 选择目标"
+              style={{ flexShrink: 0 }}
+            />
+          )}
+        </Suggestion>
       </div>
 
       <div className="workspace-panel">
@@ -1761,7 +1773,7 @@ export default function App() {
           <div className="chat-header">
             <div>
               <h2>Leader 群聊指挥中心</h2>
-              <p>目标可单独选择，也可在输入中使用 <code>@Alice</code> 合并目标。</p>
+              <p>输入 <code>@</code> 选择目标，或直接发送到任务队列。</p>
             </div>
             <button className="secondary-button" onClick={clearToken}>
               切换 Token
@@ -1771,89 +1783,119 @@ export default function App() {
             {chatFeed.length === 0 ? (
               <div className="chat-empty">还没有发送过指令。</div>
             ) : (
-              chatFeed.map((item) =>
-                item.side === "leader" ? (
-                  <div className="leader-message-wrapper" key={item.id}>
-                    <div className={`chat-message leader-message ${item.status ? `task-${item.status}` : ""}`}>
-                      <p>{item.content}</p>
-                      {item.executingBy && item.executingBy.length > 0 && (
-                        <div className="chat-message__executing">
-                          {item.executingBy.map((agent) => (
-                            <span key={agent.name} className={`executing-status executing-${agent.status}`}>
-                              {agent.status === "completed" ? "✓" : agent.status === "failed" || agent.status === "timeout" ? "✗" : "●"} {agent.name} {statusLabel(agent.status)}
-                            </span>
-                          ))}
+              <Bubble.List
+                style={{ height: "100%" }}
+                autoScroll
+                items={bubbleItems}
+                role={{
+                  user: {
+                    placement: "end",
+                    avatar: <Avatar style={{ background: "#52c41a", fontSize: 12 }}>L</Avatar>,
+                    header: (_content: any, info: any) => {
+                      const item = info.extraInfo;
+                      return (
+                        <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, fontSize: 12, color: "#90a1be" }}>
+                          {item.target && <span>{item.target} · </span>}
+                          <span>{item.createdAt}</span>
                         </div>
-                      )}
-                    </div>
-                    <span className="chat-message__time-outside">{item.target ? `${item.target} · ` : ""}{item.createdAt}</span>
-                  </div>
-                ) : (
-                  <div className={`chat-message employee-message ${item.status ? `task-${item.status}` : ""}`} key={item.id}>
-                    <div className="chat-message__meta">
-                      <strong>{item.author}</strong>
-                      <span>{item.createdAt}</span>
-                    </div>
-                    <p>{item.content}</p>
-                  </div>
-                )
-              )
+                      );
+                    },
+                    contentRender: (_content: any, info: any) => {
+                      const item = info.extraInfo;
+                      return (
+                        <div>
+                          <div style={{ whiteSpace: "pre-wrap" }}>{String(_content)}</div>
+                          {item.executingBy?.length > 0 && (
+                            <ThoughtChain
+                              style={{ marginTop: 8 }}
+                              items={item.executingBy.map((agent: ExecutingAgent) => ({
+                                key: agent.name,
+                                title: agent.name,
+                                description: statusLabel(agent.status),
+                                status: thoughtChainStatus(agent.status),
+                                collapsible: item.executingBy.length > 2,
+                              }))}
+                            />
+                          )}
+                        </div>
+                      );
+                    },
+                    styles: { content: { background: "linear-gradient(135deg, rgba(104, 182, 255, 0.28), rgba(121, 255, 209, 0.12))" } },
+                  },
+                  ai: {
+                    placement: "start",
+                    avatar: (_content: any, info: any) => {
+                      const item = info.extraInfo;
+                      const initial = item.author?.[0] ?? "?";
+                      return <Avatar style={{ background: "#1677ff", fontSize: 12 }}>{initial}</Avatar>;
+                    },
+                    header: (_content: any, info: any) => {
+                      const item = info.extraInfo;
+                      return (
+                        <div style={{ fontSize: 12, color: "#90a1be", display: "flex", gap: 6 }}>
+                          <strong style={{ color: "#c9d6f2" }}>{item.author}</strong>
+                          <span>{item.createdAt}</span>
+                        </div>
+                      );
+                    },
+                    contentRender: (_content: any, info: any) => {
+                      const item = info.extraInfo;
+                      const isError = item.taskStatus === "failed" || item.taskStatus === "timeout";
+                      return (
+                        <div style={isError ? { color: "#ff4d4f" } : undefined}>
+                          {String(_content)}
+                        </div>
+                      );
+                    },
+                    styles: {
+                      content: {
+                        background: "rgba(255, 255, 255, 0.06)",
+                        border: "1px solid rgba(255, 255, 255, 0.08)",
+                      },
+                    },
+                  },
+                }}
+              />
             )}
           </div>
           <div className="chat-composer">
-            <div className="target-picker">
-              <button
-                className={`target-chip ${selectedTarget === "queue" ? "active" : ""}`}
-                onClick={selectQueueTarget}
-              >
-                任务队列
-              </button>
-              <button
-                className={`target-chip ${selectedTarget === "all" ? "active" : ""}`}
-                onClick={selectAllTargets}
-              >
-                @所有员工
-              </button>
-              {employeeList.map((employee) => {
-                const selected = selectedTarget !== "all" && selectedTarget !== "queue" && selectedTarget.includes(employee.id);
-                return (
-                  <button
-                    className={`target-chip ${selected ? "active" : ""}`}
-                    key={employee.id}
-                    onClick={() => toggleTarget(employee.id)}
-                  >
-                    {employee.name}
-                  </button>
-                );
-              })}
-            </div>
-            <label className="field">
-              <span>工作目录（可选）</span>
-              <input
-                value={draft.workspace}
-                onChange={(event) => setDraft((current) => ({ ...current, workspace: event.target.value }))}
-                placeholder="/Users/junhang/workspace/project"
-              />
-            </label>
-            <label className="field">
-              <span>群聊输入</span>
-              <textarea
-                value={draft.prompt}
-                onChange={(event) => setDraft((current) => ({ ...current, prompt: event.target.value }))}
-                placeholder="按 Enter 发送；Option/Alt + Enter 换行。默认进入任务队列，由一个空闲 Agent 执行；输入 @Alice 或选择 Agent 可指定会话。"
-                rows={5}
-                onKeyDown={(event) => {
-                  if (event.key !== "Enter" || event.altKey || event.nativeEvent.isComposing) {
-                    return;
+            <Suggestion
+              items={suggestionItems}
+              open={suggestionOpen}
+              onOpenChange={setSuggestionOpen}
+              onSelect={handleSuggestionSelect}
+            >
+              {({ onTrigger, onKeyDown }) => (
+                <Sender
+                  value={draft.prompt}
+                  onChange={(val) => {
+                    setDraft((c) => ({ ...c, prompt: val }));
+                    const lastAtIndex = val.lastIndexOf("@");
+                    if (lastAtIndex !== -1) {
+                      const afterAt = val.slice(lastAtIndex + 1);
+                      if (!afterAt.includes(" ")) {
+                        onTrigger(val);
+                      }
+                    }
+                  }}
+                  onKeyDown={onKeyDown}
+                  onSubmit={() => sendCommand()}
+                  submitType="enter"
+                  placeholder="按 Enter 发送；Option/Alt + Enter 换行。输入 @ 选择目标..."
+                  header={
+                    <Sender.Header title="工作目录" open={false}>
+                      <input
+                        value={draft.workspace}
+                        onChange={(e) => setDraft((c) => ({ ...c, workspace: e.target.value }))}
+                        placeholder="/Users/junhang/workspace/project"
+                        style={{ width: "100%", padding: "4px 8px", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 6, color: "#eef4ff", fontSize: 12 }}
+                      />
+                    </Sender.Header>
                   }
-                  event.preventDefault();
-                  sendCommand();
-                }}
-              />
-            </label>
-            <button className="primary-button" onClick={sendCommand}>
-              发送到群聊
-            </button>
+                  style={{ flexShrink: 0 }}
+                />
+              )}
+            </Suggestion>
           </div>
         </div>
       </aside>
