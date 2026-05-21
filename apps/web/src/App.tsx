@@ -12,6 +12,10 @@ import {
   TaskRecord,
   TaskStatus,
 } from "@ai-teams/shared";
+import { XProvider } from "@ant-design/x";
+import { ConfigProvider, theme } from "antd";
+import { Bubble, ThoughtChain, Sender, Suggestion } from "@ant-design/x";
+import type { BubbleProps } from "@ant-design/x";
 
 // ---------------------------------------------------------------------------
 // Web Crypto E2E decryption (AES-256-GCM)
@@ -387,6 +391,7 @@ export default function App() {
     name: "", cron: "", prompt: "", targetMode: "queue", targetAgents: [], workspace: "", timeoutSec: "", enabled: true,
   });
   const [scheduleError, setScheduleError] = useState<string | null>(null);
+  const [suggestionOpen, setSuggestionOpen] = useState(false);
   const terminalLogsRef = useRef(terminalLogs);
   terminalLogsRef.current = terminalLogs;
   const wsRef = useRef<WebSocket | null>(null);
@@ -677,6 +682,59 @@ export default function App() {
     return [...leaderItems, ...employeeItems].sort((a, b) => a.createdAtMs - b.createdAtMs).slice(-CHAT_FEED_LIMIT);
   }, [employees, tasks]);
 
+  const bubbleItems = useMemo(() =>
+    chatFeed.map((item) => {
+      const isLeader = item.side === "leader";
+      return {
+        key: item.id,
+        role: isLeader ? "user" as const : "ai" as const,
+        content: item.content,
+        ...(isLeader && item.executingBy?.length ? { executingBy: item.executingBy } : {}),
+        ...(!isLeader && item.status ? { taskStatus: item.status } : {}),
+        ...(isLeader && item.target ? { target: item.target } : {}),
+        createdAt: item.createdAt,
+        author: item.author,
+      };
+    })
+  , [chatFeed]);
+
+  const suggestionItems = useMemo(() => [
+    { label: "任务队列", value: "queue", description: "Round-robin to idle agents" },
+    { label: "@所有员工", value: "all", description: "Broadcast to all online agents" },
+    ...employeeList.map((emp) => ({
+      label: `@${emp.name}`,
+      value: emp.id,
+      description: `Direct — ${emp.status === "online" ? "online" : "offline"}`,
+      disabled: emp.status === "offline",
+    })),
+  ], [employeeList]);
+
+  const handleSuggestionTrigger = (inputText: string) => {
+    const atIndex = inputText.lastIndexOf("@");
+    if (atIndex === -1) return false;
+    return inputText.slice(atIndex + 1);
+  };
+
+  const handleSuggestionSelect = (value: string) => {
+    if (value === "queue") {
+      setSelectedTarget("queue");
+    } else if (value === "all") {
+      setSelectedTarget("all");
+    } else {
+      const emp = employees[value];
+      if (!emp) return;
+      setSelectedTarget((current) => {
+        const currentIds = current === "all" || current === "queue" ? [] : current;
+        return currentIds.includes(value) ? currentIds : [...currentIds, value];
+      });
+      const atName = `@${emp.name}`;
+      if (!draft.prompt.includes(atName)) {
+        setDraft((c) => ({ ...c, prompt: c.prompt ? `${c.prompt} ${atName}` : atName }));
+      }
+    }
+    setSuggestionOpen(false);
+  };
+
   function formatTarget(target: AgentTarget, employeeMap: Record<string, EmployeeSnapshot>) {
     if (target === "queue") {
       return "任务队列";
@@ -713,6 +771,13 @@ export default function App() {
       case "cancelled": return "已取消";
       default: return status;
     }
+  }
+
+  function thoughtChainStatus(status: TaskStatus): "success" | "error" | "loading" | undefined {
+    if (status === "completed") return "success";
+    if (status === "failed" || status === "timeout") return "error";
+    if (status === "running") return "loading";
+    return undefined;
   }
 
   function buildTaskHeader(task: TaskRecord) {
@@ -1099,12 +1164,14 @@ export default function App() {
   });
 
   return (
-    <div className="app-shell">
-      {showReconnect && !connected && (
-        <div className="reconnect-overlay" onClick={() => window.location.reload()}>
-          刷新
-        </div>
-      )}
+    <ConfigProvider theme={{ algorithm: theme.darkAlgorithm }}>
+      <XProvider>
+        <div className="app-shell">
+          {showReconnect && !connected && (
+            <div className="reconnect-overlay" onClick={() => window.location.reload()}>
+              刷新
+            </div>
+          )}
       <header className="topbar">
         <div className="brand">
           <span className="brand-badge">AI</span>
@@ -1790,6 +1857,8 @@ export default function App() {
           </div>
         </div>
       </aside>
-    </div>
+        </div>
+      </XProvider>
+    </ConfigProvider>
   );
 }
