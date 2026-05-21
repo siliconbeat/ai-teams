@@ -13,6 +13,7 @@ import {
   TaskStatus,
 } from "@ai-teams/shared";
 import { XProvider } from "@ant-design/x";
+import { CopyOutlined } from "@ant-design/icons";
 import { App as AntApp, Avatar, ConfigProvider, theme } from "antd";
 import { Bubble, ThoughtChain, Sender, Suggestion } from "@ant-design/x";
 import type { BubbleProps } from "@ant-design/x";
@@ -660,7 +661,7 @@ export default function App() {
       if (targetMode === "queue") {
         target = "任务队列";
       } else if (targetMode === "broadcast") {
-        target = "@全部员工";
+        target = "@All";
       } else {
         target = groupTasks
           .map((t) => (t.employeeId ? `@${employees[t.employeeId]?.name ?? t.employeeId}` : ""))
@@ -725,8 +726,7 @@ export default function App() {
     }
     const search = keyword.startsWith("@") ? keyword.slice(1).toLowerCase() : keyword.toLowerCase();
     return [
-      { label: "@任务队列", value: "queue", description: "Round-robin to idle agents" },
-      { label: "@所有员工", value: "all", description: "Broadcast to all online agents" },
+      { label: "@All", value: "all", description: "Broadcast to all online agents" },
       ...employeeList
         .filter((emp) => emp.name.toLowerCase().includes(search))
         .map((emp) => ({
@@ -744,7 +744,7 @@ export default function App() {
       insertText = "/code-review ";
     } else if (value === "all") {
       setSelectedTarget("all");
-      insertText = "@所有员工 ";
+      insertText = "@All ";
     } else {
       const emp = employees[value];
       if (!emp) return;
@@ -765,7 +765,7 @@ export default function App() {
       return "任务队列";
     }
     if (target === "all") {
-      return "@全部员工";
+      return "@All";
     }
     return target.map((id) => `@${employeeMap[id]?.name ?? id}`).join(" ");
   }
@@ -944,7 +944,7 @@ export default function App() {
     }
 
     const resolved = resolveAtAgentsFromPrompt(draft.prompt.trim(), employeeList, selectedTarget);
-    const commandPrompt = resolved.prompt || draft.prompt.trim();
+    const commandPrompt = (resolved.prompt || draft.prompt.trim()).replace(/@all\s*/gi, "").trim();
     const payload: LeaderToServerMessage = {
       type: "command.dispatch",
       atAgents: resolved.atAgents,
@@ -1290,7 +1290,7 @@ export default function App() {
                 contentRender: (_content: any, info: any) => {
                   const item = info.extraInfo;
                   return (
-                    <div>
+                    <div className="bubble-copy-wrap">
                       <div style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>{String(_content)}</div>
                       {item.executingBy?.length > 0 && (
                         <ThoughtChain
@@ -1302,6 +1302,9 @@ export default function App() {
                           }))}
                         />
                       )}
+                      <button className="bubble-copy-btn" onClick={() => navigator.clipboard.writeText(String(_content))}>
+                        <CopyOutlined />
+                      </button>
                     </div>
                   );
                 },
@@ -1326,7 +1329,14 @@ export default function App() {
                 contentRender: (_content: any, info: any) => {
                   const item = info.extraInfo;
                   const isError = item.taskStatus === "failed" || item.taskStatus === "timeout";
-                  return <div style={isError ? { color: "#ff4d4f", fontSize: 12 } : { fontSize: 12 }}><XMarkdown content={String(_content)} /></div>;
+                  return (
+                    <div className="bubble-copy-wrap">
+                      <div style={isError ? { color: "#ff4d4f", fontSize: 12 } : { fontSize: 12 }}><XMarkdown content={String(_content)} /></div>
+                      <button className="bubble-copy-btn" onClick={() => navigator.clipboard.writeText(String(_content))}>
+                        <CopyOutlined />
+                      </button>
+                    </div>
+                  );
                 },
                 styles: { root: { width: "100%" },
                       body: { width: "100%" }, content: { background: "rgba(255, 255, 255, 0.06)", border: "1px solid rgba(255, 255, 255, 0.08)" } },
@@ -1802,7 +1812,7 @@ export default function App() {
                     contentRender: (_content: any, info: any) => {
                       const item = info.extraInfo;
                       return (
-                        <div>
+                        <div className="bubble-copy-wrap">
                           <div style={{ whiteSpace: "pre-wrap" }}>{String(_content)}</div>
                           {item.executingBy?.length > 0 && (
                             <ThoughtChain
@@ -1815,6 +1825,9 @@ export default function App() {
                               }))}
                             />
                           )}
+                          <button className="bubble-copy-btn" onClick={() => navigator.clipboard.writeText(String(_content))}>
+                            <CopyOutlined />
+                          </button>
                         </div>
                       );
                     },
@@ -1840,8 +1853,13 @@ export default function App() {
                       const item = info.extraInfo;
                       const isError = item.taskStatus === "failed" || item.taskStatus === "timeout";
                       return (
-                        <div style={isError ? { color: "#ff4d4f" } : undefined}>
-                          <XMarkdown content={String(_content)} />
+                        <div className="bubble-copy-wrap">
+                          <div style={isError ? { color: "#ff4d4f" } : undefined}>
+                            <XMarkdown content={String(_content)} />
+                          </div>
+                          <button className="bubble-copy-btn" onClick={() => navigator.clipboard.writeText(String(_content))}>
+                            <CopyOutlined />
+                          </button>
                         </div>
                       );
                     },

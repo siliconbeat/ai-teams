@@ -600,6 +600,47 @@ a.nav-item {
   border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+/* Bubble copy button */
+.bubble-copy-wrap {
+  position: relative;
+}
+
+.bubble-copy-btn {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  opacity: 0;
+  transition: opacity 0.2s;
+  background: rgba(0, 0, 0, 0.45);
+  border: none;
+  border-radius: 4px;
+  padding: 3px 5px;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 11px;
+  cursor: pointer;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+}
+
+.bubble-copy-wrap:hover .bubble-copy-btn {
+  opacity: 1;
+}
+
+.bubble-copy-btn:hover {
+  color: #fff;
+  background: rgba(0, 0, 0, 0.65);
+}
+
+/* ThoughtChain agent status — smaller & lighter */
+.ant-thought-chain .ant-thought-chain-node-icon {
+  font-size: 12px;
+}
+.ant-thought-chain .ant-thought-chain-node-title {
+  font-size: 12px;
+  color: #90a1be;
+}
+
 /* @ant-design/x overrides */
 .chat-list .ant-bubble-list {
   height: 100%;
