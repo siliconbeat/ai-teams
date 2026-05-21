@@ -800,6 +800,21 @@ a.nav-item {
   color: #ffb3b3;
 }
 
+.retry-btn {
+  padding: 3px 10px;
+  border: 1px solid rgba(255, 179, 179, 0.4);
+  border-radius: 4px;
+  background: transparent;
+  color: #ffb3b3;
+  cursor: pointer;
+  font-size: 12px;
+  transition: background 0.15s, border-color 0.15s;
+}
+.retry-btn:hover {
+  background: rgba(255, 179, 179, 0.1);
+  border-color: rgba(255, 179, 179, 0.7);
+}
+
 .history-item {
   border-radius: 10px;
   padding: 10px;

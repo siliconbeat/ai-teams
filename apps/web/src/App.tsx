@@ -927,6 +927,25 @@ export default function App() {
     }).catch(() => { alert("网络请求失败"); });
   }, [authToken]);
 
+  const retryTask = useCallback((task: TaskRecord) => {
+    const body: Record<string, unknown> = {
+      prompt: task.prompt,
+    };
+    if (task.targetMode === "direct" && task.employeeId) {
+      body.atAgents = [task.employeeId];
+    }
+    if (task.cliConfig) {
+      body.cliConfig = task.cliConfig;
+    }
+    fetch("/api/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
+      body: JSON.stringify(body),
+    }).then((res) => {
+      if (!res.ok) return res.json().then((d) => { alert(d.message || "重试失败"); });
+    }).catch(() => { alert("网络请求失败"); });
+  }, [authToken]);
+
   useEffect(() => {
     const timer = setTimeout(() => {
       localStorage.setItem(TERMINAL_LOG_STORAGE_KEY, JSON.stringify(terminalLogs));
@@ -1347,6 +1366,9 @@ export default function App() {
                       <div className="task-row__side">
                         <span className={`status-pill ${task.status}`}>{task.status}</span>
                         <small>{new Date(task.createdAt).toLocaleTimeString()}</small>
+                        {task.status === "failed" && (
+                          <button className="retry-btn" onClick={() => retryTask(task)}>重试</button>
+                        )}
                       </div>
                     </div>
                   ))
