@@ -1365,12 +1365,12 @@ export default function App() {
                   onTrigger(e.key);
                 }
                 onKeyDown(e);
-                if (e.key === "Enter" && !e.defaultPrevented && suggestionOpen) {
+                if (e.key === "Enter" && !e.altKey && !e.nativeEvent.isComposing) {
+                  if (e.defaultPrevented) return;
                   e.preventDefault();
+                  sendCommand();
                 }
               }}
-              onSubmit={() => sendCommand()}
-              submitType="enter"
               placeholder="输入指令... @ 目标 / 命令"
               style={{ flexShrink: 0 }}
             />
@@ -1885,12 +1885,12 @@ export default function App() {
                       onTrigger(e.key);
                     }
                     onKeyDown(e);
-                    if (e.key === "Enter" && !e.defaultPrevented && suggestionOpen) {
+                    if (e.key === "Enter" && !e.altKey && !e.nativeEvent.isComposing) {
+                      if (e.defaultPrevented) return;
                       e.preventDefault();
+                      sendCommand();
                     }
                   }}
-                  onSubmit={() => sendCommand()}
-                  submitType="enter"
                   placeholder="按 Enter 发送；@ 选择目标 / 使用命令..."
                   header={
                     <Sender.Header title="工作目录" open={false}>
