@@ -116,6 +116,7 @@ type ChatFeedItem = {
   createdAtMs: number;
   status?: TaskStatus;
   executingBy?: ExecutingAgent[];
+  quotedPrompt?: string;
 };
 
 type EmployeeTerminalLog = {
@@ -693,6 +694,7 @@ export default function App() {
         createdAt: new Date(task.finishedAt ?? task.createdAt).toLocaleTimeString(),
         createdAtMs: new Date(task.finishedAt ?? task.createdAt).getTime(),
         status: task.status,
+        quotedPrompt: task.prompt,
       }));
 
     return [...leaderItems, ...employeeItems].sort((a, b) => a.createdAtMs - b.createdAtMs).slice(-CHAT_FEED_LIMIT);
@@ -709,6 +711,7 @@ export default function App() {
           executingBy: isLeader && item.executingBy?.length ? item.executingBy : undefined,
           taskStatus: !isLeader && item.status ? item.status : undefined,
           target: isLeader && item.target ? item.target : undefined,
+          quotedPrompt: !isLeader ? item.quotedPrompt : undefined,
           createdAt: item.createdAt,
           author: item.author,
         },
@@ -1331,6 +1334,7 @@ export default function App() {
                   const isError = item.taskStatus === "failed" || item.taskStatus === "timeout";
                   return (
                     <div className="bubble-copy-wrap">
+                      {item.quotedPrompt && <div className="bubble-quote">{item.quotedPrompt.length > 60 ? item.quotedPrompt.slice(0, 60) + "..." : item.quotedPrompt}</div>}
                       <div style={isError ? { color: "#ff4d4f", fontSize: 12 } : { fontSize: 12 }}><XMarkdown content={String(_content)} /></div>
                       <button className="bubble-copy-btn" onClick={() => navigator.clipboard.writeText(String(_content))}>
                         <CopyOutlined />
@@ -1368,8 +1372,13 @@ export default function App() {
                 if (e.key === "@" || e.key === "/") {
                   onTrigger(e.key);
                 }
-                onKeyDown(e);
-                if (e.key === "Enter" && !e.altKey && !e.nativeEvent.isComposing) {
+                const isNavKey = suggestionOpen && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter", "Escape"].includes(e.key);
+                if (isNavKey) {
+                  onKeyDown(e);
+                } else {
+                  e.stopPropagation();
+                }
+                if (e.key === "Enter" && !e.shiftKey && !e.altKey && !e.nativeEvent.isComposing) {
                   if (e.defaultPrevented || suggestionOpen) return;
                   e.preventDefault();
                   sendCommand();
@@ -1854,6 +1863,7 @@ export default function App() {
                       const isError = item.taskStatus === "failed" || item.taskStatus === "timeout";
                       return (
                         <div className="bubble-copy-wrap">
+                          {item.quotedPrompt && <div className="bubble-quote">{item.quotedPrompt.length > 60 ? item.quotedPrompt.slice(0, 60) + "..." : item.quotedPrompt}</div>}
                           <div style={isError ? { color: "#ff4d4f" } : undefined}>
                             <XMarkdown content={String(_content)} />
                           </div>
@@ -1897,14 +1907,19 @@ export default function App() {
                     if (e.key === "@" || e.key === "/") {
                       onTrigger(e.key);
                     }
-                    onKeyDown(e);
-                    if (e.key === "Enter" && !e.altKey && !e.nativeEvent.isComposing) {
+                    const isNavKey = suggestionOpen && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter", "Escape"].includes(e.key);
+                    if (isNavKey) {
+                      onKeyDown(e);
+                    } else {
+                      e.stopPropagation();
+                    }
+                    if (e.key === "Enter" && !e.shiftKey && !e.altKey && !e.nativeEvent.isComposing) {
                       if (e.defaultPrevented || suggestionOpen) return;
                       e.preventDefault();
                       sendCommand();
                     }
                   }}
-                  placeholder="按 Enter 发送；@ 选择目标 / 使用命令..."
+                  placeholder="按 Enter 发送，Shift+Enter 换行；@ 选择目标"
                   header={
                     <Sender.Header title="工作目录" open={false}>
                       <input

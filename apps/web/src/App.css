@@ -632,6 +632,19 @@ a.nav-item {
   background: rgba(0, 0, 0, 0.65);
 }
 
+.bubble-quote {
+  padding: 4px 8px;
+  margin-bottom: 6px;
+  border-left: 2px solid rgba(99, 179, 255, 0.35);
+  border-radius: 2px;
+  background: rgba(99, 179, 255, 0.06);
+  color: #90a1be;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 /* ThoughtChain agent status — smaller & lighter */
 .ant-thought-chain .ant-thought-chain-node-icon {
   font-size: 12px;
