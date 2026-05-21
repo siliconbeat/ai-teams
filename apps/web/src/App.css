@@ -495,6 +495,16 @@ a.nav-item {
   color: #9df6b5;
 }
 
+.agent-presence.paused {
+  color: #faad14;
+  background: rgba(250, 173, 20, 0.12);
+}
+
+.meta-warning {
+  color: #faad14;
+  font-weight: 600;
+}
+
 .status-pill.offline {
   color: #f5a8a8;
 }

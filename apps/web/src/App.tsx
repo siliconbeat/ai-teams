@@ -234,6 +234,9 @@ function getAgentPresence(employee: EmployeeSnapshot, activeTask?: TaskRecord) {
   if (employee.status === "offline") {
     return { label: "离线", className: "offline" };
   }
+  if (employee.consecutiveQueueFailures >= 5) {
+    return { label: "队列暂停", className: "paused" };
+  }
   if (!activeTask) {
     return { label: "在线", className: "online" };
   }
@@ -293,6 +296,7 @@ const EmployeeCard = memo(function EmployeeCard({
   terminalText,
   cancelTask,
   onResetSession,
+  onResumeQueue,
 }: {
   employee: EmployeeSnapshot;
   mainTask: TaskRecord | undefined;
@@ -301,6 +305,7 @@ const EmployeeCard = memo(function EmployeeCard({
   terminalText: string;
   cancelTask: (taskId: string) => void;
   onResetSession: (employeeId: string) => void;
+  onResumeQueue: (employeeId: string) => void;
 }) {
   const logRef = useRef<HTMLPreElement | null>(null);
   const prevTerminalText = useRef(terminalText);
@@ -339,6 +344,11 @@ const EmployeeCard = memo(function EmployeeCard({
                 <button className="card-menu-item" onClick={() => { setMenuOpen(false); onResetSession(employee.id); }}>
                   重置会话
                 </button>
+                {employee.consecutiveQueueFailures >= 5 && (
+                  <button className="card-menu-item" onClick={() => { setMenuOpen(false); onResumeQueue(employee.id); }}>
+                    恢复队列
+                  </button>
+                )}
               </div>
             </>
           )}
@@ -348,6 +358,9 @@ const EmployeeCard = memo(function EmployeeCard({
         <span>{employee.hostname}</span>
         <span>ID: {employee.id}{employee.version ? ` · v${employee.version}` : ""}</span>
         <span>标签: {employee.labels.join(", ") || "未设置"}</span>
+        {employee.consecutiveQueueFailures >= 5 && (
+          <span className="meta-warning">连续失败: {employee.consecutiveQueueFailures} 次</span>
+        )}
       </div>
       <SlotStrip label="主任务" task={mainTask} onCancel={cancelTask} />
       <SlotStrip label="队列" task={queueTask} onCancel={cancelTask} />
@@ -966,6 +979,15 @@ export default function App() {
     }).catch(() => { alert("网络请求失败"); });
   }, [authToken]);
 
+  const resumeQueue = useCallback((employeeId: string) => {
+    fetch(`/api/agents/${employeeId}/resume-queue`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${authToken}` },
+    }).then((res) => {
+      if (!res.ok) return res.json().then((d) => { alert(d.error || "恢复失败"); });
+    }).catch(() => { alert("网络请求失败"); });
+  }, [authToken]);
+
   const retryTask = useCallback((task: TaskRecord) => {
     const body: Record<string, unknown> = {
       prompt: task.prompt,
@@ -1364,6 +1386,7 @@ export default function App() {
                       terminalText={terminalText}
                       cancelTask={cancelTask}
                       onResetSession={resetSession}
+                      onResumeQueue={resumeQueue}
                     />
                   );
                 })
