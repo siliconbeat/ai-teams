@@ -214,9 +214,11 @@ export function createDispatch(ctx: DispatchContext) {
     }
   }
 
-  function reEnqueueOrTerminalFail(task: TaskRecord, employeeId: string | null, error: string): true | false {
+  function reEnqueueOrTerminalFail(task: TaskRecord, employeeId: string | null, error: string, options?: { clearSlot?: boolean; incrementRetry?: boolean }): true | false {
     if (task.retryCount < MAX_QUEUE_RETRY) {
-      task.retryCount += 1;
+      if (options?.incrementRetry !== false) {
+        task.retryCount += 1;
+      }
       task.status = "queued";
       task.employeeId = null;
       task.startedAt = null;
@@ -225,7 +227,7 @@ export function createDispatch(ctx: DispatchContext) {
       task.summary = task.summary ?? error;
       log.info({ taskId: task.id, retryCount: task.retryCount, error, previousEmployeeId: employeeId }, "Queue task re-enqueued after failure");
       upsertTask(task);
-      if (employeeId) {
+      if (employeeId && options?.clearSlot !== false) {
         setQueueTask(employeeId, null, null);
       }
       enqueueSharedTask(task.id);
@@ -243,12 +245,17 @@ export function createDispatch(ctx: DispatchContext) {
     clearTaskTimeout(taskId);
     const employeeId = task.employeeId;
     const isQueueTask = task.targetMode === "queue";
+    const wasRunning = task.status === "accepted" || task.status === "running";
 
-    if (isQueueTask && employeeId) {
+    // Only count as consecutive failure if the task was actually running (not a dispatch rejection)
+    if (isQueueTask && employeeId && wasRunning) {
       trackQueueFailure(employeeId);
     }
 
-    if (isQueueTask && reEnqueueOrTerminalFail(task, employeeId, error)) {
+    if (isQueueTask && reEnqueueOrTerminalFail(task, employeeId, error, {
+      clearSlot: wasRunning,
+      incrementRetry: wasRunning,
+    })) {
       return;
     }
 
@@ -313,11 +320,10 @@ export function createDispatch(ctx: DispatchContext) {
     const isQueueTask = task.targetMode === "queue";
     const error = `任务超过 ${task.timeoutSec} 秒未完成，已超时。`;
 
-    if (isQueueTask && employeeId) {
-      trackQueueFailure(employeeId);
-    }
+    // Timeout doesn't count as consecutive failure — the agent isn't broken, just slow
+    // Don't clear slot — agent hasn't processed cancel yet
 
-    if (isQueueTask && reEnqueueOrTerminalFail(current, employeeId, error)) {
+    if (isQueueTask && reEnqueueOrTerminalFail(current, employeeId, error, { clearSlot: false })) {
       return;
     }
 
@@ -879,6 +885,15 @@ export function createDispatch(ctx: DispatchContext) {
         markTaskFailed(message.taskId, message.error);
         break;
       case "task.cancelled":
+        if (task.status === "queued") {
+          // Task was already re-enqueued (e.g., after timeout), just clear the slot
+          log.info({ taskId: task.id, employeeId: task.employeeId }, "Task already re-enqueued, clearing slot from cancel response");
+          if (task.employeeId) {
+            setQueueTask(task.employeeId, null, null);
+            dispatchNextQueuedTask(task.employeeId);
+          }
+          break;
+        }
         task.status = "cancelled";
         clearTaskTimeout(task.id);
         task.finishedAt = nowIso();
