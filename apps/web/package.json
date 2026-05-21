@@ -10,6 +10,10 @@
   },
   "dependencies": {
     "@ai-teams/shared": "workspace:*",
+    "@ant-design/icons": "^6.2.3",
+    "@ant-design/x": "^2.7.0",
+    "antd": "^6.4.3",
+    "dayjs": "^1.11.20",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
