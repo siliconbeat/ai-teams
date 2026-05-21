@@ -101,7 +101,8 @@ export type ServerToEmployeeMessage =
     }
   | { type: "task.cancel"; taskId: string }
   | { type: "queue.resume" }
-  | { type: "agent.registered"; consecutiveQueueFailures: number };
+  | { type: "agent.registered"; consecutiveQueueFailures: number }
+  | { type: "session.reset" };
 
 export type EmployeeToServerMessage =
   | {
@@ -135,7 +136,8 @@ export type EmployeeToServerMessage =
       usageCacheCreationTokens?: number | null;
     }
   | { type: "task.failed"; taskId: string; error: string }
-  | { type: "task.cancelled"; taskId: string };
+  | { type: "task.cancelled"; taskId: string }
+  | { type: "session.reset.ack"; employeeId: string };
 
 export type LeaderToServerMessage =
   | {
@@ -311,6 +313,10 @@ export function parseEmployeeToServerMessage(value: unknown): EmployeeToServerMe
     return { type, taskId: nonEmptyStringField(message, "taskId"), error: nonEmptyStringField(message, "error") };
   }
 
+  if (type === "session.reset.ack") {
+    return { type, employeeId: nonEmptyStringField(message, "employeeId") };
+  }
+
   throw new ProtocolError(`Unsupported employee message type: ${type}`);
 }
 
@@ -342,6 +348,10 @@ export function parseServerToEmployeeMessage(value: unknown): ServerToEmployeeMe
 
   if (type === "agent.registered") {
     return { type, consecutiveQueueFailures: nonNegativeNumberField(message, "consecutiveQueueFailures") };
+  }
+
+  if (type === "session.reset") {
+    return { type };
   }
 
   throw new ProtocolError(`Unsupported server-to-employee message type: ${type}`);

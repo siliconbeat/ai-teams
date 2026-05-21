@@ -288,6 +288,7 @@ const EmployeeCard = memo(function EmployeeCard({
   displayTask,
   terminalText,
   cancelTask,
+  onResetSession,
 }: {
   employee: EmployeeSnapshot;
   mainTask: TaskRecord | undefined;
@@ -295,9 +296,11 @@ const EmployeeCard = memo(function EmployeeCard({
   displayTask: TaskRecord | undefined;
   terminalText: string;
   cancelTask: (taskId: string) => void;
+  onResetSession: (employeeId: string) => void;
 }) {
   const logRef = useRef<HTMLPreElement | null>(null);
   const prevTerminalText = useRef(terminalText);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   const activeTask = mainTask ?? queueTask;
   const taskStatus = activeTask?.status ?? displayTask?.status ?? "idle";
@@ -322,6 +325,19 @@ const EmployeeCard = memo(function EmployeeCard({
         </div>
         <div className={`status-pill agent-presence ${presence.className}`}>
           {presence.label}
+        </div>
+        <div className="card-menu">
+          <button className="card-menu-btn" onClick={() => setMenuOpen((v) => !v)}>···</button>
+          {menuOpen && (
+            <>
+              <div className="card-menu-backdrop" onClick={() => setMenuOpen(false)} />
+              <div className="card-menu-dropdown">
+                <button className="card-menu-item" onClick={() => { setMenuOpen(false); onResetSession(employee.id); }}>
+                  重置会话
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </div>
       <div className="employee-meta">
@@ -900,6 +916,15 @@ export default function App() {
     });
   }, []);
 
+  const resetSession = useCallback((employeeId: string) => {
+    fetch(`/api/agents/${employeeId}/reset-session`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${authToken}` },
+    }).then((res) => {
+      if (!res.ok) return res.json().then((d) => { alert(d.error || "重置失败"); });
+    }).catch(() => { alert("网络请求失败"); });
+  }, [authToken]);
+
   useEffect(() => {
     const timer = setTimeout(() => {
       localStorage.setItem(TERMINAL_LOG_STORAGE_KEY, JSON.stringify(terminalLogs));
@@ -1278,6 +1303,7 @@ export default function App() {
                       displayTask={displayTasksByEmployee[employee.id]}
                       terminalText={terminalText}
                       cancelTask={cancelTask}
+                      onResetSession={resetSession}
                     />
                   );
                 })

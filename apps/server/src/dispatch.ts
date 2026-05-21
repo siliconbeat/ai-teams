@@ -802,6 +802,11 @@ export function createDispatch(ctx: DispatchContext) {
       return;
     }
 
+    if (message.type === "session.reset.ack") {
+      log.info({ employeeId: message.employeeId }, "Agent acknowledged session reset");
+      return;
+    }
+
     if (!taskBelongsToSocket(message.taskId, socketEmployeeId, socket)) {
       socket.close(1008, "task_owner_mismatch");
       return;
@@ -1082,6 +1087,19 @@ export function createDispatch(ctx: DispatchContext) {
     return { ok: true };
   }
 
+  function resetAgentSession(employeeId: string): { ok: true } | { ok: false; message: string } {
+    const socket = state.agentSockets.get(employeeId);
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return { ok: false, message: "Agent 不在线。" };
+    }
+    if (state.employees.get(employeeId)?.mainTaskId) {
+      return { ok: false, message: "Agent 正在执行主任务，请等待任务完成后再重置。" };
+    }
+    sendJson<ServerToEmployeeMessage>(socket, { type: "session.reset" }, ctx.encryptor);
+    log.info({ employeeId }, "Session reset requested");
+    return { ok: true };
+  }
+
   return {
     dispatchLeaderCommand,
     handleAgentMessage,
@@ -1089,6 +1107,7 @@ export function createDispatch(ctx: DispatchContext) {
     cancelTaskById,
     startDisconnectRecovery,
     resumeAgentQueue,
+    resetAgentSession,
     cleanup() {
       for (const timer of retryDelays.values()) {
         clearTimeout(timer);

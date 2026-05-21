@@ -163,7 +163,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     disconnectGraceMs,
     encryptor: createEncryptor(process.env.AI_TEAMS_ENCRYPTION_KEY),
   };
-  const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage, cancelTaskById, startDisconnectRecovery, resumeAgentQueue, cleanup: dispatchCleanup } = createDispatch(dispatchCtx);
+  const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage, cancelTaskById, startDisconnectRecovery, resumeAgentQueue, resetAgentSession, cleanup: dispatchCleanup } = createDispatch(dispatchCtx);
 
   const scheduleDispatchFn: ScheduleDispatchFn = (message, webhookUrl, cliConfig, priority, requiredLabels) => {
     return dispatchLeaderCommand(message, webhookUrl, cliConfig, priority, requiredLabels);
@@ -661,6 +661,35 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
       const result = resumeAgentQueue(request.params.employeeId);
       if (!result.ok) {
         return reply.code(404).send({ error: result.message });
+      }
+      return { ok: true };
+    },
+  );
+
+  app.post<{ Params: { employeeId: string } }>(
+    "/api/agents/:employeeId/reset-session",
+    {
+      schema: {
+        tags: ["agents"],
+        summary: "Reset an agent's main task Claude session",
+        params: {
+          type: "object",
+          required: ["employeeId"],
+          properties: { employeeId: { type: "string", minLength: 1 } },
+        },
+        response: {
+          200: { type: "object", required: ["ok"], properties: { ok: { type: "boolean" } } },
+          404: errorResponseSchema,
+          409: errorResponseSchema,
+          401: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const result = resetAgentSession(request.params.employeeId);
+      if (!result.ok) {
+        const code = result.message.includes("不在线") ? 404 : 409;
+        return reply.code(code).send({ error: result.message });
       }
       return { ok: true };
     },
