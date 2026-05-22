@@ -807,6 +807,60 @@ a.nav-item {
   max-height: 360px;
 }
 
+.task-output-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.task-step {
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+
+.task-step__label {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 3px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  color: #8b9cc0;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.task-step--tool .task-step__label { color: #6ec6ff; }
+.task-step--result .task-step__label { color: #4caf80; }
+.task-step--stderr .task-step__label { color: #ff6b6b; }
+.task-step--agent .task-step__label { color: #c792ea; }
+.task-step--system .task-step__label { color: #ffd54f; }
+
+.task-step__content {
+  margin: 0;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+  color: #c8d6e5;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.task-step--result .task-step__content {
+  color: #8b9cc0;
+  font-size: 11px;
+  max-height: 140px;
+}
+
+.task-step--stderr .task-step__content {
+  color: #ff8a8a;
+}
+
 .task-output-loading,
 .task-output-empty {
   color: #7f93b5;

@@ -426,7 +426,7 @@ export default function App() {
   const [scheduleError, setScheduleError] = useState<string | null>(null);
   const [suggestionOpen, setSuggestionOpen] = useState(false);
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
-  const [taskOutputCache, setTaskOutputCache] = useState<Record<string, TaskOutputChunk[]>>({});
+  const [taskOutputCache, setTaskOutputCache] = useState<Record<string, { type: string; content: string }[]>>({});
   const [taskOutputLoading, setTaskOutputLoading] = useState<string | null>(null);
   const terminalLogsRef = useRef(terminalLogs);
   terminalLogsRef.current = terminalLogs;
@@ -830,10 +830,10 @@ export default function App() {
     return `\n$ finished: ${task.status} @ ${finishedAt}${errorLine}\n`;
   }
 
-  function buildTaskOutputText(task: TaskRecord, chunks: TaskOutputChunk[]): string {
+  function buildTaskOutputText(task: TaskRecord, steps: { type: string; content: string }[]): string {
     let text = buildTaskHeader(task);
-    for (const chunk of chunks) {
-      text += chunk.content;
+    for (const step of steps) {
+      text += step.content;
     }
     if (isTerminalStatus(task.status)) {
       text += buildTaskFinishedLine(task);
@@ -849,8 +849,8 @@ export default function App() {
         headers: { Authorization: `Bearer ${authToken}` },
       });
       if (res.ok) {
-        const data = await res.json() as { taskId: string; chunks: TaskOutputChunk[] };
-        setTaskOutputCache((prev) => ({ ...prev, [taskId]: data.chunks }));
+        const data = await res.json() as { taskId: string; steps: { type: string; content: string }[] };
+        setTaskOutputCache((prev) => ({ ...prev, [taskId]: data.steps }));
       }
     } catch { /* ignore */ }
     setTaskOutputLoading(null);
@@ -1518,9 +1518,8 @@ export default function App() {
                 ) : (
                   taskList.map((task) => {
                     const isExpanded = expandedTaskId === task.id;
-                    const activeChunks = logs[task.id];
-                    const cachedChunks = taskOutputCache[task.id];
-                    const chunks = activeChunks ?? cachedChunks ?? [];
+                    const cachedSteps = taskOutputCache[task.id];
+                    const hasOutput = (logs[task.id] && logs[task.id].length > 0) || (cachedSteps && cachedSteps.length > 0);
                     const isLoading = taskOutputLoading === task.id;
                     return (
                       <div className={`task-row task-${task.status}`} key={task.id}>
@@ -1542,10 +1541,19 @@ export default function App() {
                           <div className="task-output-panel">
                             {isLoading ? (
                               <div className="task-output-loading">加载中...</div>
-                            ) : chunks.length === 0 ? (
+                            ) : !hasOutput ? (
                               <div className="task-output-empty">暂无输出记录。</div>
+                            ) : cachedSteps && cachedSteps.length > 0 ? (
+                              <div className="task-output-steps">
+                                {cachedSteps.map((step, i) => (
+                                  <div key={i} className={`task-step task-step--${step.type}`}>
+                                    <span className="task-step__label">{step.type === "tool" ? "工具" : step.type === "result" ? "结果" : step.type === "stderr" ? "错误" : step.type === "agent" ? "代理" : step.type === "system" ? "系统" : "输出"}</span>
+                                    <pre className="task-step__content" dangerouslySetInnerHTML={{ __html: renderTerminalHtml(step.content) }} />
+                                  </div>
+                                ))}
+                              </div>
                             ) : (
-                              <pre className="log-window task-output-log" dangerouslySetInnerHTML={{ __html: renderTerminalHtml(buildTaskOutputText(task, chunks)) }} />
+                              <pre className="log-window task-output-log" dangerouslySetInnerHTML={{ __html: renderTerminalHtml(buildTaskHeader(task) + (logs[task.id] || []).map(c => c.content).join("")) }} />
                             )}
                           </div>
                         )}
