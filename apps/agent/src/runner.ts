@@ -41,7 +41,7 @@ function resolveWorkspace(raw: string | null | undefined): string {
 
 export interface RunnerDeps {
   findActiveTask: (taskId: string) => ActiveTask | null;
-  emitOutput: (taskId: string, stream: "stdout" | "stderr", content: string) => void;
+  emitOutput: (taskId: string, stream: "stdout" | "stderr", content: string, delta?: boolean) => void;
   emitStderr: (taskId: string, content: string) => void;
   finishTask: (taskId: string, status: "completed" | "failed" | "cancelled", payload?: string | number) => void;
   send: (payload: EmployeeToServerMessage) => void;

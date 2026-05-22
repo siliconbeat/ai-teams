@@ -411,6 +411,8 @@ export default function App() {
   const [terminalLogs, setTerminalLogs] = useState<Record<string, EmployeeTerminalLog>>(loadTerminalLogs);
   const [history, setHistory] = useState<CommandHistoryItem[]>([]);
   const [activePage, setActivePage] = useState<ActivePage>("monitor");
+  const activePageRef = useRef<ActivePage>(activePage);
+  activePageRef.current = activePage;
   const [taskFilter, setTaskFilter] = useState<TaskStatus | "all">("all");
   const [taskDisplayLimit, setTaskDisplayLimit] = useState(30);
   const [taskLogList, setTaskLogList] = useState<TaskRecord[]>([]);
@@ -547,7 +549,7 @@ export default function App() {
             return rest;
           });
         }
-        if (activePage === "tasks") {
+        if (activePageRef.current === "tasks") {
           fetchTaskLogList();
         }
         break;
@@ -606,18 +608,6 @@ export default function App() {
     }
     return map;
   }, [activeTasksByEmployee, employeeList, latestTasksByEmployee]);
-
-  const taskListAll = useMemo(() => {
-    return Object.values(tasks)
-      .filter((task) => taskFilter === "all" || task.status === taskFilter)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  }, [taskFilter, tasks]);
-
-  const taskList = useMemo(() => {
-    return taskListAll.slice(0, taskDisplayLimit);
-  }, [taskListAll, taskDisplayLimit]);
-
-  const taskHasMore = taskListAll.length > taskDisplayLimit;
 
   const tasksByEmployee = useMemo(() => {
     const map = new Map<string, TaskRecord[]>();
