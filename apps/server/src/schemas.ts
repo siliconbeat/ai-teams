@@ -259,21 +259,12 @@ export const taskListResponseSchema = {
   },
 } as const;
 
-const taskOutputStepSchema = {
-  type: "object",
-  required: ["type", "content"],
-  properties: {
-    type: { type: "string", enum: ["text", "tool", "result", "agent", "system", "stderr"] },
-    content: { type: "string" },
-  },
-} as const;
-
 export const taskOutputResponseSchema = {
   type: "object",
-  required: ["taskId", "steps"],
+  required: ["taskId", "output"],
   properties: {
     taskId: { type: "string" },
-    steps: { type: "array", items: taskOutputStepSchema },
+    output: { type: "string" },
   },
 } as const;
 

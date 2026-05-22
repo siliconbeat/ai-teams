@@ -46,59 +46,6 @@ function scheduleToResponse(s: ScheduleRecord) {
   };
 }
 
-type TaskOutputStep = { type: "text" | "tool" | "result" | "agent" | "system" | "stderr"; content: string };
-
-function classifyLine(line: string): TaskOutputStep["type"] {
-  if (line.startsWith("[tool] ")) return "tool";
-  if (line.startsWith("[done] ")) return "result";
-  if (line.startsWith("[agent] ")) return "agent";
-  if (line.startsWith("$ ")) return "system";
-  return "text";
-}
-
-function aggregateSteps(chunks: { content: string; stream: string }[]): TaskOutputStep[] {
-  if (chunks.length === 0) return [];
-
-  const steps: TaskOutputStep[] = [];
-
-  // Split chunks by stream type first
-  const stderrChunks = chunks.filter((c) => c.stream === "stderr");
-  const stdoutChunks = chunks.filter((c) => c.stream === "stdout");
-
-  // Aggregate stderr separately
-  if (stderrChunks.length > 0) {
-    steps.push({ type: "stderr", content: stderrChunks.map((c) => c.content).join("") });
-  }
-
-  // Aggregate stdout into steps by line classification
-  const fullText = stdoutChunks.map((c) => c.content).join("");
-  if (!fullText) return steps;
-
-  const lines = fullText.split("\n");
-  let currentType: TaskOutputStep["type"] | null = null;
-  let currentLines: string[] = [];
-
-  const flush = () => {
-    if (currentType !== null && currentLines.length > 0) {
-      const content = currentLines.join("\n");
-      if (content) steps.push({ type: currentType, content });
-    }
-    currentLines = [];
-  };
-
-  for (const line of lines) {
-    const lineType = classifyLine(line);
-    if (lineType !== currentType) {
-      flush();
-      currentType = lineType;
-    }
-    currentLines.push(line);
-  }
-  flush();
-
-  return steps;
-}
-
 const DEFAULT_PORT = 3789;
 
 export type AiTeamsServerOptions = {
@@ -619,7 +566,8 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
         return reply.code(404).send({ error: "Task not found." });
       }
       const chunks = await getTaskLogsByTaskId(db, request.params.taskId);
-      return { taskId: request.params.taskId, steps: aggregateSteps(chunks) };
+      const output = chunks.map((c) => c.content).join("");
+      return { taskId: request.params.taskId, output };
     },
   );
 

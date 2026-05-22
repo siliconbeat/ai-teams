@@ -429,7 +429,7 @@ export default function App() {
   const [scheduleError, setScheduleError] = useState<string | null>(null);
   const [suggestionOpen, setSuggestionOpen] = useState(false);
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
-  const [taskOutputCache, setTaskOutputCache] = useState<Record<string, { type: string; content: string }[]>>({});
+  const [taskOutputCache, setTaskOutputCache] = useState<Record<string, string>>({});
   const [taskOutputLoading, setTaskOutputLoading] = useState<string | null>(null);
   const terminalLogsRef = useRef(terminalLogs);
   terminalLogsRef.current = terminalLogs;
@@ -833,17 +833,6 @@ export default function App() {
     return `\n$ finished: ${task.status} @ ${finishedAt}${errorLine}\n`;
   }
 
-  function buildTaskOutputText(task: TaskRecord, steps: { type: string; content: string }[]): string {
-    let text = buildTaskHeader(task);
-    for (const step of steps) {
-      text += step.content;
-    }
-    if (isTerminalStatus(task.status)) {
-      text += buildTaskFinishedLine(task);
-    }
-    return text;
-  }
-
   async function fetchTaskOutput(taskId: string) {
     if (taskOutputCache[taskId]) return;
     setTaskOutputLoading(taskId);
@@ -852,8 +841,8 @@ export default function App() {
         headers: { Authorization: `Bearer ${authToken}` },
       });
       if (res.ok) {
-        const data = await res.json() as { taskId: string; steps: { type: string; content: string }[] };
-        setTaskOutputCache((prev) => ({ ...prev, [taskId]: data.steps }));
+        const data = await res.json() as { taskId: string; output: string };
+        setTaskOutputCache((prev) => ({ ...prev, [taskId]: data.output }));
       }
     } catch { /* ignore */ }
     setTaskOutputLoading(null);
@@ -1574,7 +1563,7 @@ export default function App() {
                 ) : (
                   taskLogList.map((task) => {
                     const isExpanded = expandedTaskId === task.id;
-                    const cachedSteps = taskOutputCache[task.id];
+                    const cachedOutput = taskOutputCache[task.id];
                     const isLoading = taskOutputLoading === task.id;
                     return (
                       <div className={`task-row task-${task.status}`} key={task.id}>
@@ -1596,15 +1585,8 @@ export default function App() {
                           <div className="task-output-panel">
                             {isLoading ? (
                               <div className="task-output-loading">加载中...</div>
-                            ) : cachedSteps && cachedSteps.length > 0 ? (
-                              <div className="task-output-steps">
-                                {cachedSteps.map((step, i) => (
-                                  <div key={i} className={`task-step task-step--${step.type}`}>
-                                    <span className="task-step__label">{step.type === "tool" ? "工具" : step.type === "result" ? "结果" : step.type === "stderr" ? "错误" : step.type === "agent" ? "代理" : step.type === "system" ? "系统" : "输出"}</span>
-                                    <pre className="task-step__content" dangerouslySetInnerHTML={{ __html: renderTerminalHtml(step.content) }} />
-                                  </div>
-                                ))}
-                              </div>
+                            ) : cachedOutput ? (
+                              <pre className="log-window task-output-log" dangerouslySetInnerHTML={{ __html: renderTerminalHtml(cachedOutput) }} />
                             ) : (
                               <div className="task-output-empty">暂无输出记录。</div>
                             )}
