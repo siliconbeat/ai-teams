@@ -56,7 +56,6 @@ export type AiTeamsServerOptions = {
   dbPath?: string;
   defaultTimeoutSec?: number;
   disconnectGraceMs?: number;
-  maxLogChunksPerTask?: number;
   logger?: boolean;
   logLevel?: string;
   logDir?: string;
@@ -82,7 +81,6 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
 
   const defaultTimeoutSec = options.defaultTimeoutSec ?? 1800;
   const disconnectGraceMs = options.disconnectGraceMs ?? 15000;
-  const maxLogChunksPerTask = options.maxLogChunksPerTask ?? 2000;
   const dataDir = options.dataDir ?? path.join(process.cwd(), "data");
   const dbPath = options.dbPath ?? path.join(dataDir, "ai-teams.db");
   let closing = false;
@@ -95,7 +93,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     DATABASE_URL: process.env.DATABASE_URL,
   });
   await initDb(db);
-  await hydrateState(db, state, defaultTimeoutSec, maxLogChunksPerTask);
+  await hydrateState(db, state, defaultTimeoutSec);
 
   const logLevel = options.logLevel || process.env.LOG_LEVEL || "info";
   const logDir = options.logDir || process.env.LOG_DIR;
@@ -159,7 +157,6 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     log: app.log,
     authToken: options.authToken,
     defaultTimeoutSec,
-    maxLogChunksPerTask,
     disconnectGraceMs,
     encryptor: createEncryptor(process.env.AI_TEAMS_ENCRYPTION_KEY),
   };
@@ -1037,7 +1034,6 @@ export function readOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): AiTeam
     dbPath: env.DB_PATH,
     defaultTimeoutSec: Number(env.DEFAULT_TIMEOUT_SEC) || 1800,
     disconnectGraceMs: Number(env.DISCONNECT_GRACE_MS) || 15000,
-    maxLogChunksPerTask: Number(env.MAX_LOG_CHUNKS_PER_TASK) || 400,
     logLevel: env.LOG_LEVEL,
     logDir: env.LOG_DIR,
   };

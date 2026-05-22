@@ -208,7 +208,7 @@ export async function initDb(db: Database) {
 // Hydrate state from database
 // ---------------------------------------------------------------------------
 
-export async function hydrateState(db: Database, state: StateStore, defaultTimeoutSec: number, maxLogChunksPerTask: number) {
+export async function hydrateState(db: Database, state: StateStore, defaultTimeoutSec: number) {
   const employeeRows = await db.all<{ payload_json: string }>("SELECT payload_json FROM employees");
   for (const row of employeeRows) {
     const employee = JSON.parse(row.payload_json) as EmployeeSnapshot;
@@ -250,14 +250,7 @@ export async function hydrateState(db: Database, state: StateStore, defaultTimeo
   }
 
   const logRows = await db.all<{ payload_json: string }>(
-    `SELECT payload_json FROM (
-      SELECT task_id, seq, payload_json,
-      ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY seq DESC) AS rn
-      FROM task_logs
-    ) sub
-    WHERE rn <= $1
-    ORDER BY task_id ASC, seq ASC`,
-    [maxLogChunksPerTask],
+    `SELECT payload_json FROM task_logs ORDER BY task_id ASC, seq ASC`,
   );
   for (const row of logRows) {
     const chunk = JSON.parse(row.payload_json) as TaskOutputChunk;
@@ -318,23 +311,12 @@ export async function persistTaskWebhook(db: Database, taskId: string, webhookUr
 }
 
 
-export async function persistTaskLog(db: Database, chunk: TaskOutputChunk, maxLogChunksPerTask: number) {
+export async function persistTaskLog(db: Database, chunk: TaskOutputChunk) {
   await db.run(
     `INSERT INTO task_logs (task_id, seq, payload_json)
      VALUES ($1, $2, $3)
      ON CONFLICT(task_id, seq) DO UPDATE SET payload_json = excluded.payload_json`,
     [chunk.taskId, chunk.seq, JSON.stringify(chunk)],
-  );
-  await db.run(
-    `DELETE FROM task_logs
-     WHERE task_id = $1
-       AND seq NOT IN (
-         SELECT seq FROM task_logs
-         WHERE task_id = $2
-         ORDER BY seq DESC
-         LIMIT $3
-       )`,
-    [chunk.taskId, chunk.taskId, maxLogChunksPerTask],
   );
 }
 

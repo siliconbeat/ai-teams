@@ -40,7 +40,6 @@ export type DispatchContext = {
   state: StateStore;
   authToken: string;
   defaultTimeoutSec: number;
-  maxLogChunksPerTask: number;
   disconnectGraceMs: number;
   db: Database;
   log: FastifyInstance["log"];
@@ -296,11 +295,8 @@ export function createDispatch(ctx: DispatchContext) {
     }
     const history = state.taskLogs.get(chunk.taskId) ?? [];
     history.push(chunk);
-    if (history.length > ctx.maxLogChunksPerTask) {
-      history.splice(0, history.length - ctx.maxLogChunksPerTask);
-    }
     state.taskLogs.set(chunk.taskId, history);
-    persistTaskLog(db, chunk, ctx.maxLogChunksPerTask).catch((error) => log.error({ error, taskId: chunk.taskId, seq: chunk.seq }, "Failed to persist task log"));
+    persistTaskLog(db, chunk).catch((error) => log.error({ error, taskId: chunk.taskId, seq: chunk.seq }, "Failed to persist task log"));
     broadcastToLeaders({ type: "task.output", chunk });
     if (!chunk.delta) {
       postTaskWebhook(task, "task.output", { chunk });
