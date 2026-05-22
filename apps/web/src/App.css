@@ -476,13 +476,13 @@ a.nav-item {
 .mobile-terminal-content .term-done { color: #6b7280; }
 
 .log-window .term-tool,
-.mobile-terminal-content .term-tool { color: #fbbf24; }
+.mobile-terminal-content .term-tool { color: #d4a745; }
 
 .log-window .term-agent,
 .mobile-terminal-content .term-agent { color: #60a5fa; }
 
 .log-window .term-thinking,
-.mobile-terminal-content .term-thinking { color: #a78bfa; font-style: italic; }
+.mobile-terminal-content .term-thinking { color: #8b7fb8; font-style: italic; }
 
 .status-pill {
   display: inline-flex;

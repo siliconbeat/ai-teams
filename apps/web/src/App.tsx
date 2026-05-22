@@ -414,7 +414,6 @@ export default function App() {
   const [taskFilter, setTaskFilter] = useState<TaskStatus | "all">("all");
   const [taskDisplayLimit, setTaskDisplayLimit] = useState(30);
   const [taskLogList, setTaskLogList] = useState<TaskRecord[]>([]);
-  const [taskLogTotal, setTaskLogTotal] = useState(0);
   const [taskLogLoading, setTaskLogLoading] = useState(false);
   const [selectedTarget, setSelectedTarget] = useState<AgentTarget>("queue");
   const [draft, setDraft] = useState<CommandDraft>({
@@ -547,6 +546,9 @@ export default function App() {
             const { [message.task.id]: _, ...rest } = current;
             return rest;
           });
+        }
+        if (activePage === "tasks") {
+          fetchTaskLogList();
         }
         break;
       }
@@ -877,33 +879,6 @@ export default function App() {
       }
     } catch { /* ignore */ }
     setTaskLogLoading(false);
-  }
-
-  async function fetchTaskLogCount() {
-    try {
-      const params = new URLSearchParams();
-      params.set("limit", "1");
-      params.set("offset", "0");
-      if (taskFilter !== "all") params.set("status", taskFilter);
-      const res = await fetch(`/api/tasks?${params}`, {
-        headers: { Authorization: `Bearer ${authToken}` },
-      });
-      if (res.ok) {
-        const data = await res.json() as { tasks: TaskRecord[] };
-        // We need total count — fetch with large limit
-        const countParams = new URLSearchParams();
-        if (taskFilter !== "all") countParams.set("status", taskFilter);
-        countParams.set("limit", "9999");
-        countParams.set("offset", "0");
-        const countRes = await fetch(`/api/tasks?${countParams}`, {
-          headers: { Authorization: `Bearer ${authToken}` },
-        });
-        if (countRes.ok) {
-          const countData = await countRes.json() as { tasks: TaskRecord[] };
-          setTaskLogTotal(countData.tasks.length);
-        }
-      }
-    } catch { /* ignore */ }
   }
 
   function saveToken() {
