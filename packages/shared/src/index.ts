@@ -39,6 +39,7 @@ export interface EmployeeSnapshot {
   queueTaskPrompt: string | null;
   lastSeenAt: string;
   consecutiveQueueFailures: number;
+  queuePaused?: boolean;
   version?: string;
   weight: number;
 }

@@ -382,6 +382,9 @@ export function createDispatch(ctx: DispatchContext) {
           return false;
         }
         const failures = state.consecutiveQueueFailures.get(employee.id) ?? 0;
+        if (state.queuePausedSet.has(employee.id)) {
+          return false;
+        }
         if (failures >= MAX_CONSECUTIVE_QUEUE_FAILURES) {
           const failureTs = state.failureTimestamps.get(employee.id);
           if (failureTs && (Date.now() - failureTs) > AUTO_RESUME_MS) {
@@ -452,7 +455,7 @@ export function createDispatch(ctx: DispatchContext) {
       if (state.sharedTaskQueue.length > 0) {
         const onlineEmployees = [...state.employees.values()].filter((e) => e.status === "online");
         const allPaused = onlineEmployees.length > 0 && onlineEmployees.every(
-          (e) => (state.consecutiveQueueFailures.get(e.id) ?? 0) >= MAX_CONSECUTIVE_QUEUE_FAILURES,
+          (e) => state.queuePausedSet.has(e.id) || (state.consecutiveQueueFailures.get(e.id) ?? 0) >= MAX_CONSECUTIVE_QUEUE_FAILURES,
         );
         if (allPaused) {
           log.warn({ queueLength: state.sharedTaskQueue.length }, "All online agents are paused for queue tasks — queue stalled");
@@ -1103,9 +1106,11 @@ export function createDispatch(ctx: DispatchContext) {
     }
     state.consecutiveQueueFailures.set(employeeId, 0);
     state.failureTimestamps.delete(employeeId);
+    state.queuePausedSet.delete(employeeId);
     employee.consecutiveQueueFailures = 0;
+    employee.queuePaused = false;
     upsertEmployee(employee);
-    log.info({ employeeId }, "Agent queue resumed, consecutive failure count reset");
+    log.info({ employeeId }, "Agent queue resumed, failure count and pause state reset");
     const socket = state.agentSockets.get(employeeId);
     if (socket && socket.readyState === WebSocket.OPEN) {
       sendJson<ServerToEmployeeMessage>(socket, { type: "queue.resume" }, ctx.encryptor);
@@ -1119,8 +1124,8 @@ export function createDispatch(ctx: DispatchContext) {
     if (!employee) {
       return { ok: false, message: "员工不存在。" };
     }
-    state.consecutiveQueueFailures.set(employeeId, MAX_CONSECUTIVE_QUEUE_FAILURES);
-    employee.consecutiveQueueFailures = MAX_CONSECUTIVE_QUEUE_FAILURES;
+    state.queuePausedSet.add(employeeId);
+    employee.queuePaused = true;
     upsertEmployee(employee);
     log.info({ employeeId }, "Agent queue paused");
     return { ok: true };

@@ -237,6 +237,9 @@ function getAgentPresence(employee: EmployeeSnapshot, activeTask?: TaskRecord) {
   if (employee.status === "offline") {
     return { label: "离线", className: "offline" };
   }
+  if (employee.queuePaused) {
+    return { label: "已暂停", className: "paused" };
+  }
   if (employee.consecutiveQueueFailures >= 5) {
     return { label: "队列暂停", className: "paused" };
   }
@@ -349,12 +352,12 @@ const EmployeeCard = memo(function EmployeeCard({
                 <button className="card-menu-item" onClick={() => { setMenuOpen(false); onResetSession(employee.id); }}>
                   重置会话
                 </button>
-                {employee.consecutiveQueueFailures < 5 && employee.status !== "offline" && (
+                {!employee.queuePaused && employee.consecutiveQueueFailures < 5 && employee.status !== "offline" && (
                   <button className="card-menu-item" onClick={() => { setMenuOpen(false); onPauseQueue(employee.id); }}>
                     暂停队列
                   </button>
                 )}
-                {employee.consecutiveQueueFailures >= 5 && (
+                {(employee.queuePaused || employee.consecutiveQueueFailures >= 5) && (
                   <button className="card-menu-item" onClick={() => { setMenuOpen(false); onResumeQueue(employee.id); }}>
                     恢复队列
                   </button>
@@ -368,7 +371,10 @@ const EmployeeCard = memo(function EmployeeCard({
         <span>{employee.hostname}</span>
         <span>ID: {employee.id}{employee.version ? ` · v${employee.version}` : ""}</span>
         <span>标签: {employee.labels.join(", ") || "未设置"}</span>
-        {employee.consecutiveQueueFailures >= 5 && (
+        {employee.queuePaused && (
+          <span className="meta-warning">手动暂停</span>
+        )}
+        {!employee.queuePaused && employee.consecutiveQueueFailures >= 5 && (
           <span className="meta-warning">连续失败: {employee.consecutiveQueueFailures} 次</span>
         )}
         {employee.weight > 1 && (
@@ -384,7 +390,7 @@ const EmployeeCard = memo(function EmployeeCard({
   if (prev.terminalText !== next.terminalText) return false;
   if (prev.mainTask?.id !== next.mainTask?.id || prev.queueTask?.id !== next.queueTask?.id || prev.displayTask?.id !== next.displayTask?.id) return false;
   const pe = prev.employee, ne = next.employee;
-  if (pe.status !== ne.status || pe.mainTaskId !== ne.mainTaskId || pe.queueTaskId !== ne.queueTaskId || pe.name !== ne.name || pe.consecutiveQueueFailures !== ne.consecutiveQueueFailures || pe.version !== ne.version || pe.weight !== ne.weight) return false;
+  if (pe.status !== ne.status || pe.mainTaskId !== ne.mainTaskId || pe.queueTaskId !== ne.queueTaskId || pe.name !== ne.name || pe.consecutiveQueueFailures !== ne.consecutiveQueueFailures || pe.queuePaused !== ne.queuePaused || pe.version !== ne.version || pe.weight !== ne.weight) return false;
   if (pe.labels.length !== ne.labels.length || pe.labels.some((l, i) => l !== ne.labels[i])) return false;
   return true;
 });

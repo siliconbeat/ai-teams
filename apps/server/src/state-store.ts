@@ -20,6 +20,7 @@ export interface StateStore {
   scheduleJobs: Map<string, CronJobLike>;
   consecutiveQueueFailures: Map<string, number>;
   failureTimestamps: Map<string, number>;
+  queuePausedSet: Set<string>;
 }
 
 export function createInMemoryStateStore(): StateStore {
@@ -40,5 +41,6 @@ export function createInMemoryStateStore(): StateStore {
     scheduleJobs: new Map(),
     consecutiveQueueFailures: new Map(),
     failureTimestamps: new Map(),
+    queuePausedSet: new Set(),
   };
 }

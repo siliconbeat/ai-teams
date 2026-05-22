@@ -219,6 +219,9 @@ export async function hydrateState(db: Database, state: StateStore, defaultTimeo
     if (employee.consecutiveQueueFailures > 0) {
       state.consecutiveQueueFailures.set(employee.id, employee.consecutiveQueueFailures);
     }
+    if (employee.queuePaused) {
+      state.queuePausedSet.add(employee.id);
+    }
   }
 
   const taskRows = await db.all<DbTaskRow>("SELECT * FROM tasks");
