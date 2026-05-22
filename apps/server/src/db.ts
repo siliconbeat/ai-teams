@@ -371,6 +371,14 @@ export async function getTaskById(db: Database, taskId: string): Promise<DbTaskR
   return db.get<DbTaskRow>("SELECT * FROM tasks WHERE id = $1", [taskId]);
 }
 
+export async function getTaskLogsByTaskId(db: Database, taskId: string): Promise<TaskOutputChunk[]> {
+  const rows = await db.all<{ payload_json: string }>(
+    "SELECT payload_json FROM task_logs WHERE task_id = $1 ORDER BY seq ASC",
+    [taskId],
+  );
+  return rows.map((row) => JSON.parse(row.payload_json) as TaskOutputChunk);
+}
+
 export async function deleteTask(db: Database, taskId: string): Promise<boolean> {
   const row = await db.get<{ status: string }>("SELECT status FROM tasks WHERE id = $1", [taskId]);
   if (!row) return false;

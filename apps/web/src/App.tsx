@@ -300,6 +300,7 @@ const EmployeeCard = memo(function EmployeeCard({
   cancelTask,
   onResetSession,
   onResumeQueue,
+  onPauseQueue,
 }: {
   employee: EmployeeSnapshot;
   mainTask: TaskRecord | undefined;
@@ -309,6 +310,7 @@ const EmployeeCard = memo(function EmployeeCard({
   cancelTask: (taskId: string) => void;
   onResetSession: (employeeId: string) => void;
   onResumeQueue: (employeeId: string) => void;
+  onPauseQueue: (employeeId: string) => void;
 }) {
   const logRef = useRef<HTMLPreElement | null>(null);
   const prevTerminalText = useRef(terminalText);
@@ -347,6 +349,11 @@ const EmployeeCard = memo(function EmployeeCard({
                 <button className="card-menu-item" onClick={() => { setMenuOpen(false); onResetSession(employee.id); }}>
                   重置会话
                 </button>
+                {employee.consecutiveQueueFailures < 5 && employee.status !== "offline" && (
+                  <button className="card-menu-item" onClick={() => { setMenuOpen(false); onPauseQueue(employee.id); }}>
+                    暂停队列
+                  </button>
+                )}
                 {employee.consecutiveQueueFailures >= 5 && (
                   <button className="card-menu-item" onClick={() => { setMenuOpen(false); onResumeQueue(employee.id); }}>
                     恢复队列
@@ -412,6 +419,9 @@ export default function App() {
   });
   const [scheduleError, setScheduleError] = useState<string | null>(null);
   const [suggestionOpen, setSuggestionOpen] = useState(false);
+  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
+  const [taskOutputCache, setTaskOutputCache] = useState<Record<string, TaskOutputChunk[]>>({});
+  const [taskOutputLoading, setTaskOutputLoading] = useState<string | null>(null);
   const terminalLogsRef = useRef(terminalLogs);
   terminalLogsRef.current = terminalLogs;
   const wsRef = useRef<WebSocket | null>(null);
@@ -814,6 +824,43 @@ export default function App() {
     return `\n$ finished: ${task.status} @ ${finishedAt}${errorLine}\n`;
   }
 
+  function buildTaskOutputText(task: TaskRecord, chunks: TaskOutputChunk[]): string {
+    let text = buildTaskHeader(task);
+    for (const chunk of chunks) {
+      text += chunk.content;
+    }
+    if (isTerminalStatus(task.status)) {
+      text += buildTaskFinishedLine(task);
+    }
+    return text;
+  }
+
+  async function fetchTaskOutput(taskId: string) {
+    if (taskOutputCache[taskId]) return;
+    setTaskOutputLoading(taskId);
+    try {
+      const res = await fetch(`/api/tasks/${taskId}/output`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      if (res.ok) {
+        const data = await res.json() as { taskId: string; chunks: TaskOutputChunk[] };
+        setTaskOutputCache((prev) => ({ ...prev, [taskId]: data.chunks }));
+      }
+    } catch { /* ignore */ }
+    setTaskOutputLoading(null);
+  }
+
+  function toggleTaskExpansion(taskId: string) {
+    if (expandedTaskId === taskId) {
+      setExpandedTaskId(null);
+    } else {
+      setExpandedTaskId(taskId);
+      if (!logs[taskId] || logs[taskId].length === 0) {
+        fetchTaskOutput(taskId);
+      }
+    }
+  }
+
   function saveToken() {
     const next = tokenDraft.trim();
     if (!next) {
@@ -997,6 +1044,15 @@ export default function App() {
       headers: { Authorization: `Bearer ${authToken}` },
     }).then((res) => {
       if (!res.ok) return res.json().then((d) => { alert(d.error || "恢复失败"); });
+    }).catch(() => { alert("网络请求失败"); });
+  }, [authToken]);
+
+  const pauseQueue = useCallback((employeeId: string) => {
+    fetch(`/api/agents/${employeeId}/pause-queue`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${authToken}` },
+    }).then((res) => {
+      if (!res.ok) return res.json().then((d) => { alert(d.error || "暂停失败"); });
     }).catch(() => { alert("网络请求失败"); });
   }, [authToken]);
 
@@ -1422,6 +1478,7 @@ export default function App() {
                       cancelTask={cancelTask}
                       onResetSession={resetSession}
                       onResumeQueue={resumeQueue}
+                      onPauseQueue={pauseQueue}
                     />
                   );
                 })
@@ -1453,22 +1510,42 @@ export default function App() {
                 {taskList.length === 0 ? (
                   <div className="history-empty">暂无符合条件的任务。</div>
                 ) : (
-                  taskList.map((task) => (
-                    <div className={`task-row task-${task.status}`} key={task.id}>
-                      <div className="task-row__main">
-                        <strong>{task.employeeId ? employees[task.employeeId]?.name ?? task.employeeId : "任务队列"}</strong>
-                        <p>{task.prompt}</p>
-                        {task.error ? <span className="error-text">{task.error}</span> : null}
-                      </div>
-                      <div className="task-row__side">
-                        <span className={`status-pill ${task.status}`}>{task.status}</span>
-                        <small>{new Date(task.createdAt).toLocaleTimeString()}</small>
-                        {task.status === "failed" && (
-                          <button className="retry-btn" onClick={() => retryTask(task)}>重试</button>
+                  taskList.map((task) => {
+                    const isExpanded = expandedTaskId === task.id;
+                    const activeChunks = logs[task.id];
+                    const cachedChunks = taskOutputCache[task.id];
+                    const chunks = activeChunks ?? cachedChunks ?? [];
+                    const isLoading = taskOutputLoading === task.id;
+                    return (
+                      <div className={`task-row task-${task.status}`} key={task.id}>
+                        <div className="task-row__summary" onClick={() => toggleTaskExpansion(task.id)}>
+                          <div className="task-row__main">
+                            <strong><span style={{ marginRight: 6 }}>{isExpanded ? "▾" : "▸"}</span>{task.employeeId ? employees[task.employeeId]?.name ?? task.employeeId : "任务队列"}</strong>
+                            <p>{task.prompt}</p>
+                            {task.error ? <span className="error-text">{task.error}</span> : null}
+                          </div>
+                          <div className="task-row__side">
+                            <span className={`status-pill ${task.status}`}>{task.status}</span>
+                            <small>{new Date(task.createdAt).toLocaleTimeString()}</small>
+                            {task.status === "failed" && (
+                              <button className="retry-btn" onClick={(e) => { e.stopPropagation(); retryTask(task); }}>重试</button>
+                            )}
+                          </div>
+                        </div>
+                        {isExpanded && (
+                          <div className="task-output-panel">
+                            {isLoading ? (
+                              <div className="task-output-loading">加载中...</div>
+                            ) : chunks.length === 0 ? (
+                              <div className="task-output-empty">暂无输出记录。</div>
+                            ) : (
+                              <pre className="log-window task-output-log" dangerouslySetInnerHTML={{ __html: renderTerminalHtml(buildTaskOutputText(task, chunks)) }} />
+                            )}
+                          </div>
                         )}
                       </div>
-                    </div>
-                  ))
+                    );
+                  })
                 )}
               </div>
               {taskHasMore && (

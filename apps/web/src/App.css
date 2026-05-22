@@ -782,6 +782,42 @@ a.nav-item {
 }
 
 .task-row__side small,
+
+.task-row__summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.task-row__summary:hover {
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 9px;
+  margin: -8px -10px;
+  padding: 8px 10px;
+}
+
+.task-output-panel {
+  margin-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding-top: 8px;
+}
+
+.task-output-log {
+  aspect-ratio: auto;
+  min-height: 120px;
+  max-height: 360px;
+}
+
+.task-output-loading,
+.task-output-empty {
+  color: #7f93b5;
+  font-size: 12px;
+  padding: 12px 0;
+  text-align: center;
+}
+
+.task-row__side small,
 .error-text {
   color: #90a1be;
 }

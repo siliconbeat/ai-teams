@@ -1114,6 +1114,18 @@ export function createDispatch(ctx: DispatchContext) {
     return { ok: true };
   }
 
+  function pauseAgentQueue(employeeId: string): { ok: true } | { ok: false; message: string } {
+    const employee = state.employees.get(employeeId);
+    if (!employee) {
+      return { ok: false, message: "员工不存在。" };
+    }
+    state.consecutiveQueueFailures.set(employeeId, MAX_CONSECUTIVE_QUEUE_FAILURES);
+    employee.consecutiveQueueFailures = MAX_CONSECUTIVE_QUEUE_FAILURES;
+    upsertEmployee(employee);
+    log.info({ employeeId }, "Agent queue paused");
+    return { ok: true };
+  }
+
   function resetAgentSession(employeeId: string): { ok: true } | { ok: false; message: string } {
     const socket = state.agentSockets.get(employeeId);
     if (!socket || socket.readyState !== WebSocket.OPEN) {
@@ -1134,6 +1146,7 @@ export function createDispatch(ctx: DispatchContext) {
     cancelTaskById,
     startDisconnectRecovery,
     resumeAgentQueue,
+    pauseAgentQueue,
     resetAgentSession,
     cleanup() {
       for (const timer of retryDelays.values()) {

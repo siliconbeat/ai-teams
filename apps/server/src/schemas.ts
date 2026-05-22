@@ -259,6 +259,15 @@ export const taskListResponseSchema = {
   },
 } as const;
 
+export const taskOutputResponseSchema = {
+  type: "object",
+  required: ["taskId", "chunks"],
+  properties: {
+    taskId: { type: "string" },
+    chunks: { type: "array", items: taskOutputChunkSchema },
+  },
+} as const;
+
 export const taskPatchSchema = {
   type: "object",
   properties: {

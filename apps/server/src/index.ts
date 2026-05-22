@@ -18,8 +18,8 @@ import {
   type StateSnapshot,
 } from "@ai-teams/shared";
 import { daemonize, stopDaemon, getDaemonStatus } from "@ai-teams/shared/daemon";
-import { createDatabaseFromEnv, initDb, hydrateState, type Database, queryTasks, getTaskById, deleteTask, updateTaskFields, dbRowToTask, upsertSchedule, getAllSchedules, getScheduleById, deleteScheduleRow, updateScheduleFields, type ScheduleRecord } from "./db.js";
-import { type RestTaskRequest, errorResponseSchema, snapshotSchema, sessionHistorySchema, restTaskRequestSchema, restTaskAcceptedSchema, taskListResponseSchema, taskRecordSchema, taskPatchSchema, parseRestTaskRequest, claudeSessionsResponseSchema, createScheduleRequestSchema, updateScheduleRequestSchema, scheduleResponseSchema, scheduleListResponseSchema, type CreateScheduleRequest, type UpdateScheduleRequest } from "./schemas.js";
+import { createDatabaseFromEnv, initDb, hydrateState, type Database, queryTasks, getTaskById, getTaskLogsByTaskId, deleteTask, updateTaskFields, dbRowToTask, upsertSchedule, getAllSchedules, getScheduleById, deleteScheduleRow, updateScheduleFields, type ScheduleRecord } from "./db.js";
+import { type RestTaskRequest, errorResponseSchema, snapshotSchema, sessionHistorySchema, restTaskRequestSchema, restTaskAcceptedSchema, taskListResponseSchema, taskRecordSchema, taskOutputResponseSchema, taskPatchSchema, parseRestTaskRequest, claudeSessionsResponseSchema, createScheduleRequestSchema, updateScheduleRequestSchema, scheduleResponseSchema, scheduleListResponseSchema, type CreateScheduleRequest, type UpdateScheduleRequest } from "./schemas.js";
 import { createDispatch, nowIso, sendJson } from "./dispatch.js";
 import type { DispatchContext } from "./dispatch.js";
 import { createInMemoryStateStore } from "./state-store.js";
@@ -163,7 +163,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     disconnectGraceMs,
     encryptor: createEncryptor(process.env.AI_TEAMS_ENCRYPTION_KEY),
   };
-  const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage, cancelTaskById, startDisconnectRecovery, resumeAgentQueue, resetAgentSession, cleanup: dispatchCleanup } = createDispatch(dispatchCtx);
+  const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage, cancelTaskById, startDisconnectRecovery, resumeAgentQueue, pauseAgentQueue, resetAgentSession, cleanup: dispatchCleanup } = createDispatch(dispatchCtx);
 
   const scheduleDispatchFn: ScheduleDispatchFn = (message, webhookUrl, cliConfig, priority, requiredLabels) => {
     return dispatchLeaderCommand(message, webhookUrl, cliConfig, priority, requiredLabels);
@@ -541,6 +541,35 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     },
   );
 
+  app.get<{ Params: { taskId: string } }>(
+    "/api/tasks/:taskId/output",
+    {
+      schema: {
+        tags: ["tasks"],
+        summary: "Get task output chunks",
+        description: "Returns ordered task output chunks for the specified task ID.",
+        params: {
+          type: "object",
+          required: ["taskId"],
+          properties: { taskId: { type: "string", minLength: 1 } },
+        },
+        response: {
+          200: taskOutputResponseSchema,
+          404: errorResponseSchema,
+          401: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const row = await getTaskById(db, request.params.taskId);
+      if (!row) {
+        return reply.code(404).send({ error: "Task not found." });
+      }
+      const chunks = await getTaskLogsByTaskId(db, request.params.taskId);
+      return { taskId: request.params.taskId, chunks };
+    },
+  );
+
   app.patch<{ Params: { taskId: string }; Body: Record<string, unknown> }>(
     "/api/tasks/:taskId",
     {
@@ -660,6 +689,33 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     },
     async (request, reply) => {
       const result = resumeAgentQueue(request.params.employeeId);
+      if (!result.ok) {
+        return reply.code(404).send({ error: result.message });
+      }
+      return { ok: true };
+    },
+  );
+
+  app.post<{ Params: { employeeId: string } }>(
+    "/api/agents/:employeeId/pause-queue",
+    {
+      schema: {
+        tags: ["agents"],
+        summary: "Pause an agent's queue dispatch",
+        params: {
+          type: "object",
+          required: ["employeeId"],
+          properties: { employeeId: { type: "string", minLength: 1 } },
+        },
+        response: {
+          200: { type: "object", required: ["ok"], properties: { ok: { type: "boolean" } } },
+          404: errorResponseSchema,
+          401: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const result = pauseAgentQueue(request.params.employeeId);
       if (!result.ok) {
         return reply.code(404).send({ error: result.message });
       }
