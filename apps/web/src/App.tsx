@@ -88,7 +88,7 @@ function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-const COLLAPSED_MAX_HEIGHT = 220; // ~10 lines at 14px line-height
+const COLLAPSED_MAX_HEIGHT = 220;
 function CollapsibleContent({ children }: { children: ReactNode }) {
   const [expanded, setExpanded] = useState(false);
   const [overflow, setOverflow] = useState(false);
@@ -103,7 +103,7 @@ function CollapsibleContent({ children }: { children: ReactNode }) {
       <div
         ref={ref}
         className="bubble-collapsible__content"
-        style={expanded || !overflow ? { maxHeight: "none" } : undefined}
+        style={expanded ? { maxHeight: "none", overflow: "visible" } : undefined}
       >
         {children}
       </div>
@@ -1987,9 +1987,11 @@ export default function App() {
                       return (
                         <div className="bubble-copy-wrap">
                           {item.quotedPrompt && <div className="bubble-quote">{item.quotedPrompt.length > 60 ? item.quotedPrompt.slice(0, 60) + "..." : item.quotedPrompt}</div>}
-                          <div style={isError ? { color: "#ff4d4f" } : undefined}>
-                            <XMarkdown content={String(_content)} />
-                          </div>
+                          <CollapsibleContent>
+                            <div style={isError ? { color: "#ff4d4f" } : undefined}>
+                              <XMarkdown content={String(_content)} />
+                            </div>
+                          </CollapsibleContent>
                           <button className="bubble-copy-btn" onClick={() => navigator.clipboard.writeText(String(_content))}>
                             <CopyOutlined />
                           </button>
