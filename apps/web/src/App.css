@@ -781,8 +781,6 @@ a.nav-item {
   white-space: nowrap;
 }
 
-.task-row__side small,
-
 .task-row__summary {
   display: flex;
   justify-content: space-between;

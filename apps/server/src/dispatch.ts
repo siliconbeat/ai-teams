@@ -762,6 +762,7 @@ export function createDispatch(ctx: DispatchContext) {
       queueTaskPrompt,
       lastSeenAt: nowIso(),
       consecutiveQueueFailures: state.consecutiveQueueFailures.get(message.employeeId) ?? 0,
+      queuePaused: state.queuePausedSet.has(message.employeeId) || undefined,
       version: message.version,
       weight: message.weight ?? 1,
     });
