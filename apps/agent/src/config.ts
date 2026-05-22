@@ -73,6 +73,7 @@ export type ActiveTask = {
   summary: string[];
   cancelRequested: boolean;
   sawStreamText: boolean;
+  lastToolBlock: boolean;
   stderrTail: string;
   retriedWithFreshSession: boolean;
   generation: number;

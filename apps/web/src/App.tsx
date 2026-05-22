@@ -101,6 +101,8 @@ function renderTerminalHtml(text: string): string {
       cls = "term-tool";
     } else if (line.startsWith("[agent]")) {
       cls = "term-agent";
+    } else if (line.startsWith("[thinking]")) {
+      cls = "term-thinking";
     }
     return `<span class="${cls}">${escaped}${i < lines.length - 1 ? "\n" : ""}</span>`;
   }).join("");

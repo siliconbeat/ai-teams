@@ -168,6 +168,7 @@ function startTask(message: Extract<ServerToEmployeeMessage, { type: "task.dispa
     summary: [],
     cancelRequested: false,
     sawStreamText: false,
+    lastToolBlock: false,
     stderrTail: "",
     retriedWithFreshSession: false,
     generation: 0,

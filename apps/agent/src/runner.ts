@@ -69,13 +69,37 @@ export function handleClaudeJsonLine(
 
   if (parsed.type === "stream_event") {
     const event = parsed.event;
-    if (event?.type === "content_block_delta" && event.delta?.type === "text_delta" && event.delta.text) {
-      const task = findActiveTask(taskId);
-      if (task) {
-        task.sawStreamText = true;
-        task.summary.push(event.delta.text);
+    if (!event) return;
+
+    if (event.type === "content_block_delta") {
+      const delta = event.delta;
+      if (delta?.type === "text_delta" && delta.text) {
+        const task = findActiveTask(taskId);
+        if (task) {
+          task.sawStreamText = true;
+          task.summary.push(delta.text);
+        }
+        emitOutput(taskId, "stdout", delta.text, true);
+      } else if (delta?.type === "thinking_delta" && delta.thinking) {
+        emitOutput(taskId, "stdout", delta.thinking, true);
+      } else if (delta?.type === "input_json_delta" && delta.partial_json) {
+        emitOutput(taskId, "stdout", delta.partial_json, true);
       }
-      emitOutput(taskId, "stdout", event.delta.text, true);
+    } else if (event.type === "content_block_start" && event.content_block) {
+      const block = event.content_block;
+      const task = findActiveTask(taskId);
+      if (block.type === "tool_use" && block.name) {
+        if (task) task.lastToolBlock = true;
+        emitOutput(taskId, "stdout", `\n[tool] ${block.name}(`);
+      } else if (block.type === "thinking") {
+        emitOutput(taskId, "stdout", "\n[thinking] ");
+      }
+    } else if (event.type === "content_block_stop") {
+      const task = findActiveTask(taskId);
+      if (task?.lastToolBlock) {
+        emitOutput(taskId, "stdout", ")\n");
+        task.lastToolBlock = false;
+      }
     }
     return;
   }
@@ -89,9 +113,10 @@ export function handleClaudeJsonLine(
       if (block.type === "text" && block.text) {
         task?.summary.push(block.text);
         emitOutput(taskId, "stdout", `${block.text}\n`);
-      }
-      if (block.type === "tool_use" && block.name) {
-        emitOutput(taskId, "stdout", `[tool] ${block.name}\n`);
+      } else if (block.type === "thinking" && block.thinking) {
+        emitOutput(taskId, "stdout", `[thinking] ${block.thinking}\n`);
+      } else if (block.type === "tool_use" && block.name) {
+        emitOutput(taskId, "stdout", `[tool] ${block.name}(${block.input ? JSON.stringify(block.input) : ""})\n`);
       }
     }
     return;
@@ -100,16 +125,18 @@ export function handleClaudeJsonLine(
   if (parsed.type === "result" && typeof parsed.result === "string") {
     const task = findActiveTask(taskId);
     if (task?.sawStreamText) {
-      emitOutput(taskId, "stdout", formatClaudeDoneNode(parsed));
+      // Text already streamed — only emit metrics, skip duplicate result text
+      emitOutput(taskId, "stdout", formatClaudeDoneNode(parsed, true));
+      extractMetrics(taskId, parsed, findActiveTask);
       return;
     }
     task?.summary.push(parsed.result);
-    emitOutput(taskId, "stdout", formatClaudeDoneNode(parsed));
+    emitOutput(taskId, "stdout", formatClaudeDoneNode(parsed, false));
     extractMetrics(taskId, parsed, findActiveTask);
   }
 }
 
-export function formatClaudeDoneNode(node: Record<string, unknown>) {
+export function formatClaudeDoneNode(node: Record<string, unknown>, skipResult = false) {
   const lines = ["\n[done] Claude result"];
   for (const key of ["subtype", "session_id", "duration_ms", "duration_api_ms", "num_turns", "total_cost_usd"]) {
     const value = node[key];
@@ -121,9 +148,11 @@ export function formatClaudeDoneNode(node: Record<string, unknown>) {
   if (usage && typeof usage === "object") {
     lines.push(`[done] usage: ${JSON.stringify(usage)}`);
   }
-  const result = typeof node.result === "string" ? node.result.trim() : "";
-  if (result) {
-    lines.push(`[done] result: ${result}`);
+  if (!skipResult) {
+    const result = typeof node.result === "string" ? node.result.trim() : "";
+    if (result) {
+      lines.push(`[done] result: ${result}`);
+    }
   }
   return `${lines.join("\n")}\n`;
 }

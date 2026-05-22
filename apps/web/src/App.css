@@ -481,6 +481,9 @@ a.nav-item {
 .log-window .term-agent,
 .mobile-terminal-content .term-agent { color: #60a5fa; }
 
+.log-window .term-thinking,
+.mobile-terminal-content .term-thinking { color: #a78bfa; font-style: italic; }
+
 .status-pill {
   display: inline-flex;
   align-items: center;
