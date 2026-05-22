@@ -82,7 +82,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
 
   const defaultTimeoutSec = options.defaultTimeoutSec ?? 1800;
   const disconnectGraceMs = options.disconnectGraceMs ?? 15000;
-  const maxLogChunksPerTask = options.maxLogChunksPerTask ?? 400;
+  const maxLogChunksPerTask = options.maxLogChunksPerTask ?? 2000;
   const dataDir = options.dataDir ?? path.join(process.cwd(), "data");
   const dbPath = options.dbPath ?? path.join(dataDir, "ai-teams.db");
   let closing = false;
