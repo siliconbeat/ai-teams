@@ -635,6 +635,42 @@ a.nav-item {
   background: rgba(0, 0, 0, 0.65);
 }
 
+.bubble-collapsible {
+  position: relative;
+}
+
+.bubble-collapsible__content {
+  max-height: 220px;
+  overflow: hidden;
+}
+
+.bubble-collapsible__fade {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 64px;
+  background: linear-gradient(transparent, rgba(20, 30, 48, 0.95));
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 6px;
+}
+
+.bubble-collapsible__btn {
+  background: none;
+  border: none;
+  color: #6ec6ff;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 8px;
+}
+
+.bubble-collapsible__btn:hover {
+  color: #9cdcfe;
+  text-decoration: underline;
+}
+
 .bubble-quote {
   padding: 4px 8px;
   margin-bottom: 6px;

@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   isEncryptedEnvelope,
   parseJsonMessage,
@@ -87,6 +87,35 @@ type ExecutingAgent = {
 function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
+
+const COLLAPSED_MAX_HEIGHT = 220; // ~10 lines at 14px line-height
+function CollapsibleContent({ children }: { children: ReactNode }) {
+  const [expanded, setExpanded] = useState(false);
+  const [overflow, setOverflow] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (ref.current && ref.current.scrollHeight > COLLAPSED_MAX_HEIGHT + 20) {
+      setOverflow(true);
+    }
+  }, [children]);
+  return (
+    <div className="bubble-collapsible">
+      <div
+        ref={ref}
+        className="bubble-collapsible__content"
+        style={expanded || !overflow ? { maxHeight: "none" } : undefined}
+      >
+        {children}
+      </div>
+      {overflow && !expanded && (
+        <div className="bubble-collapsible__fade">
+          <button className="bubble-collapsible__btn" onClick={() => setExpanded(true)}>查看更多</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 function renderTerminalHtml(text: string): string {
   const lines = text.split("\n");
@@ -1407,7 +1436,9 @@ export default function App() {
                   return (
                     <div className="bubble-copy-wrap">
                       {item.quotedPrompt && <div className="bubble-quote">{item.quotedPrompt.length > 60 ? item.quotedPrompt.slice(0, 60) + "..." : item.quotedPrompt}</div>}
-                      <div style={isError ? { color: "#ff4d4f", fontSize: 12 } : { fontSize: 12 }}><XMarkdown content={String(_content)} /></div>
+                      <CollapsibleContent>
+                        <div style={isError ? { color: "#ff4d4f", fontSize: 12 } : { fontSize: 12 }}><XMarkdown content={String(_content)} /></div>
+                      </CollapsibleContent>
                       <button className="bubble-copy-btn" onClick={() => navigator.clipboard.writeText(String(_content))}>
                         <CopyOutlined />
                       </button>
