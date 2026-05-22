@@ -186,7 +186,6 @@ export function buildClaudeArgs(prompt: string, task: ActiveTask, agentState: Ag
     "-p",
     "--output-format",
     "stream-json",
-    "--include-partial-messages",
     "--verbose",
     "--dangerously-skip-permissions",
   ];
