@@ -15,6 +15,7 @@ export default defineConfig({
     host: "0.0.0.0",
     proxy: {
       "/ws": { target: serverTarget, ws: true },
+      "/api": { target: serverTarget },
     },
   },
 });
