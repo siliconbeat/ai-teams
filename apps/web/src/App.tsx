@@ -411,6 +411,9 @@ export default function App() {
   const [activePage, setActivePage] = useState<ActivePage>("monitor");
   const [taskFilter, setTaskFilter] = useState<TaskStatus | "all">("all");
   const [taskDisplayLimit, setTaskDisplayLimit] = useState(30);
+  const [taskLogList, setTaskLogList] = useState<TaskRecord[]>([]);
+  const [taskLogTotal, setTaskLogTotal] = useState(0);
+  const [taskLogLoading, setTaskLogLoading] = useState(false);
   const [selectedTarget, setSelectedTarget] = useState<AgentTarget>("queue");
   const [draft, setDraft] = useState<CommandDraft>({
     prompt: "",
@@ -867,6 +870,51 @@ export default function App() {
     }
   }
 
+  async function fetchTaskLogList() {
+    setTaskLogLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (taskFilter !== "all") params.set("status", taskFilter);
+      params.set("limit", String(taskDisplayLimit));
+      params.set("offset", "0");
+      const res = await fetch(`/api/tasks?${params}`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      if (res.ok) {
+        const data = await res.json() as { tasks: TaskRecord[] };
+        setTaskLogList(data.tasks);
+      }
+    } catch { /* ignore */ }
+    setTaskLogLoading(false);
+  }
+
+  async function fetchTaskLogCount() {
+    try {
+      const params = new URLSearchParams();
+      params.set("limit", "1");
+      params.set("offset", "0");
+      if (taskFilter !== "all") params.set("status", taskFilter);
+      const res = await fetch(`/api/tasks?${params}`, {
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      if (res.ok) {
+        const data = await res.json() as { tasks: TaskRecord[] };
+        // We need total count — fetch with large limit
+        const countParams = new URLSearchParams();
+        if (taskFilter !== "all") countParams.set("status", taskFilter);
+        countParams.set("limit", "9999");
+        countParams.set("offset", "0");
+        const countRes = await fetch(`/api/tasks?${countParams}`, {
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+        if (countRes.ok) {
+          const countData = await countRes.json() as { tasks: TaskRecord[] };
+          setTaskLogTotal(countData.tasks.length);
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
   function saveToken() {
     const next = tokenDraft.trim();
     if (!next) {
@@ -1174,6 +1222,12 @@ export default function App() {
       });
     }
   }, [mobileTerminalEmployeeId, terminalLogs]);
+
+  useEffect(() => {
+    if (activePage === "tasks" && authToken) {
+      fetchTaskLogList();
+    }
+  }, [activePage, taskFilter, taskDisplayLimit, authToken]);
 
   if (!authToken) {
     return (
@@ -1498,7 +1552,7 @@ export default function App() {
               <div className="section-title-row">
                 <div>
                   <h1>任务日志</h1>
-                  <p>展示最近 30 条任务，失败任务会高亮。</p>
+                  <p>任务记录永久保存，通过接口分页加载。</p>
                 </div>
                 <div className="filter-row">
                   {TASK_FILTERS.map((filter) => (
@@ -1513,13 +1567,14 @@ export default function App() {
                 </div>
               </div>
               <div className="task-table">
-                {taskList.length === 0 ? (
+                {taskLogLoading && taskLogList.length === 0 ? (
+                  <div className="task-output-loading">加载中...</div>
+                ) : taskLogList.length === 0 ? (
                   <div className="history-empty">暂无符合条件的任务。</div>
                 ) : (
-                  taskList.map((task) => {
+                  taskLogList.map((task) => {
                     const isExpanded = expandedTaskId === task.id;
                     const cachedSteps = taskOutputCache[task.id];
-                    const hasOutput = (logs[task.id] && logs[task.id].length > 0) || (cachedSteps && cachedSteps.length > 0);
                     const isLoading = taskOutputLoading === task.id;
                     return (
                       <div className={`task-row task-${task.status}`} key={task.id}>
@@ -1541,8 +1596,6 @@ export default function App() {
                           <div className="task-output-panel">
                             {isLoading ? (
                               <div className="task-output-loading">加载中...</div>
-                            ) : !hasOutput ? (
-                              <div className="task-output-empty">暂无输出记录。</div>
                             ) : cachedSteps && cachedSteps.length > 0 ? (
                               <div className="task-output-steps">
                                 {cachedSteps.map((step, i) => (
@@ -1553,7 +1606,7 @@ export default function App() {
                                 ))}
                               </div>
                             ) : (
-                              <pre className="log-window task-output-log" dangerouslySetInnerHTML={{ __html: renderTerminalHtml(buildTaskHeader(task) + (logs[task.id] || []).map(c => c.content).join("")) }} />
+                              <div className="task-output-empty">暂无输出记录。</div>
                             )}
                           </div>
                         )}
@@ -1562,15 +1615,14 @@ export default function App() {
                   })
                 )}
               </div>
-              {taskHasMore && (
+              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
                 <button
                   className="primary-button"
-                  style={{ marginTop: "10px" }}
                   onClick={() => setTaskDisplayLimit((n) => n + 30)}
                 >
-                  加载更多（剩余 {taskListAll.length - taskDisplayLimit} 条）
+                  加载更多
                 </button>
-              )}
+              </div>
             </section>
           </main>
         )}
