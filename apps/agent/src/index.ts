@@ -171,9 +171,10 @@ function startTask(message: Extract<ServerToEmployeeMessage, { type: "task.dispa
     lastToolBlock: false,
     stderrTail: "",
     retriedWithFreshSession: false,
+    resumingSession: !!message.sessionId,
     generation: 0,
     targetMode: message.targetMode,
-    claudeSessionId: message.targetMode === "queue" ? randomUUID() : agentState.claudeSessionId,
+    claudeSessionId: message.sessionId ?? (message.targetMode === "queue" ? randomUUID() : agentState.claudeSessionId),
     cliConfig: message.cliConfig ?? null,
     resultMetrics: {},
   };

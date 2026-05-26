@@ -76,6 +76,7 @@ export type ActiveTask = {
   lastToolBlock: boolean;
   stderrTail: string;
   retriedWithFreshSession: boolean;
+  resumingSession: boolean;
   generation: number;
   targetMode: TaskTargetMode;
   claudeSessionId: string;

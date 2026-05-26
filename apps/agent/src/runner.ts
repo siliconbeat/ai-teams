@@ -221,7 +221,9 @@ export function buildClaudeArgs(prompt: string, task: ActiveTask, agentState: Ag
     args.push("--settings", CLAUDE_HOOK_SETTINGS);
   }
 
-  if (task.targetMode === "queue") {
+  if (task.resumingSession) {
+    args.push("--resume", task.claudeSessionId);
+  } else if (task.targetMode === "queue") {
     args.push("--session-id", task.claudeSessionId);
   } else if (agentState.sessionReady) {
     args.push("--resume", agentState.claudeSessionId);
