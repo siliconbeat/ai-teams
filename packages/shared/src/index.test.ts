@@ -74,6 +74,66 @@ describe("protocol parsing", () => {
       }),
     ).toThrow();
   });
+
+  it("accepts sessionId in command.dispatch", () => {
+    expect(
+      parseLeaderToServerMessage({
+        type: "command.dispatch",
+        atAgents: "queue",
+        prompt: "continue this",
+        sessionId: "abc-123",
+      }),
+    ).toMatchObject({
+      type: "command.dispatch",
+      atAgents: "queue",
+      prompt: "continue this",
+      sessionId: "abc-123",
+    });
+  });
+
+  it("accepts command.dispatch without sessionId", () => {
+    expect(
+      parseLeaderToServerMessage({
+        type: "command.dispatch",
+        atAgents: "queue",
+        prompt: "run checks",
+      }),
+    ).not.toHaveProperty("sessionId");
+  });
+
+  it("accepts sessionId in task.dispatch", () => {
+    expect(
+      parseServerToEmployeeMessage({
+        type: "task.dispatch",
+        taskId: "task-1",
+        leaderCommandId: "cmd-1",
+        employeeId: "alice",
+        targetMode: "direct",
+        prompt: "continue this",
+        workspace: null,
+        timeoutSec: 30,
+        sessionId: "abc-123",
+      }),
+    ).toMatchObject({
+      type: "task.dispatch",
+      sessionId: "abc-123",
+    });
+  });
+
+  it("accepts task.dispatch without sessionId", () => {
+    expect(
+      parseServerToEmployeeMessage({
+        type: "task.dispatch",
+        taskId: "task-1",
+        leaderCommandId: "cmd-1",
+        employeeId: "alice",
+        targetMode: "direct",
+        prompt: "x",
+        workspace: null,
+        timeoutSec: 30,
+      }),
+    ).not.toHaveProperty("sessionId");
+  });
 });
 
 describe("resolveAtAgentsFromPrompt", () => {

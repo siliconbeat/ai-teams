@@ -102,6 +102,7 @@ export type ServerToEmployeeMessage =
       workspace: string | null;
       timeoutSec: number;
       cliConfig: TaskCliConfig | null;
+      sessionId?: string;
     }
   | { type: "task.cancel"; taskId: string }
   | { type: "queue.resume" }
@@ -154,6 +155,7 @@ export type LeaderToServerMessage =
       timeoutSec?: number;
       priority?: number;
       requiredLabels?: string[];
+      sessionId?: string;
     }
   | {
       type: "command.send";
@@ -207,6 +209,7 @@ export function parseLeaderToServerMessage(value: unknown): LeaderToServerMessag
   const type = stringField(message, "type");
 
   if (type === "command.dispatch") {
+    const sessionId = optionalStringField(message, "sessionId");
     return {
       type,
       atAgents: agentTargetField(message, "atAgents"),
@@ -215,6 +218,7 @@ export function parseLeaderToServerMessage(value: unknown): LeaderToServerMessag
       timeoutSec: optionalPositiveNumberField(message, "timeoutSec"),
       priority: optionalNonNegativeNumberField(message, "priority"),
       requiredLabels: optionalStringArrayField(message, "requiredLabels"),
+      ...(sessionId !== undefined ? { sessionId } : {}),
     };
   }
 
@@ -334,6 +338,7 @@ export function parseServerToEmployeeMessage(value: unknown): ServerToEmployeeMe
   const type = stringField(message, "type");
 
   if (type === "task.dispatch") {
+    const sessionId = optionalStringField(message, "sessionId");
     return {
       type,
       taskId: nonEmptyStringField(message, "taskId"),
@@ -344,6 +349,7 @@ export function parseServerToEmployeeMessage(value: unknown): ServerToEmployeeMe
       workspace: nullableStringField(message, "workspace"),
       timeoutSec: positiveNumberField(message, "timeoutSec"),
       cliConfig: optionalCliConfigField(message, "cliConfig"),
+      ...(sessionId !== undefined ? { sessionId } : {}),
     };
   }
 
