@@ -255,7 +255,7 @@ function isTerminalStatus(status: TaskStatus) {
 }
 
 const ACTIVE_STATUSES = new Set<TaskStatus>(["dispatched", "accepted", "running"]);
-const MAX_VISIBLE_BARS = 10;
+const MAX_VISIBLE_BARS = 20;
 
 function QueueIndicator({ tasks }: { tasks: Record<string, TaskRecord> }) {
   const { running, queued } = useMemo(() => {
