@@ -9,6 +9,7 @@ export type RestTaskRequest = {
   webhook?: unknown;
   webHook?: unknown;
   webhookUrl?: unknown;
+  sessionId?: unknown;
 };
 
 export type WebhookEventType =
@@ -204,6 +205,7 @@ export const restTaskRequestSchema = {
       anyOf: [{ type: "string", format: "uri" }, { type: "object", required: ["url"], properties: { url: { type: "string" } } }],
     },
     webhookUrl: { type: "string", format: "uri" },
+    sessionId: { type: "string" },
   },
 } as const;
 
@@ -313,6 +315,7 @@ export function parseRestTaskRequest(body: unknown) {
     prompt: request.prompt,
     workspace: request.workspace,
     timeoutSec: request.timeoutSec,
+    sessionId: request.sessionId,
   });
 
   const webhookUrl = parseWebhookUrl(request.webhook ?? request.webHook ?? request.webhookUrl);

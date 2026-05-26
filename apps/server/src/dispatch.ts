@@ -538,6 +538,7 @@ export function createDispatch(ctx: DispatchContext) {
       workspace: task.workspace,
       timeoutSec: task.timeoutSec,
       cliConfig: task.cliConfig,
+      ...(task.sessionId ? { sessionId: task.sessionId } : {}),
     }, ctx.encryptor);
   }
 
@@ -598,12 +599,13 @@ export function createDispatch(ctx: DispatchContext) {
     cliConfig?: unknown,
     priority?: number,
     requiredLabels?: string[] | null,
+    sessionId?: string,
   ) {
     const task: TaskRecord = {
       id: randomUUID(),
       leaderCommandId: leaderCommandId ?? randomUUID(),
       employeeId,
-      sessionId: null,
+      sessionId: sessionId ?? null,
       targetMode,
       prompt,
       workspace: workspace?.trim() || null,
@@ -668,7 +670,7 @@ export function createDispatch(ctx: DispatchContext) {
       return {
         ok: true as const,
         leaderCommandId,
-        tasks: [createTask(null, message.prompt, message.workspace, message.timeoutSec, leaderCommandId, "queue", webhookUrl, cliConfig, resolvedPriority, resolvedRequiredLabels)],
+        tasks: [createTask(null, message.prompt, message.workspace, message.timeoutSec, leaderCommandId, "queue", webhookUrl, cliConfig, resolvedPriority, resolvedRequiredLabels, message.sessionId)],
       };
     }
 
@@ -686,7 +688,7 @@ export function createDispatch(ctx: DispatchContext) {
       ok: true as const,
       leaderCommandId,
       tasks: targetIds.map((employeeId) =>
-        createTask(employeeId, message.prompt, message.workspace, message.timeoutSec, leaderCommandId, targetMode, webhookUrl, cliConfig, resolvedPriority, resolvedRequiredLabels),
+        createTask(employeeId, message.prompt, message.workspace, message.timeoutSec, leaderCommandId, targetMode, webhookUrl, cliConfig, resolvedPriority, resolvedRequiredLabels, message.sessionId),
       ),
     };
   }
