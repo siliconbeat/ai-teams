@@ -245,6 +245,7 @@ export function shouldRetryWithFreshClaudeSession(
     exitCode !== 0 &&
     task !== null &&
     task.targetMode !== "queue" &&
+    !task.resumingSession &&
     !task.cancelRequested &&
     !task.retriedWithFreshSession &&
     CLAUDE_MISSING_CONVERSATION_PATTERN.test(task.stderrTail)

@@ -1643,11 +1643,11 @@ export default function App() {
                             {task.status === "queued" && (
                               <button className="retry-btn" onClick={(e) => { e.stopPropagation(); cancelTask(task.id); }}>取消</button>
                             )}
-                            {task.status === "completed" && task.sessionId && (
+                            {task.status === "completed" && task.sessionId && task.employeeId && (
                               <button className="retry-btn" onClick={(e) => {
                                 e.stopPropagation();
                                 setResumeSessionId(task.sessionId);
-                                setSelectedTarget(task.employeeId ? [task.employeeId] : "queue");
+                                setSelectedTarget([task.employeeId!]);
                                 setActivePage("monitor");
                               }}>继续对话</button>
                             )}
