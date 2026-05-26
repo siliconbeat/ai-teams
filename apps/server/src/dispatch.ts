@@ -693,6 +693,59 @@ export function createDispatch(ctx: DispatchContext) {
     };
   }
 
+  function recoverOrFail(taskId: string, employeeId: string, isQueueSlot: boolean) {
+    const task = state.tasks.get(taskId);
+    if (!task || TERMINAL_STATUSES.has(task.status)) return;
+
+    const socket = state.agentSockets.get(employeeId);
+    if (!socket) {
+      markTaskFailed(taskId, "员工重连时未恢复任务，且 socket 不可用。");
+      return;
+    }
+
+    // Re-dispatch the task with sessionId for --resume
+    task.status = "dispatched";
+    log.info({ taskId: task.id, employeeId, sessionId: task.sessionId, prompt: task.prompt.slice(0, 80) }, "Re-dispatching task for session recovery");
+    upsertTask(task);
+
+    sendJson<ServerToEmployeeMessage>(socket, {
+      type: "task.dispatch",
+      taskId: task.id,
+      leaderCommandId: task.leaderCommandId,
+      employeeId,
+      targetMode: task.targetMode,
+      prompt: task.prompt,
+      workspace: task.workspace,
+      timeoutSec: task.timeoutSec,
+      cliConfig: task.cliConfig,
+      ...(task.sessionId ? { sessionId: task.sessionId } : {}),
+    }, ctx.encryptor);
+
+    // If agent doesn't recover within 120s, re-queue or fail
+    const recoveryTimer = setTimeout(() => {
+      const t = state.tasks.get(taskId);
+      if (!t || TERMINAL_STATUSES.has(t.status) || t.status === "running" || t.status === "accepted") return;
+      log.warn({ taskId, employeeId }, "Task recovery timed out after 120s, re-queuing");
+      if (isQueueSlot) {
+        t.status = "queued";
+        t.employeeId = null;
+        t.startedAt = null;
+        upsertTask(t);
+        const isMain = !isQueueSlot;
+        if (!isMain) {
+          setMainTask(employeeId, null, null);
+        } else {
+          setQueueTask(employeeId, null, null);
+        }
+        enqueueSharedTask(t.id);
+        dispatchSharedQueuedTasks();
+      } else {
+        markTaskFailed(taskId, "员工重连后 120s 未恢复任务，自动标记失败。");
+      }
+    }, 120_000);
+    recoveryTimer.unref();
+  }
+
   function handleRegister(message: Extract<EmployeeToServerMessage, { type: "agent.register" }>, socket: WebSocket) {
     const previous = state.employees.get(message.employeeId);
     const previousMainTaskId = previous?.mainTaskId ?? null;
@@ -727,7 +780,7 @@ export function createDispatch(ctx: DispatchContext) {
 
     // Resolve main slot
     if (previousMainTaskId && activeMainTaskId !== previousMainTaskId) {
-      markTaskFailed(previousMainTaskId, "员工重连时未恢复原运行的主任务。");
+      recoverOrFail(previousMainTaskId, message.employeeId, false);
     } else if (activeMainTaskId) {
       const activeTask = state.tasks.get(activeMainTaskId);
       if (activeTask && activeTask.employeeId === message.employeeId && !TERMINAL_STATUSES.has(activeTask.status)) {
@@ -738,7 +791,7 @@ export function createDispatch(ctx: DispatchContext) {
 
     // Resolve queue slot
     if (previousQueueTaskId && activeQueueTaskId !== previousQueueTaskId) {
-      markTaskFailed(previousQueueTaskId, "员工重连时未恢复原运行的队列任务。");
+      recoverOrFail(previousQueueTaskId, message.employeeId, true);
     } else if (activeQueueTaskId) {
       const activeTask = state.tasks.get(activeQueueTaskId);
       if (activeTask && activeTask.employeeId === message.employeeId && !TERMINAL_STATUSES.has(activeTask.status)) {
