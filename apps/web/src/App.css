@@ -684,6 +684,33 @@ a.nav-item {
   background: rgba(0, 0, 0, 0.65);
 }
 
+.bubble-reply-btn {
+  position: absolute;
+  right: 30px;
+  bottom: 2px;
+  opacity: 0;
+  transition: opacity 0.2s;
+  background: rgba(0, 0, 0, 0.45);
+  border: none;
+  border-radius: 4px;
+  padding: 3px 5px;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 11px;
+  cursor: pointer;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+}
+
+.bubble-copy-wrap:hover .bubble-reply-btn {
+  opacity: 1;
+}
+
+.bubble-reply-btn:hover {
+  color: #fff;
+  background: rgba(0, 0, 0, 0.65);
+}
+
 .bubble-collapsible {
   position: relative;
 }

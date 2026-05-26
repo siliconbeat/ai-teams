@@ -149,6 +149,9 @@ type ChatFeedItem = {
   status?: TaskStatus;
   executingBy?: ExecutingAgent[];
   quotedPrompt?: string;
+  taskId?: string;
+  employeeId?: string;
+  sessionId?: string;
 };
 
 type EmployeeTerminalLog = {
@@ -483,6 +486,7 @@ export default function App() {
   const [taskLogList, setTaskLogList] = useState<TaskRecord[]>([]);
   const [taskLogLoading, setTaskLogLoading] = useState(false);
   const [selectedTarget, setSelectedTarget] = useState<AgentTarget>("queue");
+  const [resumeSessionId, setResumeSessionId] = useState<string | null>(null);
   const [draft, setDraft] = useState<CommandDraft>({
     prompt: "",
     workspace: "",
@@ -773,6 +777,9 @@ export default function App() {
         createdAtMs: new Date(task.finishedAt ?? task.createdAt).getTime(),
         status: task.status,
         quotedPrompt: task.prompt,
+        taskId: task.id,
+        employeeId: task.employeeId ?? undefined,
+        sessionId: task.sessionId ?? undefined,
       }));
 
     return [...leaderItems, ...employeeItems].sort((a, b) => a.createdAtMs - b.createdAtMs).slice(-CHAT_FEED_LIMIT);
@@ -792,6 +799,9 @@ export default function App() {
           quotedPrompt: !isLeader ? item.quotedPrompt : undefined,
           createdAt: item.createdAt,
           author: item.author,
+          taskId: item.taskId,
+          employeeId: item.employeeId,
+          sessionId: item.sessionId,
         },
       };
     })
@@ -1075,6 +1085,7 @@ export default function App() {
       atAgents: resolved.atAgents,
       prompt: commandPrompt,
       workspace: draft.workspace.trim() || undefined,
+      ...(resumeSessionId ? { sessionId: resumeSessionId } : {}),
     };
 
     webCryptoEncrypt(JSON.stringify(payload)).then((encrypted) => {
@@ -1092,6 +1103,7 @@ export default function App() {
     ]);
     setDraft((current) => ({ ...current, prompt: "" }));
     setSelectedTarget("queue");
+    setResumeSessionId(null);
   }
 
   const cancelTask = useCallback((taskId: string) => {
@@ -1478,6 +1490,18 @@ export default function App() {
                       <button className="bubble-copy-btn" onClick={() => navigator.clipboard.writeText(String(_content))}>
                         <CopyOutlined />
                       </button>
+                      {item.sessionId && item.employeeId && (
+                        <button
+                          className="bubble-reply-btn"
+                          onClick={() => {
+                            setResumeSessionId(item.sessionId);
+                            setSelectedTarget([item.employeeId]);
+                          }}
+                          title="回复"
+                        >
+                          ↩
+                        </button>
+                      )}
                     </div>
                   );
                 },
@@ -1618,6 +1642,14 @@ export default function App() {
                             )}
                             {task.status === "queued" && (
                               <button className="retry-btn" onClick={(e) => { e.stopPropagation(); cancelTask(task.id); }}>取消</button>
+                            )}
+                            {task.status === "completed" && task.sessionId && (
+                              <button className="retry-btn" onClick={(e) => {
+                                e.stopPropagation();
+                                setResumeSessionId(task.sessionId);
+                                setSelectedTarget(task.employeeId ? [task.employeeId] : "queue");
+                                setActivePage("monitor");
+                              }}>继续对话</button>
                             )}
                           </div>
                         </div>
@@ -2037,6 +2069,18 @@ export default function App() {
                           <button className="bubble-copy-btn" onClick={() => navigator.clipboard.writeText(String(_content))}>
                             <CopyOutlined />
                           </button>
+                          {item.sessionId && item.employeeId && (
+                            <button
+                              className="bubble-reply-btn"
+                              onClick={() => {
+                                setResumeSessionId(item.sessionId);
+                                setSelectedTarget([item.employeeId]);
+                              }}
+                              title="回复"
+                            >
+                              ↩
+                            </button>
+                          )}
                         </div>
                       );
                     },
