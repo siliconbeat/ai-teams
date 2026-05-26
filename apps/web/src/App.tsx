@@ -149,6 +149,8 @@ type ChatFeedItem = {
   status?: TaskStatus;
   executingBy?: ExecutingAgent[];
   quotedPrompt?: string;
+  replyQuote?: string;
+  replyQuoteAuthor?: string;
   taskId?: string;
   employeeId?: string;
   sessionId?: string;
@@ -486,7 +488,8 @@ export default function App() {
   const [taskLogList, setTaskLogList] = useState<TaskRecord[]>([]);
   const [taskLogLoading, setTaskLogLoading] = useState(false);
   const [selectedTarget, setSelectedTarget] = useState<AgentTarget>("queue");
-  const [resumeSessionId, setResumeSessionId] = useState<string | null>(null);
+  const [resumeSession, setResumeSession] = useState<{ sessionId: string; agentName: string; quote: string } | null>(null);
+  const replyQuotesRef = useRef<Record<string, { agentName: string; quote: string }>>({});
   const [draft, setDraft] = useState<CommandDraft>({
     prompt: "",
     workspace: "",
@@ -754,6 +757,7 @@ export default function App() {
       const executingBy = groupTasks
         .filter((t) => t.employeeId && t.status !== "queued")
         .map((t) => ({ name: employees[t.employeeId!]?.name ?? t.employeeId!, status: t.status }));
+      const replyQuoteEntry = first.sessionId ? replyQuotesRef.current[first.sessionId] : undefined;
       leaderItems.push({
         id: `leader-${first.leaderCommandId}`,
         side: "leader",
@@ -763,6 +767,8 @@ export default function App() {
         createdAt: new Date(first.createdAt).toLocaleTimeString(),
         createdAtMs: new Date(first.createdAt).getTime(),
         executingBy: executingBy.length > 0 ? executingBy : undefined,
+        replyQuote: replyQuoteEntry?.quote,
+        replyQuoteAuthor: replyQuoteEntry?.agentName,
       });
     }
 
@@ -797,6 +803,8 @@ export default function App() {
           taskStatus: !isLeader && item.status ? item.status : undefined,
           target: isLeader && item.target ? item.target : undefined,
           quotedPrompt: !isLeader ? item.quotedPrompt : undefined,
+          replyQuote: isLeader ? item.replyQuote : undefined,
+          replyQuoteAuthor: isLeader ? item.replyQuoteAuthor : undefined,
           createdAt: item.createdAt,
           author: item.author,
           taskId: item.taskId,
@@ -1085,7 +1093,7 @@ export default function App() {
       atAgents: resolved.atAgents,
       prompt: commandPrompt,
       workspace: draft.workspace.trim() || undefined,
-      ...(resumeSessionId ? { sessionId: resumeSessionId } : {}),
+      ...(resumeSession ? { sessionId: resumeSession.sessionId } : {}),
     };
 
     webCryptoEncrypt(JSON.stringify(payload)).then((encrypted) => {
@@ -1103,7 +1111,10 @@ export default function App() {
     ]);
     setDraft((current) => ({ ...current, prompt: "" }));
     setSelectedTarget("queue");
-    setResumeSessionId(null);
+    if (resumeSession) {
+      replyQuotesRef.current[resumeSession.sessionId] = { agentName: resumeSession.agentName, quote: resumeSession.quote };
+    }
+    setResumeSession(null);
   }
 
   const cancelTask = useCallback((taskId: string) => {
@@ -1443,6 +1454,7 @@ export default function App() {
                   const item = info.extraInfo;
                   return (
                     <div className="bubble-copy-wrap">
+                      {item.replyQuote && <div className="bubble-quote">{item.replyQuoteAuthor ? `${item.replyQuoteAuthor}: ` : ""}{item.replyQuote.length > 60 ? item.replyQuote.slice(0, 60) + "..." : item.replyQuote}</div>}
                       <div style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>{String(_content)}</div>
                       {item.executingBy?.length > 0 && (
                         <ThoughtChain
@@ -1494,7 +1506,7 @@ export default function App() {
                         <button
                           className="bubble-reply-btn"
                           onClick={() => {
-                            setResumeSessionId(item.sessionId);
+                            setResumeSession({ sessionId: item.sessionId, agentName: item.author || "", quote: String(_content).slice(0, 200) });
                             setSelectedTarget([item.employeeId]);
                           }}
                           title="回复"
@@ -1646,7 +1658,10 @@ export default function App() {
                             {task.status === "completed" && task.sessionId && task.employeeId && (
                               <button className="retry-btn" onClick={(e) => {
                                 e.stopPropagation();
-                                setResumeSessionId(task.sessionId);
+                                const eid = task.employeeId!;
+                                const agentName = employees[eid]?.name ?? eid;
+                                const quote = (task.summary || task.prompt || "").slice(0, 200);
+                                setResumeSession({ sessionId: task.sessionId!, agentName, quote });
                                 setSelectedTarget([task.employeeId!]);
                                 setActivePage("monitor");
                               }}>继续对话</button>
@@ -2019,6 +2034,7 @@ export default function App() {
                       const item = info.extraInfo;
                       return (
                         <div className="bubble-copy-wrap">
+                          {item.replyQuote && <div className="bubble-quote">{item.replyQuoteAuthor ? `${item.replyQuoteAuthor}: ` : ""}{item.replyQuote.length > 60 ? item.replyQuote.slice(0, 60) + "..." : item.replyQuote}</div>}
                           <div style={{ whiteSpace: "pre-wrap" }}>{String(_content)}</div>
                           {item.executingBy?.length > 0 && (
                             <ThoughtChain
@@ -2073,7 +2089,7 @@ export default function App() {
                             <button
                               className="bubble-reply-btn"
                               onClick={() => {
-                                setResumeSessionId(item.sessionId);
+                                setResumeSession({ sessionId: item.sessionId, agentName: item.author || "", quote: String(_content).slice(0, 200) });
                                 setSelectedTarget([item.employeeId]);
                               }}
                               title="回复"
@@ -2130,13 +2146,13 @@ export default function App() {
                       sendCommand();
                     }
                   }}
-                  placeholder={resumeSessionId ? "回复会话中，按 Enter 发送" : "按 Enter 发送，Shift+Enter 换行；@ 选择目标"}
+                  placeholder={resumeSession ? `回复 ${resumeSession.agentName} 的会话，按 Enter 发送` : "按 Enter 发送，Shift+Enter 换行；@ 选择目标"}
                   header={
                     <>
-                      {resumeSessionId && (
+                      {resumeSession && (
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "4px 8px", marginBottom: 4, background: "rgba(22,119,255,0.12)", borderRadius: 6, fontSize: 12 }}>
-                          <span style={{ color: "#69b1ff" }}>↩ 回复会话模式 — 消息将继续上一次对话</span>
-                          <button onClick={() => setResumeSessionId(null)} style={{ background: "none", border: "none", color: "#999", cursor: "pointer", fontSize: 12 }}>取消</button>
+                          <span style={{ color: "#69b1ff" }}>↩ {resumeSession.agentName} — {resumeSession.quote.length > 40 ? resumeSession.quote.slice(0, 40) + "..." : resumeSession.quote}</span>
+                          <button onClick={() => setResumeSession(null)} style={{ background: "none", border: "none", color: "#999", cursor: "pointer", fontSize: 12 }}>取消</button>
                         </div>
                       )}
                       <Sender.Header title="工作目录" open={false}>
