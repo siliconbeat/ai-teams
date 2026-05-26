@@ -423,8 +423,20 @@ a.nav-item {
   border-color: rgba(121, 255, 209, 0.24);
 }
 
-.task-strip span {
+.task-strip .task-strip__label {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #69b1ff;
+  background: rgba(22, 119, 255, 0.15);
+  white-space: nowrap;
+}
+
+.task-strip .task-strip__prompt {
   flex: 1;
+  min-width: 0;
   color: #c9d6f2;
   font-size: 12px;
   white-space: nowrap;

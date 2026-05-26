@@ -351,12 +351,11 @@ function SlotStrip({ label, task, onCancel }: { label: string; task: TaskRecord 
 
   return (
     <div className={`task-strip ${task ? `task-${task.status}` : ""}`}>
-      <span title={task ? `[${label}] ${task.prompt}` : undefined}>
-        {task ? `[${label}] ${task.prompt}` : `[${label}] 空闲`}
-      </span>
+      <span className="task-strip__label">{label}</span>
+      <span className="task-strip__prompt" title={task?.prompt}>{task ? task.prompt : "空闲"}</span>
       {isActive ? (
         <>
-          {elapsed != null && <span className="task-elapsed">[{elapsed}]</span>}
+          <span className="task-elapsed">{elapsed}</span>
           <button className="secondary-button" onClick={() => onCancel(task.id)}>
             取消
           </button>
