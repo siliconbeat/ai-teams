@@ -981,8 +981,10 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     app.log.info("Leader connected");
 
     socket.on("message", (raw: WebSocket.RawData) => {
+      const text = raw.toString();
+      if (!text) return; // heartbeat ping
       try {
-        const decrypted = dispatchCtx.encryptor!.decrypt(raw.toString());
+        const decrypted = dispatchCtx.encryptor!.decrypt(text);
         const message = parseLeaderToServerMessage(parseJsonMessage(decrypted));
         handleLeaderMessage(message, socket);
       } catch (error) {

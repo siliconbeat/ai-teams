@@ -4,6 +4,7 @@ import {
   parseJsonMessage,
   parseServerToLeaderMessage,
   resolveAtAgentsFromPrompt,
+  TERMINAL_STATUSES,
   type AgentTarget,
   EmployeeSnapshot,
   LeaderToServerMessage,
@@ -248,6 +249,41 @@ function trimMarkers(markers: string[]) {
 
 function isTerminalStatus(status: TaskStatus) {
   return status === "completed" || status === "failed" || status === "cancelled" || status === "timeout";
+}
+
+const ACTIVE_STATUSES = new Set<TaskStatus>(["dispatched", "accepted", "running"]);
+const MAX_VISIBLE_BARS = 10;
+
+function QueueIndicator({ tasks }: { tasks: Record<string, TaskRecord> }) {
+  const { running, queued } = useMemo(() => {
+    let running = 0;
+    let queued = 0;
+    for (const t of Object.values(tasks)) {
+      if (ACTIVE_STATUSES.has(t.status)) running++;
+      else if (t.status === "queued" && t.targetMode === "queue") queued++;
+    }
+    return { running, queued };
+  }, [tasks]);
+
+  if (running === 0 && queued === 0) return null;
+
+  const total = running + queued;
+  const visible = Math.min(total, MAX_VISIBLE_BARS);
+  const overflow = total - visible;
+  const visibleRunning = Math.min(running, visible);
+  const visibleQueued = visible - visibleRunning;
+
+  return (
+    <div className="queue-indicator" title={`执行中 ${running} · 队列 ${queued}`}>
+      {Array.from({ length: visibleRunning }, (_, i) => (
+        <span key={`r${i}`} className="bar running" />
+      ))}
+      {Array.from({ length: visibleQueued }, (_, i) => (
+        <span key={`q${i}`} className="bar queued" />
+      ))}
+      {overflow > 0 && <span className="overflow">+{overflow}</span>}
+    </div>
+  );
 }
 
 function capTasks(map: Record<string, TaskRecord>, max: number): Record<string, TaskRecord> {
@@ -1502,8 +1538,11 @@ export default function App() {
                 <h1>AI 员工监控</h1>
                 <p>{connectionError ?? (connected ? "已连接服务端" : "正在等待服务端连接")}</p>
               </div>
-              <div className={`status-pill ${connected ? "online" : "offline"}`}>
-                {connected ? "Leader Online" : "Leader Offline"}
+              <div className="board-header-indicators">
+                <QueueIndicator tasks={tasks} />
+                <div className={`status-pill ${connected ? "online" : "offline"}`}>
+                  {connected ? "Leader Online" : "Leader Offline"}
+                </div>
               </div>
             </header>
 
@@ -1576,6 +1615,9 @@ export default function App() {
                             <small>{new Date(task.createdAt).toLocaleTimeString()}</small>
                             {task.status === "failed" && (
                               <button className="retry-btn" onClick={(e) => { e.stopPropagation(); retryTask(task); }}>重试</button>
+                            )}
+                            {task.status === "queued" && (
+                              <button className="retry-btn" onClick={(e) => { e.stopPropagation(); cancelTask(task.id); }}>取消</button>
                             )}
                           </div>
                         </div>

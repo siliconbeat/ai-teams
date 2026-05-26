@@ -494,6 +494,55 @@ a.nav-item {
   background: rgba(255, 255, 255, 0.05);
 }
 
+.board-header-indicators {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.queue-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.queue-indicator .bar {
+  width: 4px;
+  height: 18px;
+  border-radius: 2px;
+}
+
+.queue-indicator .bar.running {
+  background: #9bc8ff;
+  animation: pulse-bar 2s ease-in-out infinite;
+}
+
+.queue-indicator .bar.queued {
+  background: transparent;
+  border: 1.5px solid rgba(155, 200, 255, 0.3);
+}
+
+.queue-indicator .overflow {
+  font-size: 11px;
+  color: #92a6c8;
+  margin-left: 2px;
+}
+
+@keyframes pulse-bar {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .queue-indicator .bar.running {
+    animation: none;
+    opacity: 1;
+  }
+}
+
 .status-pill.online {
   color: #9df6b5;
 }
@@ -805,6 +854,7 @@ a.nav-item {
 
 .task-row__main {
   min-width: 0;
+  flex: 1;
 }
 
 .task-row__main p {
@@ -816,8 +866,9 @@ a.nav-item {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 6px;
+  gap: 4px;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .task-row__summary {
@@ -825,6 +876,7 @@ a.nav-item {
   justify-content: space-between;
   gap: 10px;
   cursor: pointer;
+  width: 100%;
 }
 
 .task-row__summary:hover {
