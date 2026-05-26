@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import crypto from "node:crypto";
 import os from "node:os";
 import WebSocket from "ws";
@@ -28,8 +29,8 @@ let cachedClaudeVersion: string | undefined;
 function getClaudeVersion(): string | undefined {
   if (cachedClaudeVersion !== undefined) return cachedClaudeVersion || undefined;
   try {
-    const { execSync } = require("node:child_process");
-    cachedClaudeVersion = execSync("claude --version 2>/dev/null", { timeout: 5000, encoding: "utf8" }).trim();
+    const raw = execSync("claude --version 2>/dev/null", { timeout: 5000, encoding: "utf8" }).trim();
+    cachedClaudeVersion = raw.split(/\s/)[0] || raw;
   } catch {
     cachedClaudeVersion = "";
   }
