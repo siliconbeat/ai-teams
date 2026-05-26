@@ -24,6 +24,18 @@ import {
 declare const PKG_VERSION: string;
 const version: string = typeof PKG_VERSION !== "undefined" ? PKG_VERSION : "dev";
 
+let cachedClaudeVersion: string | undefined;
+function getClaudeVersion(): string | undefined {
+  if (cachedClaudeVersion !== undefined) return cachedClaudeVersion || undefined;
+  try {
+    const { execSync } = require("node:child_process");
+    cachedClaudeVersion = execSync("claude --version 2>/dev/null", { timeout: 5000, encoding: "utf8" }).trim();
+  } catch {
+    cachedClaudeVersion = "";
+  }
+  return cachedClaudeVersion || undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Encryption helper
 // ---------------------------------------------------------------------------
@@ -133,6 +145,7 @@ export function registerAgent(
     hostname: os.hostname(),
     labels: EMPLOYEE_LABELS,
     version: version,
+    claudeVersion: getClaudeVersion(),
     activeMainTaskId: mainTask?.taskId ?? null,
     activeQueueTaskId: queueTask?.taskId ?? null,
     lastOutputSeq: Math.max(mainTask?.seq ?? 0, queueTask?.seq ?? 0),

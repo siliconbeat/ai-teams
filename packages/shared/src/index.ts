@@ -41,6 +41,7 @@ export interface EmployeeSnapshot {
   consecutiveQueueFailures: number;
   queuePaused?: boolean;
   version?: string;
+  claudeVersion?: string;
   weight: number;
 }
 
@@ -118,6 +119,7 @@ export type EmployeeToServerMessage =
       hostname: string;
       labels: string[];
       version?: string;
+      claudeVersion?: string;
       activeMainTaskId?: string | null;
       activeQueueTaskId?: string | null;
       lastOutputSeq?: number;
@@ -261,6 +263,7 @@ export function parseEmployeeToServerMessage(value: unknown): EmployeeToServerMe
       hostname: nonEmptyStringField(message, "hostname"),
       labels: stringArrayField(message, "labels"),
       version: optionalStringField(message, "version"),
+      claudeVersion: optionalStringField(message, "claudeVersion"),
       activeMainTaskId: optionalNullableStringField(message, "activeMainTaskId"),
       activeQueueTaskId: optionalNullableStringField(message, "activeQueueTaskId"),
       lastOutputSeq: optionalNonNegativeNumberField(message, "lastOutputSeq"),

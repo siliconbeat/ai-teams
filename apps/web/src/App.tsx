@@ -440,7 +440,7 @@ const EmployeeCard = memo(function EmployeeCard({
       </div>
       <div className="employee-meta">
         <span>{employee.hostname}</span>
-        <span>ID: {employee.id}{employee.version ? ` · v${employee.version}` : ""}</span>
+        <span>ID: {employee.id}{employee.version ? ` · v${employee.version}` : ""}{employee.claudeVersion ? ` · Claude ${employee.claudeVersion}` : ""}</span>
         <span>标签: {employee.labels.join(", ") || "未设置"}</span>
         {employee.queuePaused && (
           <span className="meta-warning">手动暂停</span>
@@ -461,7 +461,7 @@ const EmployeeCard = memo(function EmployeeCard({
   if (prev.terminalText !== next.terminalText) return false;
   if (prev.mainTask?.id !== next.mainTask?.id || prev.queueTask?.id !== next.queueTask?.id || prev.displayTask?.id !== next.displayTask?.id) return false;
   const pe = prev.employee, ne = next.employee;
-  if (pe.status !== ne.status || pe.mainTaskId !== ne.mainTaskId || pe.queueTaskId !== ne.queueTaskId || pe.name !== ne.name || pe.consecutiveQueueFailures !== ne.consecutiveQueueFailures || pe.queuePaused !== ne.queuePaused || pe.version !== ne.version || pe.weight !== ne.weight) return false;
+  if (pe.status !== ne.status || pe.mainTaskId !== ne.mainTaskId || pe.queueTaskId !== ne.queueTaskId || pe.name !== ne.name || pe.consecutiveQueueFailures !== ne.consecutiveQueueFailures || pe.queuePaused !== ne.queuePaused || pe.version !== ne.version || pe.claudeVersion !== ne.claudeVersion || pe.weight !== ne.weight) return false;
   if (pe.labels.length !== ne.labels.length || pe.labels.some((l, i) => l !== ne.labels[i])) return false;
   return true;
 });
