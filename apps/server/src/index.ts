@@ -160,7 +160,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     disconnectGraceMs,
     encryptor: createEncryptor(process.env.AI_TEAMS_ENCRYPTION_KEY),
   };
-  const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage, cancelTaskById, startDisconnectRecovery, resumeAgentQueue, pauseAgentQueue, resetAgentSession, cleanup: dispatchCleanup } = createDispatch(dispatchCtx);
+  const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage, cancelTaskById, prioritizeTask, startDisconnectRecovery, resumeAgentQueue, pauseAgentQueue, resetAgentSession, cleanup: dispatchCleanup } = createDispatch(dispatchCtx);
 
   const scheduleDispatchFn: ScheduleDispatchFn = (message, webhookUrl, cliConfig, priority, requiredLabels) => {
     return dispatchLeaderCommand(message, webhookUrl, cliConfig, priority, requiredLabels);
@@ -625,6 +625,36 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     },
     async (request, reply) => {
       const result = cancelTaskById(request.params.taskId);
+      if (!result.ok) {
+        const code = result.code === "not_found" ? 404 : 409;
+        return reply.code(code).send({ error: result.message });
+      }
+      return result.task;
+    },
+  );
+
+  app.post<{ Params: { taskId: string } }>(
+    "/api/tasks/:taskId/prioritize",
+    {
+      schema: {
+        tags: ["tasks"],
+        summary: "Prioritize a queued task",
+        description: "Move a queued task to the front of the shared queue by bumping its priority to the highest value. Only applies to tasks with status=queued and targetMode=queue.",
+        params: {
+          type: "object",
+          required: ["taskId"],
+          properties: { taskId: { type: "string", minLength: 1 } },
+        },
+        response: {
+          200: taskRecordSchema,
+          404: errorResponseSchema,
+          409: errorResponseSchema,
+          401: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const result = prioritizeTask(request.params.taskId);
       if (!result.ok) {
         const code = result.code === "not_found" ? 404 : 409;
         return reply.code(code).send({ error: result.message });

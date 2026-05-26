@@ -49,9 +49,11 @@ export async function runSetup(existing: AgentConfig | null): Promise<AgentConfi
   const employeeName = await rl.question(`  员工名称 [${existing?.employeeName ?? "Local Agent"}]: `);
   const workspace = await rl.question(`  工作目录 [${existing?.workspace ?? process.cwd()}]: `);
   const runnerMode = await rl.question(`  Runner 模式 (claude/fake) [${existing?.runnerMode ?? "claude"}]: `);
+  const weight = await rl.question(`  任务权重 [${existing?.weight ?? 1}]: `);
 
   rl.close();
 
+  const parsedWeight = Number(weight.trim() || existing?.weight || 1);
   const config: AgentConfig = {
     serverUrl: serverUrl.trim() || existing?.serverUrl || "ws://localhost:3789",
     authToken: authToken.trim() || existing?.authToken || "",
@@ -59,6 +61,7 @@ export async function runSetup(existing: AgentConfig | null): Promise<AgentConfi
     employeeName: employeeName.trim() || existing?.employeeName || "Local Agent",
     workspace: workspace.trim() || existing?.workspace || process.cwd(),
     runnerMode: runnerMode.trim() || existing?.runnerMode || "claude",
+    weight: parsedWeight >= 1 ? parsedWeight : 1,
   };
 
   saveConfigFile(config);

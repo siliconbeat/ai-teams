@@ -362,45 +362,51 @@ export function createDispatch(ctx: DispatchContext) {
     notifySharedQueueWebhooks();
   }
 
-  function removeFromSharedQueue(taskId: string) {
+  function removeFromSharedQueue(taskId: string, notify = true) {
     const index = state.sharedTaskQueue.indexOf(taskId);
     if (index !== -1) {
       state.sharedTaskQueue.splice(index, 1);
-      notifySharedQueueWebhooks();
+      if (notify) {
+        notifySharedQueueWebhooks();
+      }
     }
+  }
+
+  function isEmployeeAvailableForQueue(employee: EmployeeSnapshot, requiredLabels?: string[] | null) {
+    const socket = state.agentSockets.get(employee.id);
+    if (employee.status !== "online" || employee.queueTaskId || socket?.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    if (state.queuePausedSet.has(employee.id)) {
+      return false;
+    }
+
+    const failures = state.consecutiveQueueFailures.get(employee.id) ?? 0;
+    if (failures >= MAX_CONSECUTIVE_QUEUE_FAILURES) {
+      const failureTs = state.failureTimestamps.get(employee.id);
+      if (failureTs && (Date.now() - failureTs) > AUTO_RESUME_MS) {
+        state.consecutiveQueueFailures.set(employee.id, 0);
+        state.failureTimestamps.delete(employee.id);
+        const emp = state.employees.get(employee.id);
+        if (emp) {
+          emp.consecutiveQueueFailures = 0;
+          upsertEmployee(emp);
+        }
+        log.info({ employeeId: employee.id }, "Agent auto-resumed after timeout, failure count reset");
+      } else {
+        return false;
+      }
+    }
+
+    if (requiredLabels && requiredLabels.length > 0) {
+      return requiredLabels.every((label) => employee.labels.includes(label));
+    }
+    return true;
   }
 
   function pickAvailableEmployeeIdForQueue(requiredLabels?: string[]) {
     let available = [...state.employees.values()]
-      .filter((employee) => {
-        const socket = state.agentSockets.get(employee.id);
-        if (employee.status !== "online" || employee.queueTaskId || socket?.readyState !== WebSocket.OPEN) {
-          return false;
-        }
-        const failures = state.consecutiveQueueFailures.get(employee.id) ?? 0;
-        if (state.queuePausedSet.has(employee.id)) {
-          return false;
-        }
-        if (failures >= MAX_CONSECUTIVE_QUEUE_FAILURES) {
-          const failureTs = state.failureTimestamps.get(employee.id);
-          if (failureTs && (Date.now() - failureTs) > AUTO_RESUME_MS) {
-            state.consecutiveQueueFailures.set(employee.id, 0);
-            state.failureTimestamps.delete(employee.id);
-            const emp = state.employees.get(employee.id);
-            if (emp) {
-              emp.consecutiveQueueFailures = 0;
-              upsertEmployee(emp);
-            }
-            log.info({ employeeId: employee.id }, "Agent auto-resumed after timeout, failure count reset");
-          } else {
-            return false;
-          }
-        }
-        if (requiredLabels && requiredLabels.length > 0) {
-          return requiredLabels.every((label) => employee.labels.includes(label));
-        }
-        return true;
-      });
+      .filter((employee) => isEmployeeAvailableForQueue(employee, requiredLabels));
 
     if (available.length === 0) {
       return null;
@@ -433,36 +439,22 @@ export function createDispatch(ctx: DispatchContext) {
     return lightest[lightest.length - 1].id;
   }
 
-  function dispatchSharedQueuedTask(preferredEmployeeId?: string) {
+  function logIfQueueStalledByPausedAgents() {
     if (state.sharedTaskQueue.length === 0) {
       return;
     }
-
-    // Peek at the first valid task to get its requiredLabels for agent matching
-    let firstTask: TaskRecord | null = null;
-    for (const tid of state.sharedTaskQueue) {
-      const t = state.tasks.get(tid);
-      if (t && t.status === "queued") { firstTask = t; break; }
+    const onlineEmployees = [...state.employees.values()].filter((e) => e.status === "online");
+    const allPaused = onlineEmployees.length > 0 && onlineEmployees.every(
+      (e) => state.queuePausedSet.has(e.id) || (state.consecutiveQueueFailures.get(e.id) ?? 0) >= MAX_CONSECUTIVE_QUEUE_FAILURES,
+    );
+    if (allPaused) {
+      log.warn({ queueLength: state.sharedTaskQueue.length }, "All online agents are paused for queue tasks — queue stalled");
     }
-    const requiredLabels = firstTask?.requiredLabels;
+  }
 
-    const employeeId = preferredEmployeeId ?? pickAvailableEmployeeIdForQueue(requiredLabels);
-    if (!employeeId) {
-      if (state.sharedTaskQueue.length > 0) {
-        const onlineEmployees = [...state.employees.values()].filter((e) => e.status === "online");
-        const allPaused = onlineEmployees.length > 0 && onlineEmployees.every(
-          (e) => state.queuePausedSet.has(e.id) || (state.consecutiveQueueFailures.get(e.id) ?? 0) >= MAX_CONSECUTIVE_QUEUE_FAILURES,
-        );
-        if (allPaused) {
-          log.warn({ queueLength: state.sharedTaskQueue.length }, "All online agents are paused for queue tasks — queue stalled");
-        }
-      }
-      return;
-    }
-
-    const employee = state.employees.get(employeeId);
-    if (!employee || employee.queueTaskId || employee.status !== "online") {
-      return;
+  function dispatchSharedQueuedTask(preferredEmployeeId?: string): boolean {
+    if (state.sharedTaskQueue.length === 0) {
+      return false;
     }
 
     for (let i = 0; i < state.sharedTaskQueue.length; i++) {
@@ -470,19 +462,31 @@ export function createDispatch(ctx: DispatchContext) {
       const task = state.tasks.get(taskId);
       if (!task || task.status !== "queued" || task.targetMode !== "queue") continue;
       if (retryDelays.has(taskId)) continue;
+
+      const requiredLabels = task.requiredLabels ?? undefined;
+      let employeeId: string | null = null;
+      if (preferredEmployeeId) {
+        const employee = state.employees.get(preferredEmployeeId);
+        employeeId = employee && isEmployeeAvailableForQueue(employee, requiredLabels) ? employee.id : null;
+      } else {
+        employeeId = pickAvailableEmployeeIdForQueue(requiredLabels);
+      }
+      if (!employeeId) continue;
+
       state.sharedTaskQueue.splice(i, 1);
       dispatchTask(task, employeeId);
-      return;
+      return true;
     }
+
+    logIfQueueStalledByPausedAgents();
+    return false;
   }
 
   function dispatchSharedQueuedTasks() {
     for (let index = 0; index < state.employees.size && state.sharedTaskQueue.length > 0; index += 1) {
-      const employeeId = pickAvailableEmployeeIdForQueue();
-      if (!employeeId) {
+      if (!dispatchSharedQueuedTask()) {
         return;
       }
-      dispatchSharedQueuedTask(employeeId);
     }
   }
 
@@ -1197,11 +1201,48 @@ export function createDispatch(ctx: DispatchContext) {
     return { ok: true };
   }
 
+  function prioritizeTask(taskId: string): { ok: true; task: TaskRecord } | { ok: false; code: string; message: string } {
+    const task = state.tasks.get(taskId);
+    if (!task) {
+      return { ok: false, code: "not_found", message: "任务不存在。" };
+    }
+    if (task.status !== "queued") {
+      return { ok: false, code: "not_queued", message: "只有排队中的任务可以优先执行。" };
+    }
+    if (task.targetMode !== "queue") {
+      return { ok: false, code: "not_shared_queue", message: "只有队列任务可以优先执行。" };
+    }
+    const queueIndex = state.sharedTaskQueue.indexOf(taskId);
+    if (queueIndex === -1) {
+      return { ok: false, code: "not_in_queue", message: "任务不在共享队列中。" };
+    }
+    const maxPriority = state.sharedTaskQueue.reduce((max, tid) => {
+      const t = state.tasks.get(tid);
+      return t ? Math.max(max, t.priority ?? 1) : max;
+    }, 0);
+    task.priority = Math.min(3, maxPriority + 1);
+    upsertTask(task);
+    removeFromSharedQueue(taskId, false);
+    let insertAt = state.sharedTaskQueue.length;
+    for (let i = 0; i < state.sharedTaskQueue.length; i++) {
+      const existing = state.tasks.get(state.sharedTaskQueue[i]!);
+      if (existing && task.priority >= (existing.priority ?? 1)) {
+        insertAt = i;
+        break;
+      }
+    }
+    state.sharedTaskQueue.splice(insertAt, 0, taskId);
+    notifySharedQueueWebhooks();
+    log.info({ taskId, priority: task.priority }, "Task prioritized");
+    return { ok: true, task };
+  }
+
   return {
     dispatchLeaderCommand,
     handleAgentMessage,
     handleLeaderMessage,
     cancelTaskById,
+    prioritizeTask,
     startDisconnectRecovery,
     resumeAgentQueue,
     pauseAgentQueue,

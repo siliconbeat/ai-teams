@@ -1126,6 +1126,26 @@ export default function App() {
     });
   }, []);
 
+  const prioritizeTask = useCallback(async (taskId: string) => {
+    try {
+      const response = await fetch(`/api/tasks/${taskId}/prioritize`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      if (!response.ok) {
+        const fallback = "优先执行失败";
+        try {
+          const data = await response.json() as { error?: string; message?: string };
+          alert(data.error || data.message || fallback);
+        } catch {
+          alert(fallback);
+        }
+      }
+    } catch {
+      alert("网络请求失败");
+    }
+  }, [authToken]);
+
   const resetSession = useCallback((employeeId: string) => {
     fetch(`/api/agents/${employeeId}/reset-session`, {
       method: "POST",
@@ -1652,10 +1672,13 @@ export default function App() {
                               <button className="retry-btn" onClick={(e) => { e.stopPropagation(); retryTask(task); }}>重试</button>
                             )}
                             {task.status === "queued" && (
-                              <button className="retry-btn" onClick={(e) => { e.stopPropagation(); cancelTask(task.id); }}>取消</button>
+                              <>
+                                <button className="action-btn action-btn--green" onClick={(e) => { e.stopPropagation(); prioritizeTask(task.id); }}>优先执行</button>
+                                <button className="retry-btn" onClick={(e) => { e.stopPropagation(); cancelTask(task.id); }}>取消</button>
+                              </>
                             )}
                             {task.status === "completed" && task.sessionId && task.employeeId && (
-                              <button className="retry-btn" onClick={(e) => {
+                              <button className="action-btn action-btn--blue" onClick={(e) => {
                                 e.stopPropagation();
                                 const eid = task.employeeId!;
                                 const agentName = employees[eid]?.name ?? eid;

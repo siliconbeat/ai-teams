@@ -606,6 +606,72 @@ describe("WebSocket 任务调度", () => {
     expect(aliceCount).toBeGreaterThan(rounds / 2);
   });
 
+  it("优先执行不会让 priority 超过协议上限，并把同优先级任务放到队列前面", async () => {
+    const firstRes = await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "first max priority", atAgents: "queue", priority: 3 }),
+    });
+    const secondRes = await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "second max priority", atAgents: "queue", priority: 3 }),
+    });
+    const firstBody = (await firstRes.json()) as { tasks: Array<{ id: string }> };
+    const secondBody = (await secondRes.json()) as { tasks: Array<{ id: string }> };
+    expect(firstBody.tasks[0]).toBeTruthy();
+    expect(secondBody.tasks[0]).toBeTruthy();
+
+    const prioritizeRes = await fetch(`${httpBaseUrl}/api/tasks/${secondBody.tasks[0]!.id}/prioritize`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(prioritizeRes.status).toBe(200);
+    const prioritized = (await prioritizeRes.json()) as { priority: number };
+    expect(prioritized.priority).toBe(3);
+
+    const agent = await connectWs(`${baseUrl}/ws/agent?token=${TOKEN}`);
+    const dispatchPromise = waitForAgentDispatch(agent);
+    sendAgentRegister(agent, "alice");
+    await waitUntil(() => server.buildSnapshot().employees.some((e) => e.id === "alice" && e.status === "online"));
+
+    const dispatch = await dispatchPromise;
+    expect(dispatch.prompt).toBe("second max priority");
+  });
+
+  it("优先任务标签不匹配时不会阻塞后续可执行队列任务", async () => {
+    const gpuRes = await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "gpu only", atAgents: "queue", priority: 3, requiredLabels: ["gpu"] }),
+    });
+    const cpuRes = await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "cpu only", atAgents: "queue", priority: 1, requiredLabels: ["cpu"] }),
+    });
+    const gpuBody = (await gpuRes.json()) as { tasks: Array<{ id: string }> };
+    const cpuBody = (await cpuRes.json()) as { tasks: Array<{ id: string }> };
+
+    const prioritizeRes = await fetch(`${httpBaseUrl}/api/tasks/${gpuBody.tasks[0]!.id}/prioritize`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(prioritizeRes.status).toBe(200);
+
+    const agent = await connectWs(`${baseUrl}/ws/agent?token=${TOKEN}`);
+    const dispatchPromise = waitForAgentDispatch(agent);
+    sendAgentRegister(agent, "cpu-agent", undefined, { labels: ["cpu"] });
+    await waitUntil(() => server.buildSnapshot().employees.some((e) => e.id === "cpu-agent" && e.status === "online"));
+
+    const dispatch = await dispatchPromise;
+    expect(dispatch.prompt).toBe("cpu only");
+
+    const snapshot = server.buildSnapshot();
+    expect(snapshot.tasks.find((t) => t.id === gpuBody.tasks[0]!.id)?.status).toBe("queued");
+    expect(snapshot.tasks.find((t) => t.id === cpuBody.tasks[0]!.id)?.status).toBe("dispatched");
+  });
+
   it("WebSocket task.cancel 取消运行中的任务", async () => {
     const agent = await connectAgent("alice");
     const leader = await connectLeader();
@@ -1081,8 +1147,14 @@ async function connectLeader() {
   return connectWs(`${baseUrl}/ws/leader?token=${TOKEN}`);
 }
 
-async function connectAgent(employeeId: string, activeTaskId?: string, opts?: { weight?: number }) {
+async function connectAgent(employeeId: string, activeTaskId?: string, opts?: { weight?: number; labels?: string[] }) {
   const socket = await connectWs(`${baseUrl}/ws/agent?token=${TOKEN}`);
+  sendAgentRegister(socket, employeeId, activeTaskId, opts);
+  await waitUntil(() => server.buildSnapshot().employees.some((e) => e.id === employeeId && e.status === "online"));
+  return socket;
+}
+
+function sendAgentRegister(socket: WebSocket, employeeId: string, activeTaskId?: string, opts?: { weight?: number; labels?: string[] }) {
   socket.send(
     JSON.stringify({
       type: "agent.register",
@@ -1090,15 +1162,13 @@ async function connectAgent(employeeId: string, activeTaskId?: string, opts?: { 
       name: employeeId,
       machineId: employeeId,
       hostname: "test-host",
-      labels: [],
+      labels: opts?.labels ?? [],
       weight: opts?.weight,
       activeMainTaskId: activeTaskId ?? null,
       activeQueueTaskId: null,
       lastOutputSeq: 0,
     }),
   );
-  await waitUntil(() => server.buildSnapshot().employees.some((e) => e.id === employeeId && e.status === "online"));
-  return socket;
 }
 
 function connectWs(url: string): Promise<WebSocket> {

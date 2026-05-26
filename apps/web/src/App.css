@@ -970,6 +970,30 @@ a.nav-item {
   background: rgba(255, 179, 179, 0.1);
   border-color: rgba(255, 179, 179, 0.7);
 }
+.action-btn {
+  padding: 3px 10px;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  transition: background 0.15s, border-color 0.15s;
+}
+.action-btn--green {
+  border: 1px solid rgba(82, 196, 26, 0.4);
+  color: #52c41a;
+}
+.action-btn--green:hover {
+  background: rgba(82, 196, 26, 0.1);
+  border-color: rgba(82, 196, 26, 0.7);
+}
+.action-btn--blue {
+  border: 1px solid rgba(22, 119, 255, 0.4);
+  color: #1677ff;
+}
+.action-btn--blue:hover {
+  background: rgba(22, 119, 255, 0.1);
+  border-color: rgba(22, 119, 255, 0.7);
+}
 
 .history-item {
   border-radius: 10px;
