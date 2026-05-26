@@ -77,7 +77,7 @@ export function handleClaudeJsonLine(
         const task = findActiveTask(taskId);
         if (task) {
           task.sawStreamText = true;
-          task.summary.push(delta.text);
+          if (!task.resumingSession) task.summary.push(delta.text);
         }
         emitOutput(taskId, "stdout", delta.text, true);
       } else if (delta?.type === "thinking_delta" && delta.thinking) {
@@ -124,14 +124,18 @@ export function handleClaudeJsonLine(
 
   if (parsed.type === "result" && typeof parsed.result === "string") {
     const task = findActiveTask(taskId);
-    if (task?.sawStreamText) {
+    if (task?.sawStreamText && !task.resumingSession) {
       // Text already streamed — only emit metrics, skip duplicate result text
       emitOutput(taskId, "stdout", formatClaudeDoneNode(parsed, true));
       extractMetrics(taskId, parsed, findActiveTask);
       return;
     }
-    task?.summary.push(parsed.result);
-    emitOutput(taskId, "stdout", formatClaudeDoneNode(parsed, false));
+    if (task?.resumingSession && task.summary.length === 0) {
+      task.summary.push(parsed.result);
+    } else if (!task?.sawStreamText) {
+      task?.summary.push(parsed.result);
+    }
+    emitOutput(taskId, "stdout", formatClaudeDoneNode(parsed, !task?.resumingSession && !!task?.sawStreamText));
     extractMetrics(taskId, parsed, findActiveTask);
   }
 }

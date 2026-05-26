@@ -2130,16 +2130,24 @@ export default function App() {
                       sendCommand();
                     }
                   }}
-                  placeholder="按 Enter 发送，Shift+Enter 换行；@ 选择目标"
+                  placeholder={resumeSessionId ? "回复会话中，按 Enter 发送" : "按 Enter 发送，Shift+Enter 换行；@ 选择目标"}
                   header={
-                    <Sender.Header title="工作目录" open={false}>
-                      <input
-                        value={draft.workspace}
-                        onChange={(e) => setDraft((c) => ({ ...c, workspace: e.target.value }))}
-                        placeholder="/Users/junhang/workspace/project"
-                        style={{ width: "100%", padding: "4px 8px", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 6, color: "#eef4ff", fontSize: 12 }}
-                      />
-                    </Sender.Header>
+                    <>
+                      {resumeSessionId && (
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "4px 8px", marginBottom: 4, background: "rgba(22,119,255,0.12)", borderRadius: 6, fontSize: 12 }}>
+                          <span style={{ color: "#69b1ff" }}>↩ 回复会话模式 — 消息将继续上一次对话</span>
+                          <button onClick={() => setResumeSessionId(null)} style={{ background: "none", border: "none", color: "#999", cursor: "pointer", fontSize: 12 }}>取消</button>
+                        </div>
+                      )}
+                      <Sender.Header title="工作目录" open={false}>
+                        <input
+                          value={draft.workspace}
+                          onChange={(e) => setDraft((c) => ({ ...c, workspace: e.target.value }))}
+                          placeholder="/Users/junhang/workspace/project"
+                          style={{ width: "100%", padding: "4px 8px", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 6, color: "#eef4ff", fontSize: 12 }}
+                        />
+                      </Sender.Header>
+                    </>
                   }
                   style={{ flexShrink: 0 }}
                 />
