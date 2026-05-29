@@ -1,9 +1,9 @@
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 import websocket from "@fastify/websocket";
@@ -18,8 +18,8 @@ import {
   type StateSnapshot,
 } from "@ai-teams/shared";
 import { daemonize, stopDaemon, getDaemonStatus } from "@ai-teams/shared/daemon";
-import { createDatabaseFromEnv, initDb, hydrateState, type Database, queryTasks, getTaskById, getTaskLogsByTaskId, deleteTask, updateTaskFields, dbRowToTask, upsertSchedule, getAllSchedules, getScheduleById, deleteScheduleRow, updateScheduleFields, type ScheduleRecord } from "./db.js";
-import { type RestTaskRequest, errorResponseSchema, snapshotSchema, sessionHistorySchema, restTaskRequestSchema, restTaskAcceptedSchema, taskListResponseSchema, taskRecordSchema, taskOutputResponseSchema, taskPatchSchema, parseRestTaskRequest, claudeSessionsResponseSchema, createScheduleRequestSchema, updateScheduleRequestSchema, scheduleResponseSchema, scheduleListResponseSchema, type CreateScheduleRequest, type UpdateScheduleRequest } from "./schemas.js";
+import { createDatabaseFromEnv, initDb, hydrateState, type Database, queryTasks, getTaskById, getTaskLogsByTaskId, deleteTask, updateTaskFields, dbRowToTask, upsertSchedule, getAllSchedules, getScheduleById, deleteScheduleRow, updateScheduleFields, type ScheduleRecord, listAgentRegistrations, upsertAgentRegistration, deleteAgentRegistration, deleteEmployee } from "./db.js";
+import { type RestTaskRequest, errorResponseSchema, snapshotSchema, sessionHistorySchema, restTaskRequestSchema, restTaskAcceptedSchema, taskListResponseSchema, taskRecordSchema, taskOutputResponseSchema, taskPatchSchema, parseRestTaskRequest, claudeSessionsResponseSchema, createScheduleRequestSchema, updateScheduleRequestSchema, scheduleResponseSchema, scheduleListResponseSchema, agentRegistrationListResponseSchema, createAgentRegistrationRequestSchema, agentRegistrationTokenResponseSchema, type CreateScheduleRequest, type UpdateScheduleRequest } from "./schemas.js";
 import { createDispatch, nowIso, sendJson } from "./dispatch.js";
 import type { DispatchContext } from "./dispatch.js";
 import { createInMemoryStateStore } from "./state-store.js";
@@ -46,6 +46,32 @@ function scheduleToResponse(s: ScheduleRecord) {
   };
 }
 
+function agentRegistrationToResponse(registration: {
+  employeeId: string;
+  name: string;
+  machineId: string | null;
+  hostname: string | null;
+  labels: string[];
+  status: "pending" | "approved";
+  createdAt: string;
+  updatedAt: string;
+  approvedAt: string | null;
+  lastSeenAt: string | null;
+}) {
+  return {
+    employeeId: registration.employeeId,
+    name: registration.name,
+    machineId: registration.machineId,
+    hostname: registration.hostname,
+    labels: registration.labels,
+    status: registration.status,
+    createdAt: registration.createdAt,
+    updatedAt: registration.updatedAt,
+    approvedAt: registration.approvedAt,
+    lastSeenAt: registration.lastSeenAt,
+  };
+}
+
 const DEFAULT_PORT = 3789;
 
 export type AiTeamsServerOptions = {
@@ -59,6 +85,8 @@ export type AiTeamsServerOptions = {
   logger?: boolean;
   logLevel?: string;
   logDir?: string;
+  maxLogChunksPerTask?: number;
+  agentRegistrationMode?: "open" | "approval";
 };
 
 export type AiTeamsServer = {
@@ -74,6 +102,23 @@ function isAuthorized(authToken: string, rawUrl: string, headers: Record<string,
   return tokenFromHeader === authToken || tokenFromQuery === authToken;
 }
 
+function nextDateToIso(value: unknown): string | null {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "object" && typeof (value as { toISO?: unknown }).toISO === "function") {
+    return ((value as { toISO(): string | null }).toISO()) ?? null;
+  }
+  return null;
+}
+
+function generateAgentToken() {
+  return randomBytes(24).toString("base64url");
+}
+
+function hashAgentToken(serverToken: string, agentToken: string) {
+  return createHmac("sha256", serverToken).update(agentToken).digest("hex");
+}
+
 export async function createAiTeamsServer(options: AiTeamsServerOptions): Promise<AiTeamsServer> {
   if (!options.authToken) {
     throw new Error("AI_TEAMS_AUTH_TOKEN is required.");
@@ -81,6 +126,8 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
 
   const defaultTimeoutSec = options.defaultTimeoutSec ?? 1800;
   const disconnectGraceMs = options.disconnectGraceMs ?? 15000;
+  const maxLogChunksPerTask = options.maxLogChunksPerTask ?? 400;
+  const agentRegistrationMode = options.agentRegistrationMode ?? "approval";
   const dataDir = options.dataDir ?? path.join(process.cwd(), "data");
   const dbPath = options.dbPath ?? path.join(dataDir, "ai-teams.db");
   let closing = false;
@@ -93,12 +140,12 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     DATABASE_URL: process.env.DATABASE_URL,
   });
   await initDb(db);
-  await hydrateState(db, state, defaultTimeoutSec);
+  await hydrateState(db, state, defaultTimeoutSec, maxLogChunksPerTask);
 
   const logLevel = options.logLevel || process.env.LOG_LEVEL || "info";
   const logDir = options.logDir || process.env.LOG_DIR;
 
-  let loggerConfig: boolean | { level: string; transport?: unknown } = { level: logLevel };
+  let loggerConfig: FastifyServerOptions["logger"] = { level: logLevel };
 
   if (logDir && options.logger !== false) {
     fs.mkdirSync(logDir, { recursive: true });
@@ -113,7 +160,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     };
   }
 
-  const app = Fastify({ logger: options.logger === false ? false : loggerConfig });
+  const app = Fastify({ logger: options.logger === false ? false : loggerConfig }) as FastifyInstance;
   await app.register(websocket);
   await app.register(swagger, {
     openapi: {
@@ -151,6 +198,8 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     app.log.info({ webDir }, "Web UI enabled");
   }
 
+  const agentSocketTokens = new WeakMap<WebSocket, string | null>();
+
   const dispatchCtx: DispatchContext = {
     state,
     db,
@@ -159,6 +208,10 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     defaultTimeoutSec,
     disconnectGraceMs,
     encryptor: createEncryptor(process.env.AI_TEAMS_ENCRYPTION_KEY),
+    maxLogChunksPerTask,
+    agentRegistrationMode,
+    getAgentToken: (socket) => agentSocketTokens.get(socket) ?? null,
+    hashAgentToken: (token) => hashAgentToken(options.authToken, token),
   };
   const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage, cancelTaskById, prioritizeTask, startDisconnectRecovery, resumeAgentQueue, pauseAgentQueue, resetAgentSession, cleanup: dispatchCleanup } = createDispatch(dispatchCtx);
 
@@ -169,7 +222,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
   async function onScheduleFire(scheduleId: string) {
     const now = new Date().toISOString();
     const job = state.scheduleJobs.get(scheduleId);
-    const nextRun = job?.nextDate()?.toISO() ?? null;
+    const nextRun = nextDateToIso(job?.nextDate());
     await updateScheduleFields(db, scheduleId, { lastRunAt: now, nextRunAt: nextRun });
   }
 
@@ -178,7 +231,9 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     for (const schedule of schedules) {
       if (schedule.enabled) {
         try {
-          startScheduleJob(schedule, scheduleDispatchFn, state.scheduleJobs, onScheduleFire);
+          startScheduleJob(schedule, scheduleDispatchFn, state.scheduleJobs, onScheduleFire, (id, err) => {
+            app.log.error({ scheduleId: id, err }, "Scheduled task failed");
+          });
         } catch (err) {
           app.log.error({ scheduleId: schedule.id, cronExpr: schedule.cronExpr, err }, "Failed to start schedule");
         }
@@ -697,6 +752,113 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
 
   // ── Agent Routes ─────────────────────────────────────────────────────
 
+  app.get(
+    "/api/agent-registry",
+    {
+      schema: {
+        tags: ["agents"],
+        summary: "List registered and pending agents",
+        response: { 200: agentRegistrationListResponseSchema, 401: errorResponseSchema },
+      },
+    },
+    async () => {
+      const agents = await listAgentRegistrations(db);
+      return { agents: agents.map(agentRegistrationToResponse) };
+    },
+  );
+
+  app.post<{ Body: { employeeId: string; name?: string; labels?: string[]; token?: string } }>(
+    "/api/agent-registry",
+    {
+      schema: {
+        tags: ["agents"],
+        summary: "Pre-approve an agent and generate its token",
+        body: createAgentRegistrationRequestSchema,
+        response: { 201: agentRegistrationTokenResponseSchema, 401: errorResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const agentToken = request.body.token?.trim() || generateAgentToken();
+      const now = nowIso();
+      await upsertAgentRegistration(db, {
+        employeeId: request.body.employeeId,
+        name: request.body.name?.trim() || request.body.employeeId,
+        labels: request.body.labels ?? [],
+        tokenHash: hashAgentToken(options.authToken, agentToken),
+        status: "approved",
+        approvedAt: now,
+      });
+      const agent = await listAgentRegistrations(db).then((items) => items.find((item) => item.employeeId === request.body.employeeId));
+      return reply.code(201).send({ agent: agentRegistrationToResponse(agent!), agentToken });
+    },
+  );
+
+  app.post<{ Params: { employeeId: string }; Body: { token?: string } }>(
+    "/api/agent-registry/:employeeId/approve",
+    {
+      schema: {
+        tags: ["agents"],
+        summary: "Approve a pending agent and generate its token",
+        params: { type: "object", required: ["employeeId"], properties: { employeeId: { type: "string", minLength: 1 } } },
+        body: { type: "object", properties: { token: { type: "string", minLength: 8 } } },
+        response: { 200: agentRegistrationTokenResponseSchema, 404: errorResponseSchema, 401: errorResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const existing = (await listAgentRegistrations(db)).find((item) => item.employeeId === request.params.employeeId);
+      if (!existing) return reply.code(404).send({ error: "Agent registration not found." });
+      const agentToken = request.body?.token?.trim() || generateAgentToken();
+      const now = nowIso();
+      await upsertAgentRegistration(db, {
+        employeeId: existing.employeeId,
+        name: existing.name,
+        machineId: existing.machineId,
+        hostname: existing.hostname,
+        labels: existing.labels,
+        tokenHash: hashAgentToken(options.authToken, agentToken),
+        status: "approved",
+        approvedAt: now,
+        lastSeenAt: existing.lastSeenAt,
+      });
+      const agent = (await listAgentRegistrations(db)).find((item) => item.employeeId === request.params.employeeId);
+      return { agent: agentRegistrationToResponse(agent!), agentToken };
+    },
+  );
+
+  app.delete<{ Params: { employeeId: string } }>(
+    "/api/agent-registry/:employeeId",
+    {
+      schema: {
+        tags: ["agents"],
+        summary: "Delete an agent registration and disconnect the agent",
+        params: { type: "object", required: ["employeeId"], properties: { employeeId: { type: "string", minLength: 1 } } },
+        response: {
+          200: { type: "object", required: ["deleted"], properties: { deleted: { type: "boolean" } } },
+          404: errorResponseSchema,
+          409: errorResponseSchema,
+          401: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const employee = state.employees.get(request.params.employeeId);
+      if (employee?.mainTaskId || employee?.queueTaskId) {
+        return reply.code(409).send({ error: "Agent has active tasks and cannot be deleted." });
+      }
+      const deleted = await deleteAgentRegistration(db, request.params.employeeId);
+      if (!deleted) return reply.code(404).send({ error: "Agent registration not found." });
+      const socket = state.agentSockets.get(request.params.employeeId);
+      if (socket) socket.close(1008, "agent_deleted");
+      state.agentSockets.delete(request.params.employeeId);
+      state.employees.delete(request.params.employeeId);
+      await deleteEmployee(db, request.params.employeeId);
+      for (const leaderSocket of state.leaderSockets) {
+        sendJson<ServerToLeaderMessage>(leaderSocket, { type: "employee.delete", employeeId: request.params.employeeId }, dispatchCtx.encryptor);
+      }
+      return { deleted: true };
+    },
+  );
+
   app.post<{ Params: { employeeId: string } }>(
     "/api/agents/:employeeId/resume-queue",
     {
@@ -847,8 +1009,10 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
       };
       try {
         if (schedule.enabled) {
-          startScheduleJob(schedule, scheduleDispatchFn, state.scheduleJobs, onScheduleFire);
-          schedule.nextRunAt = state.scheduleJobs.get(id)?.nextDate()?.toISO() ?? null;
+          startScheduleJob(schedule, scheduleDispatchFn, state.scheduleJobs, onScheduleFire, (scheduleId, error) => {
+            app.log.error({ scheduleId, error }, "Scheduled task failed");
+          });
+          schedule.nextRunAt = nextDateToIso(state.scheduleJobs.get(id)?.nextDate());
         }
         await upsertSchedule(db, schedule);
         return reply.code(201).send(scheduleToResponse(schedule));
@@ -889,8 +1053,10 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
       try {
         stopScheduleJob(state.scheduleJobs, request.params.scheduleId);
         if (updated.enabled) {
-          startScheduleJob(updated, scheduleDispatchFn, state.scheduleJobs, onScheduleFire);
-          updated.nextRunAt = state.scheduleJobs.get(request.params.scheduleId)?.nextDate()?.toISO() ?? null;
+          startScheduleJob(updated, scheduleDispatchFn, state.scheduleJobs, onScheduleFire, (scheduleId, error) => {
+            app.log.error({ scheduleId, error }, "Scheduled task failed");
+          });
+          updated.nextRunAt = nextDateToIso(state.scheduleJobs.get(request.params.scheduleId)?.nextDate());
           await updateScheduleFields(db, request.params.scheduleId, { nextRunAt: updated.nextRunAt });
         }
         return scheduleToResponse(updated);
@@ -958,17 +1124,22 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
       socket.close(1008, "unauthorized");
       return;
     }
+    const url = new URL(request.url, "http://localhost");
+    const headerAgentToken = typeof request.headers["x-ai-teams-agent-token"] === "string"
+      ? request.headers["x-ai-teams-agent-token"]
+      : "";
+    agentSocketTokens.set(socket, headerAgentToken || url.searchParams.get("agentToken") || null);
     app.log.info("Agent connected");
 
     socket.on("message", (raw: WebSocket.RawData) => {
-      try {
+      void (async () => {
         const decrypted = dispatchCtx.encryptor!.decrypt(raw.toString());
         const message = parseEmployeeToServerMessage(parseJsonMessage(decrypted));
-        handleAgentMessage(message, socket);
-      } catch (error) {
+        await handleAgentMessage(message, socket);
+      })().catch((error) => {
         app.log.error({ error }, "Failed to parse agent message");
         socket.close(1008, "invalid_message");
-      }
+      });
     });
 
     socket.on("close", () => {
@@ -1068,6 +1239,8 @@ export function readOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): AiTeam
     disconnectGraceMs: Number(env.DISCONNECT_GRACE_MS) || 15000,
     logLevel: env.LOG_LEVEL,
     logDir: env.LOG_DIR,
+    maxLogChunksPerTask: Number(env.MAX_LOG_CHUNKS_PER_TASK) || 400,
+    agentRegistrationMode: env.AGENT_REGISTRATION_MODE === "open" ? "open" : "approval",
   };
 }
 

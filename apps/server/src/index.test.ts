@@ -25,6 +25,7 @@ beforeEach(async () => {
     dbPath: path.join(tmpDir, "ai-teams.db"),
     defaultTimeoutSec: 0.08,
     disconnectGraceMs: 80,
+    agentRegistrationMode: "open",
     logger: false,
   });
   await server.app.listen({ port: 0, host: "127.0.0.1" });
@@ -54,6 +55,12 @@ describe("认证", () => {
     expect(leader.readyState).toBe(WebSocket.OPEN);
   });
 
+  it("Agent 注册时同步权限模式到快照", async () => {
+    await connectAgent("alice", undefined, { permissionMode: "bypassPermissions" });
+    const employee = server.buildSnapshot().employees.find((e) => e.id === "alice");
+    expect(employee?.permissionMode).toBe("bypassPermissions");
+  });
+
   it("拒绝未认证的 REST 请求", async () => {
     const response = await fetch(`${httpBaseUrl}/api/snapshot`);
     expect(response.status).toBe(401);
@@ -70,6 +77,75 @@ describe("认证", () => {
     const openapi = (await response.json()) as { openapi: string; paths: Record<string, unknown> };
     expect(openapi.openapi).toMatch(/^3\./);
     expect(openapi.paths["/api/tasks"]).toBeTruthy();
+  });
+});
+
+describe("Agent 注册审批", () => {
+  it("approval 模式下未知 Agent 先进入 pending，批准后必须带 Agent Token 才能注册", async () => {
+    await Promise.all(sockets.map((socket) => closeSocket(socket)));
+    sockets = [];
+    await server.close();
+    server = await createAiTeamsServer({
+      authToken: TOKEN,
+      dbPath: path.join(tmpDir, "approval.db"),
+      defaultTimeoutSec: 0.08,
+      disconnectGraceMs: 80,
+      agentRegistrationMode: "approval",
+      logger: false,
+    });
+    await server.app.listen({ port: 0, host: "127.0.0.1" });
+    const address = server.app.server.address() as AddressInfo;
+    baseUrl = `ws://127.0.0.1:${address.port}`;
+    httpBaseUrl = `http://127.0.0.1:${address.port}`;
+
+    const pendingSocket = await connectWs(`${baseUrl}/ws/agent?token=${TOKEN}`);
+    pendingSocket.send(JSON.stringify({
+      type: "agent.register",
+      employeeId: "secure-agent",
+      name: "Secure Agent",
+      machineId: "secure-agent",
+      hostname: "secure-host",
+      labels: ["secure"],
+      activeMainTaskId: null,
+      activeQueueTaskId: null,
+      lastOutputSeq: 0,
+    }));
+    const pendingClose = await waitForClose(pendingSocket);
+    expect(pendingClose.code).toBe(1008);
+
+    const pendingList = await fetch(`${httpBaseUrl}/api/agent-registry`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    const pendingBody = (await pendingList.json()) as { agents: Array<{ employeeId: string; status: string }> };
+    expect(pendingBody.agents).toContainEqual(expect.objectContaining({ employeeId: "secure-agent", status: "pending" }));
+
+    const approveRes = await fetch(`${httpBaseUrl}/api/agent-registry/secure-agent/approve`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(approveRes.status).toBe(200);
+    const approveBody = (await approveRes.json()) as { agentToken: string };
+    expect(approveBody.agentToken.length).toBeGreaterThan(10);
+
+    const rejectedNoAgentToken = await connectWs(`${baseUrl}/ws/agent?token=${TOKEN}`);
+    rejectedNoAgentToken.send(JSON.stringify({
+      type: "agent.register",
+      employeeId: "secure-agent",
+      name: "Secure Agent",
+      machineId: "secure-agent",
+      hostname: "secure-host",
+      labels: ["secure"],
+      activeMainTaskId: null,
+      activeQueueTaskId: null,
+      lastOutputSeq: 0,
+    }));
+    const noTokenClose = await waitForClose(rejectedNoAgentToken);
+    expect(noTokenClose.code).toBe(1008);
+
+    const approved = await connectAgent("secure-agent", undefined, { labels: ["secure"], agentToken: approveBody.agentToken });
+    expect(approved.readyState).toBe(WebSocket.OPEN);
+    expect(server.buildSnapshot().employees.some((e) => e.id === "secure-agent" && e.status === "online")).toBe(true);
   });
 });
 
@@ -203,6 +279,31 @@ describe("POST /api/tasks — 创建任务", () => {
 
     agent.send(JSON.stringify({ type: "task.completed", taskId: dispatch.taskId, exitCode: 0, summary: "done" }));
     await delay(20);
+  });
+
+  it("裁剪每个任务持久化日志，避免无限增长", async () => {
+    const agent = await connectAgent("alice");
+    const dispatchPromise = waitForAgentDispatch(agent);
+    await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "log pruning", atAgents: ["alice"], timeoutSec: 2 }),
+    });
+    const dispatch = await dispatchPromise;
+    agent.send(JSON.stringify({ type: "task.accepted", taskId: dispatch.taskId }));
+    agent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 1 }));
+    for (let i = 1; i <= 405; i += 1) {
+      agent.send(JSON.stringify({ type: "task.output", taskId: dispatch.taskId, stream: "stdout", seq: i, content: `chunk-${i}\n` }));
+    }
+    await waitUntil(() => (server.buildSnapshot().logs[dispatch.taskId] ?? []).length === 0, 20).catch(() => undefined);
+    await delay(80);
+
+    const response = await fetch(`${httpBaseUrl}/api/tasks/${dispatch.taskId}/output`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    const body = (await response.json()) as { output: string };
+    expect(body.output).not.toContain("chunk-1\n");
+    expect(body.output).toContain("chunk-405\n");
   });
 });
 
@@ -670,6 +771,58 @@ describe("WebSocket 任务调度", () => {
     const snapshot = server.buildSnapshot();
     expect(snapshot.tasks.find((t) => t.id === gpuBody.tasks[0]!.id)?.status).toBe("queued");
     expect(snapshot.tasks.find((t) => t.id === cpuBody.tasks[0]!.id)?.status).toBe("dispatched");
+  });
+
+  it("服务重启后按 priority 恢复共享队列顺序", async () => {
+    const dbPath = path.join(tmpDir, "restart-order.db");
+    await Promise.all(sockets.map((socket) => closeSocket(socket)));
+    sockets = [];
+    await server.close();
+    server = await createAiTeamsServer({
+      authToken: TOKEN,
+      dbPath,
+      defaultTimeoutSec: 2,
+      disconnectGraceMs: 80,
+      agentRegistrationMode: "open",
+      logger: false,
+    });
+    await server.app.listen({ port: 0, host: "127.0.0.1" });
+    let address = server.app.server.address() as AddressInfo;
+    baseUrl = `ws://127.0.0.1:${address.port}`;
+    httpBaseUrl = `http://127.0.0.1:${address.port}`;
+
+    await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "low priority after restart", atAgents: "queue", priority: 0 }),
+    });
+    await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "high priority after restart", atAgents: "queue", priority: 3 }),
+    });
+    await delay(30);
+    await server.close();
+
+    server = await createAiTeamsServer({
+      authToken: TOKEN,
+      dbPath,
+      defaultTimeoutSec: 2,
+      disconnectGraceMs: 80,
+      agentRegistrationMode: "open",
+      logger: false,
+    });
+    await server.app.listen({ port: 0, host: "127.0.0.1" });
+    address = server.app.server.address() as AddressInfo;
+    baseUrl = `ws://127.0.0.1:${address.port}`;
+    httpBaseUrl = `http://127.0.0.1:${address.port}`;
+
+    const agent = await connectWs(`${baseUrl}/ws/agent?token=${TOKEN}`);
+    const dispatchPromise = waitForAgentDispatch(agent);
+    sendAgentRegister(agent, "restart-agent");
+    await waitUntil(() => server.buildSnapshot().employees.some((e) => e.id === "restart-agent" && e.status === "online"));
+    const dispatch = await dispatchPromise;
+    expect(dispatch.prompt).toBe("high priority after restart");
   });
 
   it("WebSocket task.cancel 取消运行中的任务", async () => {
@@ -1147,14 +1300,17 @@ async function connectLeader() {
   return connectWs(`${baseUrl}/ws/leader?token=${TOKEN}`);
 }
 
-async function connectAgent(employeeId: string, activeTaskId?: string, opts?: { weight?: number; labels?: string[] }) {
-  const socket = await connectWs(`${baseUrl}/ws/agent?token=${TOKEN}`);
+async function connectAgent(employeeId: string, activeTaskId?: string, opts?: { weight?: number; labels?: string[]; agentToken?: string; permissionMode?: string }) {
+  const url = new URL(`${baseUrl}/ws/agent`);
+  url.searchParams.set("token", TOKEN);
+  if (opts?.agentToken) url.searchParams.set("agentToken", opts.agentToken);
+  const socket = await connectWs(url.toString());
   sendAgentRegister(socket, employeeId, activeTaskId, opts);
   await waitUntil(() => server.buildSnapshot().employees.some((e) => e.id === employeeId && e.status === "online"));
   return socket;
 }
 
-function sendAgentRegister(socket: WebSocket, employeeId: string, activeTaskId?: string, opts?: { weight?: number; labels?: string[] }) {
+function sendAgentRegister(socket: WebSocket, employeeId: string, activeTaskId?: string, opts?: { weight?: number; labels?: string[]; permissionMode?: string }) {
   socket.send(
     JSON.stringify({
       type: "agent.register",
@@ -1163,6 +1319,7 @@ function sendAgentRegister(socket: WebSocket, employeeId: string, activeTaskId?:
       machineId: employeeId,
       hostname: "test-host",
       labels: opts?.labels ?? [],
+      permissionMode: opts?.permissionMode,
       weight: opts?.weight,
       activeMainTaskId: activeTaskId ?? null,
       activeQueueTaskId: null,

@@ -9,6 +9,7 @@ import {
   EMPLOYEE_NAME,
   DEFAULT_WORKSPACE,
   AGENT_RECORDS_DIR,
+  CLAUDE_PERMISSION_MODE,
   CLAUDE_HOOKS_ENABLED,
   CLAUDE_HOOK_SETTINGS,
   CLAUDE_MISSING_CONVERSATION_PATTERN,
@@ -182,6 +183,20 @@ function extractMetrics(
   }
 }
 
+export function resolveClaudePermissionMode(task: ActiveTask) {
+  return task.cliConfig?.permissionMode || CLAUDE_PERMISSION_MODE || "bypassPermissions";
+}
+
+function appendPermissionModeArgs(args: string[], permissionMode: string) {
+  if (permissionMode === "bypassPermissions" || permissionMode === "dangerously-skip-permissions") {
+    args.push("--dangerously-skip-permissions");
+    return;
+  }
+  if (permissionMode && permissionMode !== "default") {
+    args.push("--permission-mode", permissionMode);
+  }
+}
+
 export function buildClaudeArgs(prompt: string, task: ActiveTask, agentState: AgentState) {
   ensureWorkspaceClaudeMd();
   ensureClaudeHookFiles();
@@ -192,8 +207,8 @@ export function buildClaudeArgs(prompt: string, task: ActiveTask, agentState: Ag
     "stream-json",
     "--include-partial-messages",
     "--verbose",
-    "--dangerously-skip-permissions",
   ];
+  appendPermissionModeArgs(args, resolveClaudePermissionMode(task));
 
   if (cfg?.model) {
     args.push("--model", cfg.model);
@@ -304,6 +319,7 @@ export function runClaudeTask(taskId: string, prompt: string, workspace: string 
 
   const agentState = getAgentState();
   const args = buildClaudeArgs(prompt, currentTask, agentState);
+  const permissionMode = resolveClaudePermissionMode(currentTask);
   const resolvedWorkspace = resolveWorkspace(workspace);
   const child = spawn("claude", args, {
     cwd: resolvedWorkspace,
@@ -336,6 +352,7 @@ export function runClaudeTask(taskId: string, prompt: string, workspace: string 
   currentTask.generation += 1;
   currentTask.child = child;
   send({ type: "task.started", taskId, pid: child.pid ?? 0, sessionId: currentTask.claudeSessionId });
+  emitOutput(taskId, "stdout", `[agent] permission_mode: ${permissionMode}\n`);
 
   const stdoutReader = readline.createInterface({ input: child.stdout });
   stdoutReader.on("line", (line) => {

@@ -142,7 +142,7 @@ POST /api/tasks
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `model` | string | 模型名称 |
-| `permissionMode` | string | 权限模式 |
+| `permissionMode` | string | 覆盖 Agent 默认权限模式：`bypassPermissions` 直接执行，`default` 使用 Claude 默认权限确认 |
 | `maxTurns` | number | 最大对话轮次 |
 | `systemPrompt` | string | 系统提示词（覆盖） |
 | `appendSystemPrompt` | string | 追加系统提示词 |
@@ -313,6 +313,8 @@ pnpm build
 pnpm start:all
 ```
 
+生产模式默认启用 Agent 审批。先在 Web「员工管理」里添加或批准 Agent，复制生成的 Agent Token，再在对应 Agent 进程配置 `AI_TEAMS_AGENT_TOKEN` 后启动。
+
 ### 多员工
 
 ```bash
@@ -325,15 +327,19 @@ AI_TEAMS_AUTH_TOKEN=dev-token EMPLOYEE_ID=bob EMPLOYEE_NAME=Bob RUNNER_MODE=fake
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `AI_TEAMS_AUTH_TOKEN` | — | 共享认证 Token（生产必填） |
+| `AI_TEAMS_AGENT_TOKEN` | — | Agent 独立 Token（生产审批模式下必填） |
+| `AGENT_REGISTRATION_MODE` | `approval` | Agent 注册模式：`approval` 需要 Web 批准，`open` 用于本地开发 |
 | `AI_TEAMS_SERVER_PORT` | `3789` | 服务端口 |
 | `SERVER_URL` | `ws://localhost:3789` | Agent 连接地址 |
 | `EMPLOYEE_ID` | `emp_local` | 员工 ID |
 | `EMPLOYEE_NAME` | `Local Agent` | 员工名称 |
 | `EMPLOYEE_LABELS` | — | 逗号分隔标签 |
 | `RUNNER_MODE` | `claude` | `claude` 或 `fake`（测试用） |
+| `CLAUDE_PERMISSION_MODE` | `bypassPermissions` | Agent 默认 Claude 权限模式；直接执行任务建议保持 `bypassPermissions`，需要更严格确认时设为 `default` |
 | `DEFAULT_WORKSPACE` | 当前目录 | 默认工作目录 |
 | `DEFAULT_TIMEOUT_SEC` | `1800` | 任务超时秒数 |
 | `DISCONNECT_GRACE_MS` | `15000` | 断线恢复宽限期 |
+| `MAX_LOG_CHUNKS_PER_TASK` | `400` | 每个任务保留的输出日志块上限 |
 | `DATABASE_URL` | — | PostgreSQL 连接串（见下方说明） |
 | `DB_PATH` | `data/ai-teams.db` | SQLite 数据库路径（不设 `DATABASE_URL` 时使用） |
 | `LOG_LEVEL` | `info` | 日志级别：`trace` / `debug` / `info` / `warn` / `error` |

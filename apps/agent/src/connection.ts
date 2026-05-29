@@ -12,10 +12,12 @@ import {
 } from "@ai-teams/shared";
 import {
   AUTH_TOKEN,
+  AGENT_TOKEN,
   EMPLOYEE_ID,
   EMPLOYEE_NAME,
   EMPLOYEE_LABELS,
   EMPLOYEE_WEIGHT,
+  CLAUDE_PERMISSION_MODE,
   RECONNECT_MS,
   SERVER_URL,
   MAX_BUFFERED_MESSAGES,
@@ -83,6 +85,9 @@ export type ConnectionState = {
 export function buildAgentWsUrl() {
   const url = new URL("/ws/agent", SERVER_URL);
   url.searchParams.set("token", AUTH_TOKEN);
+  if (AGENT_TOKEN) {
+    url.searchParams.set("agentToken", AGENT_TOKEN);
+  }
   return url.toString();
 }
 
@@ -147,6 +152,7 @@ export function registerAgent(
     labels: EMPLOYEE_LABELS,
     version: version,
     claudeVersion: getClaudeVersion(),
+    permissionMode: CLAUDE_PERMISSION_MODE,
     activeMainTaskId: mainTask?.taskId ?? null,
     activeQueueTaskId: queueTask?.taskId ?? null,
     lastOutputSeq: Math.max(mainTask?.seq ?? 0, queueTask?.seq ?? 0),

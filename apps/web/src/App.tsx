@@ -5,6 +5,7 @@ import {
   parseServerToLeaderMessage,
   resolveAtAgentsFromPrompt,
   TERMINAL_STATUSES,
+  type AgentRegistrationRecord,
   type AgentTarget,
   EmployeeSnapshot,
   LeaderToServerMessage,
@@ -164,6 +165,14 @@ type EmployeeTerminalLog = {
 };
 
 type ActivePage = "monitor" | "tasks" | "employees" | "errors" | "stats" | "schedules";
+
+type AgentRegistryItem = AgentRegistrationRecord;
+
+type AgentRegistryForm = {
+  employeeId: string;
+  name: string;
+  labels: string;
+};
 
 type ScheduleItem = {
   id: string;
@@ -451,6 +460,9 @@ const EmployeeCard = memo(function EmployeeCard({
         {employee.weight > 1 && (
           <span>权重: {employee.weight}</span>
         )}
+        {employee.permissionMode && (
+          <span className={employee.permissionMode === "bypassPermissions" ? "meta-warning" : ""}>权限: {employee.permissionMode}</span>
+        )}
       </div>
       <SlotStrip label="主任务" task={mainTask} onCancel={cancelTask} />
       <SlotStrip label="队列" task={queueTask} onCancel={cancelTask} />
@@ -461,7 +473,7 @@ const EmployeeCard = memo(function EmployeeCard({
   if (prev.terminalText !== next.terminalText) return false;
   if (prev.mainTask?.id !== next.mainTask?.id || prev.queueTask?.id !== next.queueTask?.id || prev.displayTask?.id !== next.displayTask?.id) return false;
   const pe = prev.employee, ne = next.employee;
-  if (pe.status !== ne.status || pe.mainTaskId !== ne.mainTaskId || pe.queueTaskId !== ne.queueTaskId || pe.name !== ne.name || pe.consecutiveQueueFailures !== ne.consecutiveQueueFailures || pe.queuePaused !== ne.queuePaused || pe.version !== ne.version || pe.claudeVersion !== ne.claudeVersion || pe.weight !== ne.weight) return false;
+  if (pe.status !== ne.status || pe.mainTaskId !== ne.mainTaskId || pe.queueTaskId !== ne.queueTaskId || pe.name !== ne.name || pe.consecutiveQueueFailures !== ne.consecutiveQueueFailures || pe.queuePaused !== ne.queuePaused || pe.version !== ne.version || pe.claudeVersion !== ne.claudeVersion || pe.permissionMode !== ne.permissionMode || pe.weight !== ne.weight) return false;
   if (pe.labels.length !== ne.labels.length || pe.labels.some((l, i) => l !== ne.labels[i])) return false;
   return true;
 });
@@ -495,6 +507,10 @@ export default function App() {
   });
   const [mobileTerminalEmployeeId, setMobileTerminalEmployeeId] = useState<string | null>(null);
   const [schedules, setSchedules] = useState<ScheduleItem[]>([]);
+  const [agentRegistry, setAgentRegistry] = useState<AgentRegistryItem[]>([]);
+  const [agentRegistryLoading, setAgentRegistryLoading] = useState(false);
+  const [agentRegistryForm, setAgentRegistryForm] = useState<AgentRegistryForm>({ employeeId: "", name: "", labels: "" });
+  const [agentTokenNotice, setAgentTokenNotice] = useState<{ employeeId: string; token: string } | null>(null);
   const [scheduleModalOpen, setScheduleModalOpen] = useState(false);
   const [editingSchedule, setEditingSchedule] = useState<ScheduleItem | null>(null);
   const [scheduleForm, setScheduleForm] = useState<ScheduleFormData>({
@@ -609,6 +625,13 @@ export default function App() {
       }
       case "employee.upsert": {
         setEmployees((current) => ({ ...current, [message.employee.id]: message.employee }));
+        break;
+      }
+      case "employee.delete": {
+        setEmployees((current) => {
+          const { [message.employeeId]: _removed, ...rest } = current;
+          return rest;
+        });
         break;
       }
       case "task.upsert": {
@@ -983,6 +1006,88 @@ export default function App() {
     } catch { /* ignore */ }
   }
 
+  async function fetchAgentRegistry() {
+    setAgentRegistryLoading(true);
+    try {
+      const res = await fetch("/api/agent-registry", { headers: { Authorization: `Bearer ${authToken}` } });
+      if (res.ok) {
+        const data = await res.json() as { agents: AgentRegistryItem[] };
+        setAgentRegistry(data.agents);
+      }
+    } catch { /* ignore */ }
+    setAgentRegistryLoading(false);
+  }
+
+  function parseLabelsInput(value: string) {
+    return value.split(",").map((item) => item.trim()).filter(Boolean);
+  }
+
+  async function createAgentRegistration() {
+    const employeeId = agentRegistryForm.employeeId.trim();
+    if (!employeeId) {
+      alert("请输入 Agent ID");
+      return;
+    }
+    try {
+      const res = await fetch("/api/agent-registry", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
+        body: JSON.stringify({
+          employeeId,
+          name: agentRegistryForm.name.trim() || employeeId,
+          labels: parseLabelsInput(agentRegistryForm.labels),
+        }),
+      });
+      const data = await res.json() as { agentToken?: string; error?: string };
+      if (!res.ok) {
+        alert(data.error || "添加 Agent 失败");
+        return;
+      }
+      setAgentTokenNotice({ employeeId, token: data.agentToken || "" });
+      setAgentRegistryForm({ employeeId: "", name: "", labels: "" });
+      await fetchAgentRegistry();
+    } catch {
+      alert("网络请求失败");
+    }
+  }
+
+  async function approveAgentRegistration(employeeId: string) {
+    try {
+      const res = await fetch(`/api/agent-registry/${employeeId}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json() as { agentToken?: string; error?: string };
+      if (!res.ok) {
+        alert(data.error || "批准 Agent 失败");
+        return;
+      }
+      setAgentTokenNotice({ employeeId, token: data.agentToken || "" });
+      await fetchAgentRegistry();
+    } catch {
+      alert("网络请求失败");
+    }
+  }
+
+  async function deleteAgentRegistration(employeeId: string) {
+    if (!window.confirm(`确认删除 Agent ${employeeId}？在线连接会被断开。`)) return;
+    try {
+      const res = await fetch(`/api/agent-registry/${employeeId}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({})) as { error?: string };
+        alert(data.error || "删除 Agent 失败");
+        return;
+      }
+      await fetchAgentRegistry();
+    } catch {
+      alert("网络请求失败");
+    }
+  }
+
   async function saveSchedule() {
     setScheduleError(null);
     const body: Record<string, unknown> = {
@@ -1078,6 +1183,10 @@ export default function App() {
 
   useEffect(() => {
     if (authToken && activePage === "schedules") fetchSchedules();
+  }, [authToken, activePage]);
+
+  useEffect(() => {
+    if (authToken && activePage === "employees") fetchAgentRegistry();
   }, [authToken, activePage]);
 
   function sendCommand() {
@@ -1723,8 +1832,61 @@ export default function App() {
               <div className="section-title-row">
                 <div>
                   <h1>员工管理</h1>
-                  <p>所有已注册的 AI 员工及其状态。</p>
+                  <p>管理 Agent 注册审批、连接状态和队列权限。</p>
                 </div>
+              </div>
+              <div className="agent-create-row">
+                <input
+                  value={agentRegistryForm.employeeId}
+                  onChange={(e) => setAgentRegistryForm((form) => ({ ...form, employeeId: e.target.value }))}
+                  placeholder="Agent ID"
+                />
+                <input
+                  value={agentRegistryForm.name}
+                  onChange={(e) => setAgentRegistryForm((form) => ({ ...form, name: e.target.value }))}
+                  placeholder="显示名称"
+                />
+                <input
+                  value={agentRegistryForm.labels}
+                  onChange={(e) => setAgentRegistryForm((form) => ({ ...form, labels: e.target.value }))}
+                  placeholder="标签，逗号分隔"
+                />
+                <button className="primary-button" onClick={createAgentRegistration}>添加 Agent</button>
+              </div>
+              {agentTokenNotice && (
+                <div className="agent-token-notice">
+                  <strong>{agentTokenNotice.employeeId} Agent Token</strong>
+                  <code>{agentTokenNotice.token}</code>
+                  <button className="secondary-button" onClick={() => navigator.clipboard.writeText(agentTokenNotice.token)}>复制</button>
+                </div>
+              )}
+              <div className="task-table agent-registry-table">
+                {agentRegistryLoading && agentRegistry.length === 0 ? (
+                  <div className="history-empty">加载 Agent 注册信息...</div>
+                ) : agentRegistry.length === 0 ? (
+                  <div className="history-empty">暂无 Agent 注册记录。</div>
+                ) : (
+                  agentRegistry.map((agent) => {
+                    const employee = employees[agent.employeeId];
+                    return (
+                      <div className="task-row" key={agent.employeeId}>
+                        <div className="task-row__main">
+                          <strong>{agent.name} <small style={{ color: "#888" }}>({agent.employeeId})</small></strong>
+                          <p>主机: {agent.hostname || employee?.hostname || "未知"} | 标签: {agent.labels.length > 0 ? agent.labels.join(", ") : "无"}</p>
+                          <p>最后注册: {agent.lastSeenAt ? new Date(agent.lastSeenAt).toLocaleString() : "未连接"}</p>
+                        </div>
+                        <div className="task-row__side">
+                          <span className={`status-pill ${agent.status === "approved" ? "online" : "queued"}`}>{agent.status === "approved" ? "已批准" : "待批准"}</span>
+                          {employee && <span className={`status-pill ${employee.status}`}>{employee.status}</span>}
+                          {agent.status === "pending" && (
+                            <button className="action-btn action-btn--green" onClick={() => approveAgentRegistration(agent.employeeId)}>批准</button>
+                          )}
+                          <button className="retry-btn" onClick={() => deleteAgentRegistration(agent.employeeId)}>删除</button>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
               </div>
               <div className="task-table">
                 {employeesData.length === 0 ? (

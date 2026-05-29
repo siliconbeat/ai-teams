@@ -1,7 +1,8 @@
 import type { EmployeeSnapshot, TaskOutputChunk, TaskRecord } from "@ai-teams/shared";
 import type WebSocket from "ws";
 
-export type CronJobLike = { stop(): void; nextDate(): Date | null };
+export type CronNextDateLike = Date | { toISO(): string | null };
+export type CronJobLike = { stop(): void; nextDate(): CronNextDateLike | null };
 
 export interface StateStore {
   agentSockets: Map<string, WebSocket>;

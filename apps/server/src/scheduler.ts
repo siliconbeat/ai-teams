@@ -14,7 +14,8 @@ export function startScheduleJob(
   schedule: ScheduleRecord,
   dispatchFn: ScheduleDispatchFn,
   jobs: Map<string, CronJobLike>,
-  onFire: (id: string) => void,
+  onFire: (id: string) => Promise<void> | void,
+  onError?: (id: string, error: unknown) => void,
 ): void {
   const atAgents = schedule.targetMode === "queue"
     ? ("queue" as const)
@@ -25,20 +26,25 @@ export function startScheduleJob(
   const job = new CronJob(
     schedule.cronExpr,
     () => {
-      dispatchFn(
-        {
-          type: "command.dispatch",
-          atAgents,
-          prompt: schedule.prompt,
-          workspace: schedule.workspace ?? undefined,
-          timeoutSec: schedule.timeoutSec ?? undefined,
-        },
-        null,
-        undefined,
-        schedule.priority,
-        schedule.requiredLabels,
-      );
-      onFire(schedule.id);
+      void (async () => {
+        const result = dispatchFn(
+          {
+            type: "command.dispatch",
+            atAgents,
+            prompt: schedule.prompt,
+            workspace: schedule.workspace ?? undefined,
+            timeoutSec: schedule.timeoutSec ?? undefined,
+          },
+          null,
+          undefined,
+          schedule.priority,
+          schedule.requiredLabels,
+        );
+        if (!result.ok) {
+          throw new Error(result.message ?? result.code ?? "Schedule dispatch failed.");
+        }
+        await onFire(schedule.id);
+      })().catch((error) => onError?.(schedule.id, error));
     },
     null,
     true,

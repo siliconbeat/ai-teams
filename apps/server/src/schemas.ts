@@ -10,6 +10,8 @@ export type RestTaskRequest = {
   webHook?: unknown;
   webhookUrl?: unknown;
   sessionId?: unknown;
+  priority?: unknown;
+  requiredLabels?: unknown;
 };
 
 export type WebhookEventType =
@@ -140,6 +142,10 @@ const employeeSnapshotSchema = {
     queueTaskPrompt: { anyOf: [{ type: "string" }, { type: "null" }] },
     lastSeenAt: { type: "string", format: "date-time" },
     consecutiveQueueFailures: { type: "number" },
+    permissionMode: { type: "string" },
+    version: { type: "string" },
+    claudeVersion: { type: "string" },
+    weight: { type: "number" },
   },
 } as const;
 
@@ -427,5 +433,50 @@ export const scheduleListResponseSchema = {
   required: ["schedules"],
   properties: {
     schedules: { type: "array", items: scheduleResponseSchema },
+  },
+} as const;
+
+export const agentRegistrationSchema = {
+  type: "object",
+  required: ["employeeId", "name", "machineId", "hostname", "labels", "status", "createdAt", "updatedAt", "approvedAt", "lastSeenAt"],
+  properties: {
+    employeeId: { type: "string" },
+    name: { type: "string" },
+    machineId: nullableString,
+    hostname: nullableString,
+    labels: { type: "array", items: { type: "string" } },
+    status: { type: "string", enum: ["pending", "approved"] },
+    createdAt: { type: "string" },
+    updatedAt: { type: "string" },
+    approvedAt: nullableString,
+    lastSeenAt: nullableString,
+  },
+} as const;
+
+export const agentRegistrationListResponseSchema = {
+  type: "object",
+  required: ["agents"],
+  properties: {
+    agents: { type: "array", items: agentRegistrationSchema },
+  },
+} as const;
+
+export const createAgentRegistrationRequestSchema = {
+  type: "object",
+  required: ["employeeId"],
+  properties: {
+    employeeId: { type: "string", minLength: 1 },
+    name: { type: "string" },
+    labels: { type: "array", items: { type: "string" } },
+    token: { type: "string", minLength: 8 },
+  },
+} as const;
+
+export const agentRegistrationTokenResponseSchema = {
+  type: "object",
+  required: ["agent", "agentToken"],
+  properties: {
+    agent: agentRegistrationSchema,
+    agentToken: { type: "string" },
   },
 } as const;

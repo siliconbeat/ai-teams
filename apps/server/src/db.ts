@@ -1,6 +1,6 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import pg from "pg";
-import type { EmployeeSnapshot, TaskOutputChunk, TaskRecord, TaskCliConfig } from "@ai-teams/shared";
+import type { AgentRegistrationRecord, AgentRegistrationStatus, EmployeeSnapshot, TaskOutputChunk, TaskRecord, TaskCliConfig } from "@ai-teams/shared";
 import { TERMINAL_STATUSES } from "@ai-teams/shared";
 import type { StateStore } from "./state-store.js";
 
@@ -181,6 +181,21 @@ export async function initDb(db: Database) {
     )
   `);
   await db.run(`
+    CREATE TABLE IF NOT EXISTS agent_registrations (
+      employee_id  TEXT PRIMARY KEY,
+      name         TEXT NOT NULL,
+      machine_id   TEXT,
+      hostname     TEXT,
+      labels_json  TEXT NOT NULL DEFAULT '[]',
+      token_hash   TEXT,
+      status       TEXT NOT NULL DEFAULT 'pending',
+      created_at   TEXT NOT NULL,
+      updated_at   TEXT NOT NULL,
+      approved_at  TEXT,
+      last_seen_at TEXT
+    )
+  `);
+  await db.run(`
     CREATE TABLE IF NOT EXISTS schedules (
       id              TEXT PRIMARY KEY,
       name            TEXT NOT NULL,
@@ -208,7 +223,7 @@ export async function initDb(db: Database) {
 // Hydrate state from database
 // ---------------------------------------------------------------------------
 
-export async function hydrateState(db: Database, state: StateStore, defaultTimeoutSec: number) {
+export async function hydrateState(db: Database, state: StateStore, defaultTimeoutSec: number, maxLogChunksPerTask = 400) {
   const employeeRows = await db.all<{ payload_json: string }>("SELECT payload_json FROM employees");
   for (const row of employeeRows) {
     const employee = JSON.parse(row.payload_json) as EmployeeSnapshot;
@@ -224,7 +239,12 @@ export async function hydrateState(db: Database, state: StateStore, defaultTimeo
     }
   }
 
-  const taskRows = await db.all<DbTaskRow>("SELECT * FROM tasks");
+  const taskRows = await db.all<DbTaskRow>(
+    `SELECT * FROM tasks
+     ORDER BY
+       CASE WHEN target_mode = 'queue' THEN priority ELSE 0 END DESC,
+       created_at ASC`,
+  );
   for (const row of taskRows) {
     const task = dbRowToTask(row, defaultTimeoutSec);
     state.tasks.set(task.id, task);
@@ -250,7 +270,14 @@ export async function hydrateState(db: Database, state: StateStore, defaultTimeo
   }
 
   const logRows = await db.all<{ payload_json: string }>(
-    `SELECT payload_json FROM task_logs ORDER BY task_id ASC, seq ASC`,
+    `SELECT payload_json FROM (
+       SELECT task_id, seq, payload_json,
+              ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY seq DESC) AS rn
+       FROM task_logs
+     ) ranked
+     WHERE rn <= $1
+     ORDER BY task_id ASC, seq ASC`,
+    [maxLogChunksPerTask],
   );
   for (const row of logRows) {
     const chunk = JSON.parse(row.payload_json) as TaskOutputChunk;
@@ -277,6 +304,10 @@ export async function persistEmployee(db: Database, employee: EmployeeSnapshot) 
      ON CONFLICT(id) DO UPDATE SET payload_json = excluded.payload_json`,
     [employee.id, JSON.stringify(employee)],
   );
+}
+
+export async function deleteEmployee(db: Database, employeeId: string) {
+  await db.run("DELETE FROM employees WHERE id = $1", [employeeId]);
 }
 
 const TASK_COLUMNS = [
@@ -318,6 +349,106 @@ export async function persistTaskLog(db: Database, chunk: TaskOutputChunk) {
      ON CONFLICT(task_id, seq) DO UPDATE SET payload_json = excluded.payload_json`,
     [chunk.taskId, chunk.seq, JSON.stringify(chunk)],
   );
+}
+
+export async function deleteTaskLogsThroughSeq(db: Database, taskId: string, seq: number) {
+  await db.run("DELETE FROM task_logs WHERE task_id = $1 AND seq <= $2", [taskId, seq]);
+}
+
+// ---------------------------------------------------------------------------
+// Agent registration helpers
+// ---------------------------------------------------------------------------
+
+export type DbAgentRegistrationRow = {
+  employee_id: string;
+  name: string;
+  machine_id: string | null;
+  hostname: string | null;
+  labels_json: string;
+  token_hash: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  approved_at: string | null;
+  last_seen_at: string | null;
+};
+
+function dbRowToAgentRegistration(row: DbAgentRegistrationRow): AgentRegistrationRecord & { tokenHash: string | null } {
+  return {
+    employeeId: row.employee_id,
+    name: row.name,
+    machineId: row.machine_id,
+    hostname: row.hostname,
+    labels: JSON.parse(row.labels_json || "[]") as string[],
+    tokenHash: row.token_hash,
+    status: row.status as AgentRegistrationStatus,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    approvedAt: row.approved_at,
+    lastSeenAt: row.last_seen_at,
+  };
+}
+
+export type AgentRegistrationUpsert = {
+  employeeId: string;
+  name: string;
+  machineId?: string | null;
+  hostname?: string | null;
+  labels?: string[];
+  tokenHash?: string | null;
+  status: AgentRegistrationStatus;
+  approvedAt?: string | null;
+  lastSeenAt?: string | null;
+};
+
+export async function upsertAgentRegistration(db: Database, registration: AgentRegistrationUpsert) {
+  const now = new Date().toISOString();
+  const existing = await getAgentRegistration(db, registration.employeeId);
+  await db.run(
+    `INSERT INTO agent_registrations
+       (employee_id, name, machine_id, hostname, labels_json, token_hash, status, created_at, updated_at, approved_at, last_seen_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+     ON CONFLICT(employee_id) DO UPDATE SET
+       name = excluded.name,
+       machine_id = excluded.machine_id,
+       hostname = excluded.hostname,
+       labels_json = excluded.labels_json,
+       token_hash = COALESCE(excluded.token_hash, agent_registrations.token_hash),
+       status = excluded.status,
+       updated_at = excluded.updated_at,
+       approved_at = excluded.approved_at,
+       last_seen_at = excluded.last_seen_at`,
+    [
+      registration.employeeId,
+      registration.name,
+      registration.machineId ?? existing?.machineId ?? null,
+      registration.hostname ?? existing?.hostname ?? null,
+      JSON.stringify(registration.labels ?? existing?.labels ?? []),
+      registration.tokenHash ?? null,
+      registration.status,
+      existing?.createdAt ?? now,
+      now,
+      registration.approvedAt ?? existing?.approvedAt ?? null,
+      registration.lastSeenAt ?? existing?.lastSeenAt ?? null,
+    ],
+  );
+}
+
+export async function getAgentRegistration(db: Database, employeeId: string) {
+  const row = await db.get<DbAgentRegistrationRow>("SELECT * FROM agent_registrations WHERE employee_id = $1", [employeeId]);
+  return row ? dbRowToAgentRegistration(row) : undefined;
+}
+
+export async function listAgentRegistrations(db: Database): Promise<Array<AgentRegistrationRecord & { tokenHash: string | null }>> {
+  const rows = await db.all<DbAgentRegistrationRow>("SELECT * FROM agent_registrations ORDER BY status ASC, updated_at DESC");
+  return rows.map(dbRowToAgentRegistration);
+}
+
+export async function deleteAgentRegistration(db: Database, employeeId: string): Promise<boolean> {
+  const row = await getAgentRegistration(db, employeeId);
+  if (!row) return false;
+  await db.run("DELETE FROM agent_registrations WHERE employee_id = $1", [employeeId]);
+  return true;
 }
 
 // ---------------------------------------------------------------------------

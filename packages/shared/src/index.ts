@@ -42,7 +42,23 @@ export interface EmployeeSnapshot {
   queuePaused?: boolean;
   version?: string;
   claudeVersion?: string;
+  permissionMode?: string;
   weight: number;
+}
+
+export type AgentRegistrationStatus = "pending" | "approved";
+
+export interface AgentRegistrationRecord {
+  employeeId: string;
+  name: string;
+  machineId: string | null;
+  hostname: string | null;
+  labels: string[];
+  status: AgentRegistrationStatus;
+  createdAt: string;
+  updatedAt: string;
+  approvedAt: string | null;
+  lastSeenAt: string | null;
 }
 
 export interface TaskRecord {
@@ -120,6 +136,7 @@ export type EmployeeToServerMessage =
       labels: string[];
       version?: string;
       claudeVersion?: string;
+      permissionMode?: string;
       activeMainTaskId?: string | null;
       activeQueueTaskId?: string | null;
       lastOutputSeq?: number;
@@ -177,6 +194,7 @@ export type LeaderToServerMessage =
 export type ServerToLeaderMessage =
   | { type: "snapshot"; snapshot: StateSnapshot }
   | { type: "employee.upsert"; employee: EmployeeSnapshot }
+  | { type: "employee.delete"; employeeId: string }
   | { type: "task.upsert"; task: TaskRecord }
   | { type: "task.output"; chunk: TaskOutputChunk }
   | { type: "server.error"; code: string; message: string }
@@ -264,6 +282,7 @@ export function parseEmployeeToServerMessage(value: unknown): EmployeeToServerMe
       labels: stringArrayField(message, "labels"),
       version: optionalStringField(message, "version"),
       claudeVersion: optionalStringField(message, "claudeVersion"),
+      permissionMode: optionalStringField(message, "permissionMode"),
       activeMainTaskId: optionalNullableStringField(message, "activeMainTaskId"),
       activeQueueTaskId: optionalNullableStringField(message, "activeQueueTaskId"),
       lastOutputSeq: optionalNonNegativeNumberField(message, "lastOutputSeq"),
@@ -382,6 +401,7 @@ export function parseServerToLeaderMessage(value: unknown): ServerToLeaderMessag
   if (
     type === "snapshot" ||
     type === "employee.upsert" ||
+    type === "employee.delete" ||
     type === "task.upsert" ||
     type === "task.output"
   ) {

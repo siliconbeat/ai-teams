@@ -8,6 +8,7 @@ export let fileConfig: AgentConfig | null = loadConfigFile();
 export let SERVER_PORT = process.env.AI_TEAMS_SERVER_PORT || "3789";
 export let SERVER_URL = process.env.SERVER_URL || fileConfig?.serverUrl || `ws://localhost:${SERVER_PORT}`;
 export let AUTH_TOKEN = process.env.AI_TEAMS_AUTH_TOKEN || fileConfig?.authToken || "";
+export let AGENT_TOKEN = process.env.AI_TEAMS_AGENT_TOKEN || fileConfig?.agentToken || "";
 export let EMPLOYEE_ID = process.env.EMPLOYEE_ID || fileConfig?.employeeId || "emp_local";
 export let EMPLOYEE_NAME = process.env.EMPLOYEE_NAME || fileConfig?.employeeName || "Local Agent";
 export let EMPLOYEE_LABELS = process.env.EMPLOYEE_LABELS?.split(",").map((item) => item.trim()).filter(Boolean) ?? [];
@@ -18,6 +19,8 @@ if ((process.env.EMPLOYEE_WEIGHT || fileConfig?.weight) && (!_rawWeight || _rawW
 }
 export let RECONNECT_MS = Number(process.env.RECONNECT_MS) || 5000;
 export let RUNNER_MODE = process.env.RUNNER_MODE || fileConfig?.runnerMode || "claude";
+export let CLAUDE_PERMISSION_MODE =
+  process.env.CLAUDE_PERMISSION_MODE || process.env.AI_TEAMS_CLAUDE_PERMISSION_MODE || fileConfig?.permissionMode || "bypassPermissions";
 export let DEFAULT_WORKSPACE = process.env.DEFAULT_WORKSPACE || fileConfig?.workspace || process.cwd();
 export let MAX_BUFFERED_MESSAGES = Number(process.env.AGENT_BUFFER_LIMIT) || 400;
 export const MAX_ERROR_TAIL = 16000;
@@ -40,6 +43,7 @@ export function reinitializeConfig(): void {
   SERVER_PORT = process.env.AI_TEAMS_SERVER_PORT || "3789";
   SERVER_URL = process.env.SERVER_URL || fileConfig?.serverUrl || `ws://localhost:${SERVER_PORT}`;
   AUTH_TOKEN = process.env.AI_TEAMS_AUTH_TOKEN || fileConfig?.authToken || "";
+  AGENT_TOKEN = process.env.AI_TEAMS_AGENT_TOKEN || fileConfig?.agentToken || "";
   EMPLOYEE_ID = process.env.EMPLOYEE_ID || fileConfig?.employeeId || "emp_local";
   EMPLOYEE_NAME = process.env.EMPLOYEE_NAME || fileConfig?.employeeName || "Local Agent";
   EMPLOYEE_LABELS = process.env.EMPLOYEE_LABELS?.split(",").map((item) => item.trim()).filter(Boolean) ?? [];
@@ -47,6 +51,8 @@ export function reinitializeConfig(): void {
   EMPLOYEE_WEIGHT = Math.max(1, _rw || 1);
   RECONNECT_MS = Number(process.env.RECONNECT_MS) || 5000;
   RUNNER_MODE = process.env.RUNNER_MODE || fileConfig?.runnerMode || "claude";
+  CLAUDE_PERMISSION_MODE =
+    process.env.CLAUDE_PERMISSION_MODE || process.env.AI_TEAMS_CLAUDE_PERMISSION_MODE || fileConfig?.permissionMode || "bypassPermissions";
   DEFAULT_WORKSPACE = process.env.DEFAULT_WORKSPACE || fileConfig?.workspace || process.cwd();
   MAX_BUFFERED_MESSAGES = Number(process.env.AGENT_BUFFER_LIMIT) || 400;
   AGENT_RECORDS_DIR =

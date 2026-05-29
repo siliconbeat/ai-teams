@@ -16,7 +16,7 @@ import {
 } from "@ai-teams/shared";
 import type { Database } from "./db.js";
 import type { StateStore } from "./state-store.js";
-import { persistEmployee, persistTask, persistTaskLog, persistTaskWebhook } from "./db.js";
+import { deleteTaskLogsThroughSeq, getAgentRegistration, persistEmployee, persistTask, persistTaskLog, persistTaskWebhook, upsertAgentRegistration } from "./db.js";
 import type { WebhookEventType } from "./schemas.js";
 import type { MaybeEncryptor } from "./crypto.js";
 
@@ -44,6 +44,10 @@ export type DispatchContext = {
   db: Database;
   log: FastifyInstance["log"];
   encryptor?: MaybeEncryptor;
+  maxLogChunksPerTask: number;
+  agentRegistrationMode: "open" | "approval";
+  getAgentToken?: (socket: WebSocket) => string | null;
+  hashAgentToken?: (token: string) => string;
 };
 
 export function createDispatch(ctx: DispatchContext) {
@@ -295,6 +299,14 @@ export function createDispatch(ctx: DispatchContext) {
     }
     const history = state.taskLogs.get(chunk.taskId) ?? [];
     history.push(chunk);
+    if (history.length > ctx.maxLogChunksPerTask) {
+      const removed = history.splice(0, history.length - ctx.maxLogChunksPerTask);
+      const cutoffSeq = removed[removed.length - 1]?.seq;
+      if (cutoffSeq !== undefined) {
+        deleteTaskLogsThroughSeq(db, chunk.taskId, cutoffSeq)
+          .catch((error) => log.error({ error, taskId: chunk.taskId, cutoffSeq }, "Failed to prune task logs"));
+      }
+    }
     state.taskLogs.set(chunk.taskId, history);
     persistTaskLog(db, chunk).catch((error) => log.error({ error, taskId: chunk.taskId, seq: chunk.seq }, "Failed to persist task log"));
     broadcastToLeaders({ type: "task.output", chunk });
@@ -735,11 +747,10 @@ export function createDispatch(ctx: DispatchContext) {
         t.employeeId = null;
         t.startedAt = null;
         upsertTask(t);
-        const isMain = !isQueueSlot;
-        if (!isMain) {
-          setMainTask(employeeId, null, null);
-        } else {
+        if (isQueueSlot) {
           setQueueTask(employeeId, null, null);
+        } else {
+          setMainTask(employeeId, null, null);
         }
         enqueueSharedTask(t.id);
         dispatchSharedQueuedTasks();
@@ -750,7 +761,76 @@ export function createDispatch(ctx: DispatchContext) {
     recoveryTimer.unref();
   }
 
-  function handleRegister(message: Extract<EmployeeToServerMessage, { type: "agent.register" }>, socket: WebSocket) {
+  async function validateAgentRegistration(message: Extract<EmployeeToServerMessage, { type: "agent.register" }>, socket: WebSocket) {
+    const now = nowIso();
+    const registration = await getAgentRegistration(db, message.employeeId);
+    if (ctx.agentRegistrationMode === "open") {
+      await upsertAgentRegistration(db, {
+        employeeId: message.employeeId,
+        name: message.name,
+        machineId: message.machineId,
+        hostname: message.hostname,
+        labels: message.labels,
+        status: "approved",
+        approvedAt: registration?.approvedAt ?? now,
+        lastSeenAt: now,
+      });
+      return true;
+    }
+
+    if (!registration) {
+      await upsertAgentRegistration(db, {
+        employeeId: message.employeeId,
+        name: message.name,
+        machineId: message.machineId,
+        hostname: message.hostname,
+        labels: message.labels,
+        status: "pending",
+        lastSeenAt: now,
+      });
+      socket.close(1008, "agent_pending_approval");
+      return false;
+    }
+
+    if (registration.status !== "approved") {
+      await upsertAgentRegistration(db, {
+        employeeId: message.employeeId,
+        name: message.name,
+        machineId: message.machineId,
+        hostname: message.hostname,
+        labels: message.labels,
+        status: "pending",
+        lastSeenAt: now,
+      });
+      socket.close(1008, "agent_pending_approval");
+      return false;
+    }
+
+    const agentToken = ctx.getAgentToken?.(socket);
+    const tokenHash = agentToken && ctx.hashAgentToken ? ctx.hashAgentToken(agentToken) : null;
+    if (!registration.tokenHash || !tokenHash || tokenHash !== registration.tokenHash) {
+      socket.close(1008, "agent_token_invalid");
+      return false;
+    }
+
+    await upsertAgentRegistration(db, {
+      employeeId: message.employeeId,
+      name: message.name,
+      machineId: message.machineId,
+      hostname: message.hostname,
+      labels: message.labels,
+      status: "approved",
+      approvedAt: registration.approvedAt ?? now,
+      lastSeenAt: now,
+    });
+    return true;
+  }
+
+  async function handleRegister(message: Extract<EmployeeToServerMessage, { type: "agent.register" }>, socket: WebSocket) {
+    if (!(await validateAgentRegistration(message, socket))) {
+      return;
+    }
+
     const previous = state.employees.get(message.employeeId);
     const previousMainTaskId = previous?.mainTaskId ?? null;
     const previousQueueTaskId = previous?.queueTaskId ?? null;
@@ -820,6 +900,7 @@ export function createDispatch(ctx: DispatchContext) {
       queuePaused: state.queuePausedSet.has(message.employeeId) || undefined,
       version: message.version,
       claudeVersion: message.claudeVersion,
+      permissionMode: message.permissionMode,
       weight: message.weight ?? 1,
     });
 
@@ -847,9 +928,9 @@ export function createDispatch(ctx: DispatchContext) {
     return Boolean(task && task.employeeId === socketEmployeeId);
   }
 
-  function handleAgentMessage(message: EmployeeToServerMessage, socket: WebSocket) {
+  async function handleAgentMessage(message: EmployeeToServerMessage, socket: WebSocket) {
     if (message.type === "agent.register") {
-      handleRegister(message, socket);
+      await handleRegister(message, socket);
       return;
     }
 

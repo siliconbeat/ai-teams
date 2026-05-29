@@ -33,6 +33,17 @@ textarea {
   font: inherit;
 }
 
+input,
+select,
+textarea {
+  min-width: 0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 7px 9px;
+  color: #e8eefc;
+  background: rgba(255, 255, 255, 0.06);
+}
+
 .app-shell {
   display: grid;
   height: 100dvh;
@@ -217,6 +228,37 @@ a.nav-item {
 .employee-card {
   padding: 10px;
   transition: border-color 0.3s, box-shadow 0.3s;
+}
+
+.agent-create-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.8fr) minmax(120px, 1fr) minmax(160px, 1.2fr) auto;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.agent-token-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0;
+  padding: 10px;
+  border: 1px solid rgba(103, 255, 212, 0.22);
+  border-radius: 8px;
+  background: rgba(103, 255, 212, 0.08);
+}
+
+.agent-token-notice code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #95ffe0;
+}
+
+.agent-registry-table {
+  margin-bottom: 14px;
 }
 
 .employee-card.card-busy {
