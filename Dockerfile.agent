@@ -1,0 +1,56 @@
+# syntax=docker/dockerfile:1.7
+
+ARG NODE_VERSION=22-bookworm-slim
+
+FROM node:${NODE_VERSION} AS build
+
+WORKDIR /app
+RUN corepack enable
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json ./
+COPY scripts ./scripts
+COPY packages/shared ./packages/shared
+COPY apps/agent ./apps/agent
+
+RUN pnpm install --frozen-lockfile
+RUN pnpm --filter @ai-teams/shared build \
+  && pnpm --filter @csdwd/ai-teams-agent build
+
+FROM node:${NODE_VERSION} AS runtime
+
+ARG INSTALL_CLAUDE_CODE=true
+ARG CLAUDE_CODE_PACKAGE=@anthropic-ai/claude-code
+
+ENV NODE_ENV=production \
+  HOME=/home/agent \
+  RUNNER_MODE=claude \
+  DEFAULT_WORKSPACE=/workspace
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    bash \
+    ca-certificates \
+    curl \
+    git \
+    openssh-client \
+    ripgrep \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --system agent \
+  && useradd --system --gid agent --create-home --home-dir /home/agent --shell /bin/bash agent \
+  && mkdir -p /app /workspace /home/agent/.claude \
+  && chown -R agent:agent /app /workspace /home/agent
+
+WORKDIR /app
+
+RUN printf '{"type":"module","private":true,"dependencies":{"ws":"^8.18.0"}}\n' > package.json \
+  && npm install --omit=dev --ignore-scripts \
+  && if [ "$INSTALL_CLAUDE_CODE" = "true" ]; then npm install -g "$CLAUDE_CODE_PACKAGE"; fi
+
+COPY --from=build --chown=agent:agent /app/apps/agent/dist ./dist
+
+USER agent
+
+VOLUME ["/workspace", "/home/agent/.claude"]
+
+CMD ["node", "dist/index.js"]

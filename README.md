@@ -46,6 +46,24 @@ pnpm dev:all
 - Agent (alice) — 连接 Server，RUNNER_MODE=claude
 - Web — `http://localhost:5173`
 
+如果需要把真实 Agent 放进 Docker 沙箱，只让 Claude Code CLI 访问一个专用 workspace，请参考 [Docker Agent 沙箱运行](docs/docker-agent-sandbox.md)。
+
+### Docker 沙箱 Agent
+
+可以只把 Agent 放进 Docker 容器，Server 和 Web 继续运行在宿主机。容器内 Claude Code CLI 的工作目录固定为 `/workspace`，默认映射到宿主机 `./sandbox/agent-alice`，避免直接暴露整个项目目录或用户主目录。
+
+```bash
+cp docker/agent.env.example docker/agent.env
+docker compose --env-file docker/agent.env -f docker-compose.agent.yml up --build
+```
+
+首次使用真实 Claude CLI 时，进入容器完成登录或验证：
+
+```bash
+docker compose --env-file docker/agent.env -f docker-compose.agent.yml run --rm agent-alice bash
+claude -p "hello"
+```
+
 ## 任务调度模式
 
 任务有三种目标模式：

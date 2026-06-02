@@ -1,0 +1,27 @@
+services:
+  agent-alice:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+      args:
+        INSTALL_CLAUDE_CODE: ${INSTALL_CLAUDE_CODE:-true}
+    image: ai-teams-agent:local
+    container_name: ai-teams-agent-alice
+    restart: unless-stopped
+    environment:
+      AI_TEAMS_AUTH_TOKEN: ${AI_TEAMS_AUTH_TOKEN:-dev-token}
+      AI_TEAMS_AGENT_TOKEN: ${AI_TEAMS_AGENT_TOKEN:-}
+      SERVER_URL: ${SERVER_URL:-ws://host.docker.internal:3789}
+      EMPLOYEE_ID: ${EMPLOYEE_ID:-alice}
+      EMPLOYEE_NAME: ${EMPLOYEE_NAME:-Alice}
+      EMPLOYEE_LABELS: ${EMPLOYEE_LABELS:-docker,sandbox}
+      RUNNER_MODE: ${RUNNER_MODE:-claude}
+      DEFAULT_WORKSPACE: /workspace
+      CLAUDE_PERMISSION_MODE: ${CLAUDE_PERMISSION_MODE:-bypassPermissions}
+      CLAUDE_HOOKS_ENABLED: ${CLAUDE_HOOKS_ENABLED:-true}
+    volumes:
+      - ${AI_TEAMS_AGENT_WORKSPACE:-./sandbox/agent-alice}:/workspace
+      - ai-teams-agent-alice-claude:/home/agent/.claude
+
+volumes:
+  ai-teams-agent-alice-claude:
