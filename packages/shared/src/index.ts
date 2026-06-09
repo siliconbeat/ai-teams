@@ -662,6 +662,17 @@ function positiveIntegerField(record: Record<string, unknown>, key: string): num
   return value;
 }
 
+const SAFE_ARG_RE = /^[a-zA-Z0-9_\-.:\/]+$/;
+const MAX_PROMPT_LEN = 1024 * 1024; // 1 MB
+
+function validateStringArray(value: unknown, fieldName: string): string[] {
+  if (!Array.isArray(value)) throw new ProtocolError(`${fieldName} must be an array.`);
+  for (const item of value) {
+    if (typeof item !== "string") throw new ProtocolError(`${fieldName} must contain only strings.`);
+  }
+  return value;
+}
+
 function optionalCliConfigField(record: Record<string, unknown>, key: string): TaskCliConfig | null {
   const value = record[key];
   if (value === undefined || value === null) {
@@ -670,7 +681,44 @@ function optionalCliConfigField(record: Record<string, unknown>, key: string): T
   if (typeof value !== "object" || Array.isArray(value)) {
     throw new ProtocolError(`${key} must be an object or null.`);
   }
-  return value as TaskCliConfig;
+  const obj = value as Record<string, unknown>;
+  const result: TaskCliConfig = {};
+  if (obj.model !== undefined) {
+    if (typeof obj.model !== "string") throw new ProtocolError("cliConfig.model must be a string.");
+    result.model = obj.model;
+  }
+  if (obj.permissionMode !== undefined) {
+    if (typeof obj.permissionMode !== "string") throw new ProtocolError("cliConfig.permissionMode must be a string.");
+    result.permissionMode = obj.permissionMode;
+  }
+  if (obj.maxTurns !== undefined) {
+    if (typeof obj.maxTurns !== "number" || obj.maxTurns < 1) throw new ProtocolError("cliConfig.maxTurns must be a positive number.");
+    result.maxTurns = obj.maxTurns;
+  }
+  if (obj.systemPrompt !== undefined) {
+    if (typeof obj.systemPrompt !== "string") throw new ProtocolError("cliConfig.systemPrompt must be a string.");
+    result.systemPrompt = obj.systemPrompt;
+  }
+  if (obj.appendSystemPrompt !== undefined) {
+    if (typeof obj.appendSystemPrompt !== "string") throw new ProtocolError("cliConfig.appendSystemPrompt must be a string.");
+    result.appendSystemPrompt = obj.appendSystemPrompt;
+  }
+  if (obj.allowedTools !== undefined) {
+    result.allowedTools = validateStringArray(obj.allowedTools, "cliConfig.allowedTools");
+  }
+  if (obj.disallowedTools !== undefined) {
+    result.disallowedTools = validateStringArray(obj.disallowedTools, "cliConfig.disallowedTools");
+  }
+  if (obj.extraArgs !== undefined) {
+    const args = validateStringArray(obj.extraArgs, "cliConfig.extraArgs");
+    for (const arg of args) {
+      if (!SAFE_ARG_RE.test(arg)) {
+        throw new ProtocolError(`cliConfig.extraArgs contains invalid argument: ${arg.slice(0, 50)}`);
+      }
+    }
+    result.extraArgs = args;
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------

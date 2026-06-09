@@ -33,17 +33,24 @@ import { XMarkdown } from "@ant-design/x-markdown";
 // @ts-expect-error Vite injects import.meta.env at build time
 const ENCRYPTION_KEY_HEX: string | undefined = import.meta.env?.VITE_AI_TEAMS_ENCRYPTION_KEY as string | undefined;
 
+let cachedKeyBytes: Uint8Array | null = null;
+function getKeyBytes(): Uint8Array {
+  if (!cachedKeyBytes) {
+    cachedKeyBytes = new Uint8Array(
+      Array.from({ length: 32 }, (_, i) => parseInt(ENCRYPTION_KEY_HEX!.slice(i * 2, i * 2 + 2), 16)),
+    );
+  }
+  return cachedKeyBytes;
+}
+
 async function webCryptoDecrypt(raw: string): Promise<string> {
   if (!ENCRYPTION_KEY_HEX) return raw;
   const parsed = JSON.parse(raw) as unknown;
   if (!isEncryptedEnvelope(parsed)) return raw;
-  const keyBytes = new Uint8Array(
-    Array.from({ length: 32 }, (_, i) => parseInt(ENCRYPTION_KEY_HEX.slice(i * 2, i * 2 + 2), 16)),
-  );
+  const key = await crypto.subtle.importKey("raw", getKeyBytes().buffer as ArrayBuffer, { name: "AES-GCM" }, false, ["decrypt"]);
   const iv = Uint8Array.from(atob(parsed.iv), (c) => c.charCodeAt(0));
   const ciphertext = Uint8Array.from(atob(parsed.ciphertext), (c) => c.charCodeAt(0));
   const tag = Uint8Array.from(atob(parsed.tag), (c) => c.charCodeAt(0));
-  const key = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["decrypt"]);
   const combined = new Uint8Array(ciphertext.length + tag.length);
   combined.set(ciphertext, 0);
   combined.set(tag, ciphertext.length);
@@ -54,10 +61,7 @@ async function webCryptoDecrypt(raw: string): Promise<string> {
 function webCryptoEncrypt(plainText: string): Promise<string> {
   if (!ENCRYPTION_KEY_HEX) return Promise.resolve(plainText);
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const keyBytes = new Uint8Array(
-    Array.from({ length: 32 }, (_, i) => parseInt(ENCRYPTION_KEY_HEX.slice(i * 2, i * 2 + 2), 16)),
-  );
-  return crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["encrypt"]).then((key) =>
+  return crypto.subtle.importKey("raw", getKeyBytes().buffer as ArrayBuffer, { name: "AES-GCM" }, false, ["encrypt"]).then((key) =>
     crypto.subtle.encrypt({ name: "AES-GCM", iv, tagLength: 128 }, key, new TextEncoder().encode(plainText))
       .then((encrypted) => {
         const encryptedBytes = new Uint8Array(encrypted);
@@ -974,7 +978,14 @@ export default function App() {
       });
       if (res.ok) {
         const data = await res.json() as { taskId: string; output: string };
-        setTaskOutputCache((prev) => ({ ...prev, [taskId]: data.output }));
+        setTaskOutputCache((prev) => {
+          const entries = Object.entries({ ...prev, [taskId]: data.output });
+          if (entries.length > 50) {
+            const trimmed = Object.fromEntries(entries.slice(-50));
+            return trimmed;
+          }
+          return { ...prev, [taskId]: data.output };
+        });
       }
     } catch { /* ignore */ }
     setTaskOutputLoading(null);
@@ -1365,6 +1376,8 @@ export default function App() {
     setDraft((current) => ({ ...current, prompt: "" }));
     setSelectedTarget("queue");
     if (resumeSession) {
+      const keys = Object.keys(replyQuotesRef.current);
+      if (keys.length >= 50) delete replyQuotesRef.current[keys[0]];
       replyQuotesRef.current[resumeSession.sessionId] = { agentName: resumeSession.agentName, quote: resumeSession.quote };
     }
     setResumeSession(null);

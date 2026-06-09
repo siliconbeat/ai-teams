@@ -291,7 +291,14 @@ export async function initDb(db: Database) {
   `);
 
   // Migration: add retry_count column
-  try { await db.run("ALTER TABLE tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"); } catch { /* already exists */ }
+  try {
+    await db.run("ALTER TABLE tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0");
+  } catch (err) {
+    const msg = String(err?.["message"] ?? err ?? "");
+    if (!msg.includes("duplicate column") && !msg.includes("already exists")) {
+      console.warn("Migration retry_count failed:", msg);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -349,7 +356,7 @@ export async function hydrateState(db: Database, state: StateStore, defaultTimeo
     } else if (task.employeeId && !TERMINAL_STATUSES.has(task.status)) {
       task.status = "queued";
       await persistTask(db, task);
-      if (task.targetMode === "queue") {
+      if (task.targetMode === "queue" || !state.employees.has(task.employeeId)) {
         state.sharedTaskQueue.push(task.id);
       } else {
         const queue = state.mainTaskQueues.get(task.employeeId) ?? [];

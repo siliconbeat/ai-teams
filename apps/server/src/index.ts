@@ -164,7 +164,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     };
   }
 
-  const app = Fastify({ logger: options.logger === false ? false : loggerConfig }) as FastifyInstance;
+  const app = Fastify({ logger: options.logger === false ? false : loggerConfig, bodyLimit: 1048576 }) as FastifyInstance;
   await app.register(websocket);
   await app.register(swagger, {
     openapi: {
@@ -204,6 +204,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
 
   const agentSocketTokens = new WeakMap<WebSocket, string | null>();
 
+  const encryptor = createEncryptor(process.env.AI_TEAMS_ENCRYPTION_KEY);
   const dispatchCtx: DispatchContext = {
     state,
     db,
@@ -211,7 +212,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     authToken: options.authToken,
     defaultTimeoutSec,
     disconnectGraceMs,
-    encryptor: createEncryptor(process.env.AI_TEAMS_ENCRYPTION_KEY),
+    encryptor,
     maxLogChunksPerTask,
     agentRegistrationMode,
     getAgentToken: (socket) => agentSocketTokens.get(socket) ?? null,
@@ -352,20 +353,25 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
       .filter((e) => e.isFile() && e.name.endsWith(".jsonl"))
       .sort((a, b) => b.name.localeCompare(a.name));
 
+    const MAX_JSONL_SIZE = 5 * 1024 * 1024;
     const sessions = jsonlFiles.map((entry) => {
       const filePath = path.join(claudeProjectsDir, entry.name);
       const stat = fs.statSync(filePath);
       const sessionId = entry.name.replace(/\.jsonl$/, "");
-      const content = fs.readFileSync(filePath, "utf8");
-      const lines = content.split("\n").filter(Boolean);
-      const lineCount = lines.length;
 
       let firstUserMessage: string | null = null;
       let latestUserMessage: string | null = null;
-      for (const line of lines) {
-        const msg = extractUserMessage(line);
-        if (msg && !firstUserMessage) firstUserMessage = msg;
-        if (msg) latestUserMessage = msg;
+      let lineCount = 0;
+
+      if (stat.size <= MAX_JSONL_SIZE) {
+        const content = fs.readFileSync(filePath, "utf8");
+        const lines = content.split("\n").filter(Boolean);
+        lineCount = lines.length;
+        for (const line of lines) {
+          const msg = extractUserMessage(line);
+          if (msg && !firstUserMessage) firstUserMessage = msg;
+          if (msg) latestUserMessage = msg;
+        }
       }
 
       return { id: sessionId, sizeBytes: stat.size, modifiedAt: stat.mtime.toISOString(), lineCount, firstUserMessage, latestUserMessage };
@@ -1253,7 +1259,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
 
     socket.on("message", (raw: WebSocket.RawData) => {
       void (async () => {
-        const decrypted = dispatchCtx.encryptor!.decrypt(raw.toString());
+        const decrypted = encryptor.decrypt(raw.toString());
         const message = parseEmployeeToServerMessage(parseJsonMessage(decrypted));
         await handleAgentMessage(message, socket);
       })().catch((error) => {
@@ -1305,7 +1311,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
       const text = raw.toString();
       if (!text) return; // heartbeat ping
       try {
-        const decrypted = dispatchCtx.encryptor!.decrypt(text);
+        const decrypted = encryptor.decrypt(text);
         const message = parseLeaderToServerMessage(parseJsonMessage(decrypted));
         handleLeaderMessage(message, socket);
       } catch (error) {

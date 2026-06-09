@@ -128,14 +128,24 @@ export function startHeartbeat(state: ConnectionState) {
   }, 10000);
 }
 
+let reconnectAttempt = 0;
+const RECONNECT_MAX_MS = 60000;
+
 export function scheduleReconnect(state: ConnectionState, connectFn: () => void) {
   if (state.reconnectTimer) {
     return;
   }
+  reconnectAttempt += 1;
+  const delay = Math.min(RECONNECT_MS * Math.pow(2, reconnectAttempt - 1), RECONNECT_MAX_MS);
+  const jitter = delay * (0.5 + Math.random() * 0.5);
   state.reconnectTimer = setTimeout(() => {
     state.reconnectTimer = null;
     connectFn();
-  }, RECONNECT_MS);
+  }, jitter);
+}
+
+export function resetReconnectAttempt() {
+  reconnectAttempt = 0;
 }
 
 export function registerAgent(
@@ -179,6 +189,7 @@ export function connect(
 
   state.socket.on("open", () => {
     console.log(`[agent:${EMPLOYEE_ID}] connected to ${SERVER_URL}`);
+    resetReconnectAttempt();
     registerAgent(state, getMainTask(), getQueueTask());
     flushBufferedMessages(state);
     requestTask(state);

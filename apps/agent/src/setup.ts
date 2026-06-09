@@ -34,7 +34,7 @@ export function loadConfigFile(): AgentConfig | null {
 
 export function saveConfigFile(config: AgentConfig) {
   fs.mkdirSync(CONFIG_DIR, { recursive: true });
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2) + "\n");
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
 }
 
 export async function runSetup(existing: AgentConfig | null): Promise<AgentConfig> {

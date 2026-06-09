@@ -350,6 +350,7 @@ export function runClaudeTask(taskId: string, prompt: string, workspace: string 
   }
 
   currentTask.generation += 1;
+  const generation = currentTask.generation;
   currentTask.child = child;
   send({ type: "task.started", taskId, pid: child.pid ?? 0, sessionId: currentTask.claudeSessionId });
   emitOutput(taskId, "stdout", `[agent] permission_mode: ${permissionMode}\n`);
@@ -370,6 +371,9 @@ export function runClaudeTask(taskId: string, prompt: string, workspace: string 
   child.on("close", (code) => {
     const task = findActiveTask(taskId);
     if (!task && code === null) {
+      return;
+    }
+    if (task && task.generation !== generation) {
       return;
     }
     if (task?.cancelRequested) {
