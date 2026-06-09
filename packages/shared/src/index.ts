@@ -14,6 +14,18 @@ export const TERMINAL_STATUSES = new Set<TaskStatus>(["completed", "failed", "ca
 
 export type AgentTarget = "queue" | "all" | string[];
 export type TaskTargetMode = "queue" | "direct" | "broadcast";
+export type MissionStatus =
+  | "created"
+  | "planning"
+  | "dispatching"
+  | "waiting_agents"
+  | "reviewing"
+  | "waiting_human"
+  | "completed"
+  | "failed"
+  | "cancelled";
+export type MissionApprovalPolicy = "auto" | "ask_on_risky_change" | "manual_each_iteration";
+export type MissionApprovalStatus = "pending" | "approved" | "rejected";
 
 export interface TaskCliConfig {
   model?: string;
@@ -99,6 +111,50 @@ export interface TaskOutputChunk {
   content: string;
   createdAt: string;
   delta?: boolean;
+}
+
+export interface MissionRecord {
+  id: string;
+  objective: string;
+  workspace: string | null;
+  status: MissionStatus;
+  approvalPolicy: MissionApprovalPolicy;
+  maxIterations: number;
+  maxTasks: number;
+  currentIteration: number;
+  timeoutSec: number | null;
+  result: string | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+}
+
+export interface MissionEventRecord {
+  id: string;
+  missionId: string;
+  type: string;
+  payload: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface MissionSubtaskRecord {
+  missionId: string;
+  taskId: string;
+  iteration: number;
+  role: string;
+  createdAt: string;
+}
+
+export interface MissionApprovalRecord {
+  id: string;
+  missionId: string;
+  status: MissionApprovalStatus;
+  question: string;
+  options: string[];
+  response: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
 }
 
 export interface StateSnapshot {

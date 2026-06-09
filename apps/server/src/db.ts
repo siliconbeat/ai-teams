@@ -1,6 +1,20 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import pg from "pg";
-import type { AgentRegistrationRecord, AgentRegistrationStatus, EmployeeSnapshot, TaskOutputChunk, TaskRecord, TaskCliConfig } from "@ai-teams/shared";
+import type {
+  AgentRegistrationRecord,
+  AgentRegistrationStatus,
+  EmployeeSnapshot,
+  MissionApprovalPolicy,
+  MissionApprovalRecord,
+  MissionApprovalStatus,
+  MissionEventRecord,
+  MissionRecord,
+  MissionStatus,
+  MissionSubtaskRecord,
+  TaskOutputChunk,
+  TaskRecord,
+  TaskCliConfig,
+} from "@ai-teams/shared";
 import { TERMINAL_STATUSES } from "@ai-teams/shared";
 import type { StateStore } from "./state-store.js";
 
@@ -111,8 +125,8 @@ export async function initDb(db: Database) {
   `);
   await db.run(`
     INSERT INTO schema_meta (key, value)
-    VALUES ('version', '2')
-    ON CONFLICT(key) DO UPDATE SET value = '2'
+    VALUES ('version', '3')
+    ON CONFLICT(key) DO UPDATE SET value = '3'
   `);
   await db.run(`
     CREATE TABLE IF NOT EXISTS employees (
@@ -214,6 +228,67 @@ export async function initDb(db: Database) {
       updated_at      TEXT NOT NULL
     )
   `);
+  await db.run(`
+    CREATE TABLE IF NOT EXISTS missions (
+      id                TEXT PRIMARY KEY,
+      objective         TEXT NOT NULL,
+      workspace         TEXT,
+      status            TEXT NOT NULL,
+      approval_policy   TEXT NOT NULL DEFAULT 'ask_on_risky_change',
+      max_iterations    INTEGER NOT NULL DEFAULT 6,
+      max_tasks         INTEGER NOT NULL DEFAULT 20,
+      current_iteration INTEGER NOT NULL DEFAULT 0,
+      timeout_sec       INTEGER,
+      result            TEXT,
+      error             TEXT,
+      created_at        TEXT NOT NULL,
+      updated_at        TEXT NOT NULL,
+      completed_at      TEXT
+    )
+  `);
+  await db.run(`
+    CREATE INDEX IF NOT EXISTS idx_missions_status ON missions(status)
+  `);
+  await db.run(`
+    CREATE TABLE IF NOT EXISTS mission_events (
+      id           TEXT PRIMARY KEY,
+      mission_id   TEXT NOT NULL,
+      type         TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      created_at   TEXT NOT NULL
+    )
+  `);
+  await db.run(`
+    CREATE INDEX IF NOT EXISTS idx_mission_events_mission ON mission_events(mission_id, created_at)
+  `);
+  await db.run(`
+    CREATE TABLE IF NOT EXISTS mission_subtasks (
+      mission_id TEXT NOT NULL,
+      task_id    TEXT NOT NULL,
+      iteration  INTEGER NOT NULL,
+      role       TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (mission_id, task_id)
+    )
+  `);
+  await db.run(`
+    CREATE INDEX IF NOT EXISTS idx_mission_subtasks_task ON mission_subtasks(task_id)
+  `);
+  await db.run(`
+    CREATE TABLE IF NOT EXISTS mission_approvals (
+      id          TEXT PRIMARY KEY,
+      mission_id  TEXT NOT NULL,
+      status      TEXT NOT NULL,
+      question    TEXT NOT NULL,
+      options_json TEXT NOT NULL,
+      response    TEXT,
+      created_at  TEXT NOT NULL,
+      resolved_at TEXT
+    )
+  `);
+  await db.run(`
+    CREATE INDEX IF NOT EXISTS idx_mission_approvals_mission ON mission_approvals(mission_id, status)
+  `);
 
   // Migration: add retry_count column
   try { await db.run("ALTER TABLE tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"); } catch { /* already exists */ }
@@ -223,7 +298,7 @@ export async function initDb(db: Database) {
 // Hydrate state from database
 // ---------------------------------------------------------------------------
 
-export async function hydrateState(db: Database, state: StateStore, defaultTimeoutSec: number, maxLogChunksPerTask = 400) {
+export async function hydrateState(db: Database, state: StateStore, defaultTimeoutSec: number, maxLogChunksPerTask = 400, maxHydratedTasks = 200) {
   const employeeRows = await db.all<{ payload_json: string }>("SELECT payload_json FROM employees");
   for (const row of employeeRows) {
     const employee = JSON.parse(row.payload_json) as EmployeeSnapshot;
@@ -239,15 +314,30 @@ export async function hydrateState(db: Database, state: StateStore, defaultTimeo
     }
   }
 
-  const taskRows = await db.all<DbTaskRow>(
+  // Load all non-terminal (active) tasks
+  const activeRows = await db.all<DbTaskRow>(
     `SELECT * FROM tasks
+     WHERE status NOT IN ('completed','failed','cancelled','timeout')
      ORDER BY
        CASE WHEN target_mode = 'queue' THEN priority ELSE 0 END DESC,
        created_at ASC`,
   );
-  for (const row of taskRows) {
+
+  // Load recent N terminal tasks
+  const terminalRows = await db.all<DbTaskRow>(
+    `SELECT * FROM tasks
+     WHERE status IN ('completed','failed','cancelled','timeout')
+     ORDER BY created_at DESC
+     LIMIT $1`,
+    [maxHydratedTasks],
+  );
+
+  const hydratedIds = new Set<string>();
+  const allTaskRows = [...activeRows, ...terminalRows];
+  for (const row of allTaskRows) {
     const task = dbRowToTask(row, defaultTimeoutSec);
     state.tasks.set(task.id, task);
+    hydratedIds.add(task.id);
     if (task.status === "queued") {
       if (task.targetMode === "queue" || !task.employeeId) {
         state.sharedTaskQueue.push(task.id);
@@ -269,21 +359,27 @@ export async function hydrateState(db: Database, state: StateStore, defaultTimeo
     }
   }
 
-  const logRows = await db.all<{ payload_json: string }>(
-    `SELECT payload_json FROM (
-       SELECT task_id, seq, payload_json,
-              ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY seq DESC) AS rn
-       FROM task_logs
-     ) ranked
-     WHERE rn <= $1
-     ORDER BY task_id ASC, seq ASC`,
-    [maxLogChunksPerTask],
-  );
-  for (const row of logRows) {
-    const chunk = JSON.parse(row.payload_json) as TaskOutputChunk;
-    const history = state.taskLogs.get(chunk.taskId) ?? [];
-    history.push(chunk);
-    state.taskLogs.set(chunk.taskId, history);
+  // Only load logs for hydrated tasks
+  if (hydratedIds.size > 0) {
+    const idList = [...hydratedIds];
+    const placeholders = idList.map((_, i) => `$${i + 1}`).join(", ");
+    const logRows = await db.all<{ payload_json: string }>(
+      `SELECT payload_json FROM (
+         SELECT task_id, seq, payload_json,
+                ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY seq DESC) AS rn
+         FROM task_logs
+         WHERE task_id IN (${placeholders})
+       ) ranked
+       WHERE rn <= $${idList.length + 1}
+       ORDER BY task_id ASC, seq ASC`,
+      [...idList, maxLogChunksPerTask],
+    );
+    for (const row of logRows) {
+      const chunk = JSON.parse(row.payload_json) as TaskOutputChunk;
+      const history = state.taskLogs.get(chunk.taskId) ?? [];
+      history.push(chunk);
+      state.taskLogs.set(chunk.taskId, history);
+    }
   }
 
   const webhookRows = await db.all<{ task_id: string; webhook_url: string }>("SELECT task_id, webhook_url FROM task_webhooks");
@@ -631,6 +727,280 @@ function taskToDbValues(task: TaskRecord): unknown[] {
 
 function toSnakeCase(str: string): string {
   return str.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+}
+
+// ---------------------------------------------------------------------------
+// Mission CRUD
+// ---------------------------------------------------------------------------
+
+export type MissionCreateInput = {
+  id: string;
+  objective: string;
+  workspace: string | null;
+  approvalPolicy: MissionApprovalPolicy;
+  maxIterations: number;
+  maxTasks: number;
+  timeoutSec: number | null;
+  createdAt: string;
+};
+
+type DbMissionRow = {
+  id: string;
+  objective: string;
+  workspace: string | null;
+  status: string;
+  approval_policy: string;
+  max_iterations: number;
+  max_tasks: number;
+  current_iteration: number;
+  timeout_sec: number | null;
+  result: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+};
+
+type DbMissionEventRow = {
+  id: string;
+  mission_id: string;
+  type: string;
+  payload_json: string;
+  created_at: string;
+};
+
+type DbMissionSubtaskRow = {
+  mission_id: string;
+  task_id: string;
+  iteration: number;
+  role: string;
+  created_at: string;
+};
+
+type DbMissionApprovalRow = {
+  id: string;
+  mission_id: string;
+  status: string;
+  question: string;
+  options_json: string;
+  response: string | null;
+  created_at: string;
+  resolved_at: string | null;
+};
+
+const MISSION_COLUMNS = [
+  "id", "objective", "workspace", "status", "approval_policy", "max_iterations",
+  "max_tasks", "current_iteration", "timeout_sec", "result", "error",
+  "created_at", "updated_at", "completed_at",
+] as const;
+
+const MISSION_PLACEHOLDERS = MISSION_COLUMNS.map((_, i) => `$${i + 1}`).join(", ");
+const MISSION_UPDATE_SET = MISSION_COLUMNS.slice(1).map((col) => `${col} = excluded.${col}`).join(", ");
+
+function dbRowToMission(row: DbMissionRow): MissionRecord {
+  return {
+    id: row.id,
+    objective: row.objective,
+    workspace: row.workspace,
+    status: row.status as MissionStatus,
+    approvalPolicy: row.approval_policy as MissionApprovalPolicy,
+    maxIterations: row.max_iterations,
+    maxTasks: row.max_tasks,
+    currentIteration: row.current_iteration,
+    timeoutSec: row.timeout_sec,
+    result: row.result,
+    error: row.error,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    completedAt: row.completed_at,
+  };
+}
+
+function missionToDbValues(mission: MissionRecord): unknown[] {
+  return [
+    mission.id,
+    mission.objective,
+    mission.workspace,
+    mission.status,
+    mission.approvalPolicy,
+    mission.maxIterations,
+    mission.maxTasks,
+    mission.currentIteration,
+    mission.timeoutSec,
+    mission.result,
+    mission.error,
+    mission.createdAt,
+    mission.updatedAt,
+    mission.completedAt,
+  ];
+}
+
+export async function createMission(db: Database, input: MissionCreateInput): Promise<MissionRecord> {
+  const mission: MissionRecord = {
+    id: input.id,
+    objective: input.objective,
+    workspace: input.workspace,
+    status: "created",
+    approvalPolicy: input.approvalPolicy,
+    maxIterations: input.maxIterations,
+    maxTasks: input.maxTasks,
+    currentIteration: 0,
+    timeoutSec: input.timeoutSec,
+    result: null,
+    error: null,
+    createdAt: input.createdAt,
+    updatedAt: input.createdAt,
+    completedAt: null,
+  };
+  await persistMission(db, mission);
+  return mission;
+}
+
+export async function persistMission(db: Database, mission: MissionRecord): Promise<void> {
+  await db.run(
+    `INSERT INTO missions (${MISSION_COLUMNS.join(", ")})
+     VALUES (${MISSION_PLACEHOLDERS})
+     ON CONFLICT(id) DO UPDATE SET ${MISSION_UPDATE_SET}`,
+    missionToDbValues(mission),
+  );
+}
+
+export async function getMissionById(db: Database, missionId: string): Promise<MissionRecord | undefined> {
+  const row = await db.get<DbMissionRow>("SELECT * FROM missions WHERE id = $1", [missionId]);
+  return row ? dbRowToMission(row) : undefined;
+}
+
+export async function listMissions(db: Database, limit = 50): Promise<MissionRecord[]> {
+  const rows = await db.all<DbMissionRow>("SELECT * FROM missions ORDER BY created_at DESC LIMIT $1", [limit]);
+  return rows.map(dbRowToMission);
+}
+
+export async function listActiveMissions(db: Database): Promise<MissionRecord[]> {
+  const rows = await db.all<DbMissionRow>(
+    `SELECT * FROM missions
+     WHERE status NOT IN ('completed', 'failed', 'cancelled', 'waiting_human')
+     ORDER BY created_at ASC`,
+  );
+  return rows.map(dbRowToMission);
+}
+
+export async function updateMissionFields(db: Database, missionId: string, fields: Partial<MissionRecord>): Promise<MissionRecord | undefined> {
+  const existing = await getMissionById(db, missionId);
+  if (!existing) return undefined;
+  const updated: MissionRecord = { ...existing, ...fields, updatedAt: fields.updatedAt ?? new Date().toISOString() };
+  await persistMission(db, updated);
+  return updated;
+}
+
+function dbRowToMissionEvent(row: DbMissionEventRow): MissionEventRecord {
+  return {
+    id: row.id,
+    missionId: row.mission_id,
+    type: row.type,
+    payload: JSON.parse(row.payload_json || "{}") as Record<string, unknown>,
+    createdAt: row.created_at,
+  };
+}
+
+export async function appendMissionEvent(db: Database, event: MissionEventRecord): Promise<void> {
+  await db.run(
+    `INSERT INTO mission_events (id, mission_id, type, payload_json, created_at)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [event.id, event.missionId, event.type, JSON.stringify(event.payload), event.createdAt],
+  );
+}
+
+export async function listMissionEvents(db: Database, missionId: string): Promise<MissionEventRecord[]> {
+  const rows = await db.all<DbMissionEventRow>(
+    "SELECT * FROM mission_events WHERE mission_id = $1 ORDER BY created_at ASC",
+    [missionId],
+  );
+  return rows.map(dbRowToMissionEvent);
+}
+
+function dbRowToMissionSubtask(row: DbMissionSubtaskRow): MissionSubtaskRecord {
+  return {
+    missionId: row.mission_id,
+    taskId: row.task_id,
+    iteration: row.iteration,
+    role: row.role,
+    createdAt: row.created_at,
+  };
+}
+
+export async function addMissionSubtask(db: Database, subtask: MissionSubtaskRecord): Promise<void> {
+  await db.run(
+    `INSERT INTO mission_subtasks (mission_id, task_id, iteration, role, created_at)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT(mission_id, task_id) DO UPDATE SET
+       iteration = excluded.iteration,
+       role = excluded.role`,
+    [subtask.missionId, subtask.taskId, subtask.iteration, subtask.role, subtask.createdAt],
+  );
+}
+
+export async function listMissionSubtasks(db: Database, missionId: string): Promise<MissionSubtaskRecord[]> {
+  const rows = await db.all<DbMissionSubtaskRow>(
+    "SELECT * FROM mission_subtasks WHERE mission_id = $1 ORDER BY iteration ASC, created_at ASC",
+    [missionId],
+  );
+  return rows.map(dbRowToMissionSubtask);
+}
+
+export async function countMissionSubtasks(db: Database, missionId: string): Promise<number> {
+  const row = await db.get<{ count: number }>("SELECT COUNT(*) AS count FROM mission_subtasks WHERE mission_id = $1", [missionId]);
+  return Number(row?.count ?? 0);
+}
+
+function dbRowToMissionApproval(row: DbMissionApprovalRow): MissionApprovalRecord {
+  return {
+    id: row.id,
+    missionId: row.mission_id,
+    status: row.status as MissionApprovalStatus,
+    question: row.question,
+    options: JSON.parse(row.options_json || "[]") as string[],
+    response: row.response,
+    createdAt: row.created_at,
+    resolvedAt: row.resolved_at,
+  };
+}
+
+export async function createMissionApproval(db: Database, approval: MissionApprovalRecord): Promise<void> {
+  await db.run(
+    `INSERT INTO mission_approvals (id, mission_id, status, question, options_json, response, created_at, resolved_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [
+      approval.id,
+      approval.missionId,
+      approval.status,
+      approval.question,
+      JSON.stringify(approval.options),
+      approval.response,
+      approval.createdAt,
+      approval.resolvedAt,
+    ],
+  );
+}
+
+export async function listMissionApprovals(db: Database, missionId: string): Promise<MissionApprovalRecord[]> {
+  const rows = await db.all<DbMissionApprovalRow>(
+    "SELECT * FROM mission_approvals WHERE mission_id = $1 ORDER BY created_at ASC",
+    [missionId],
+  );
+  return rows.map(dbRowToMissionApproval);
+}
+
+export async function getMissionApprovalById(db: Database, approvalId: string): Promise<MissionApprovalRecord | undefined> {
+  const row = await db.get<DbMissionApprovalRow>("SELECT * FROM mission_approvals WHERE id = $1", [approvalId]);
+  return row ? dbRowToMissionApproval(row) : undefined;
+}
+
+export async function resolveMissionApproval(db: Database, approvalId: string, status: MissionApprovalStatus, response: string | null, resolvedAt: string): Promise<MissionApprovalRecord | undefined> {
+  await db.run(
+    "UPDATE mission_approvals SET status = $1, response = $2, resolved_at = $3 WHERE id = $4",
+    [status, response, resolvedAt, approvalId],
+  );
+  return getMissionApprovalById(db, approvalId);
 }
 
 // ---------------------------------------------------------------------------

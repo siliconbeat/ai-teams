@@ -19,12 +19,13 @@ import {
 } from "@ai-teams/shared";
 import { daemonize, stopDaemon, getDaemonStatus } from "@ai-teams/shared/daemon";
 import { createDatabaseFromEnv, initDb, hydrateState, type Database, queryTasks, getTaskById, getTaskLogsByTaskId, deleteTask, updateTaskFields, dbRowToTask, upsertSchedule, getAllSchedules, getScheduleById, deleteScheduleRow, updateScheduleFields, type ScheduleRecord, listAgentRegistrations, upsertAgentRegistration, deleteAgentRegistration, deleteEmployee } from "./db.js";
-import { type RestTaskRequest, errorResponseSchema, snapshotSchema, sessionHistorySchema, restTaskRequestSchema, restTaskAcceptedSchema, taskListResponseSchema, taskRecordSchema, taskOutputResponseSchema, taskPatchSchema, parseRestTaskRequest, claudeSessionsResponseSchema, createScheduleRequestSchema, updateScheduleRequestSchema, scheduleResponseSchema, scheduleListResponseSchema, agentRegistrationListResponseSchema, createAgentRegistrationRequestSchema, agentRegistrationTokenResponseSchema, type CreateScheduleRequest, type UpdateScheduleRequest } from "./schemas.js";
+import { type RestTaskRequest, errorResponseSchema, snapshotSchema, sessionHistorySchema, restTaskRequestSchema, restTaskAcceptedSchema, taskListResponseSchema, taskRecordSchema, taskOutputResponseSchema, taskPatchSchema, parseRestTaskRequest, claudeSessionsResponseSchema, createScheduleRequestSchema, updateScheduleRequestSchema, scheduleResponseSchema, scheduleListResponseSchema, agentRegistrationListResponseSchema, createAgentRegistrationRequestSchema, agentRegistrationTokenResponseSchema, createMissionRequestSchema, missionListResponseSchema, missionDetailResponseSchema, approvalResponseRequestSchema, type CreateScheduleRequest, type UpdateScheduleRequest, type CreateMissionRequest } from "./schemas.js";
 import { createDispatch, nowIso, sendJson } from "./dispatch.js";
 import type { DispatchContext } from "./dispatch.js";
 import { createInMemoryStateStore } from "./state-store.js";
 import { createEncryptor } from "./crypto.js";
 import { startScheduleJob, stopScheduleJob, type ScheduleDispatchFn } from "./scheduler.js";
+import { createLeaderOrchestrator } from "./leader-orchestrator.js";
 
 function scheduleToResponse(s: ScheduleRecord) {
   return {
@@ -86,7 +87,9 @@ export type AiTeamsServerOptions = {
   logLevel?: string;
   logDir?: string;
   maxLogChunksPerTask?: number;
+  maxHydratedTasks?: number;
   agentRegistrationMode?: "open" | "approval";
+  missionPollMs?: number;
 };
 
 export type AiTeamsServer = {
@@ -127,6 +130,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
   const defaultTimeoutSec = options.defaultTimeoutSec ?? 1800;
   const disconnectGraceMs = options.disconnectGraceMs ?? 15000;
   const maxLogChunksPerTask = options.maxLogChunksPerTask ?? 400;
+  const maxHydratedTasks = options.maxHydratedTasks ?? 200;
   const agentRegistrationMode = options.agentRegistrationMode ?? "approval";
   const dataDir = options.dataDir ?? path.join(process.cwd(), "data");
   const dbPath = options.dbPath ?? path.join(dataDir, "ai-teams.db");
@@ -140,7 +144,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     DATABASE_URL: process.env.DATABASE_URL,
   });
   await initDb(db);
-  await hydrateState(db, state, defaultTimeoutSec, maxLogChunksPerTask);
+  await hydrateState(db, state, defaultTimeoutSec, maxLogChunksPerTask, maxHydratedTasks);
 
   const logLevel = options.logLevel || process.env.LOG_LEVEL || "info";
   const logDir = options.logDir || process.env.LOG_DIR;
@@ -214,6 +218,14 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     hashAgentToken: (token) => hashAgentToken(options.authToken, token),
   };
   const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage, cancelTaskById, prioritizeTask, startDisconnectRecovery, resumeAgentQueue, pauseAgentQueue, resetAgentSession, cleanup: dispatchCleanup } = createDispatch(dispatchCtx);
+  const missionOrchestrator = createLeaderOrchestrator({
+    db,
+    state,
+    dispatchMissionTask: dispatchLeaderCommand,
+    log: app.log,
+    pollMs: options.missionPollMs,
+  });
+  missionOrchestrator.start();
 
   const scheduleDispatchFn: ScheduleDispatchFn = (message, webhookUrl, cliConfig, priority, requiredLabels) => {
     return dispatchLeaderCommand(message, webhookUrl, cliConfig, priority, requiredLabels);
@@ -750,6 +762,114 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     },
   );
 
+  // ── Mission Routes ────────────────────────────────────────────────────
+
+  app.get(
+    "/api/missions",
+    {
+      schema: {
+        tags: ["missions"],
+        summary: "List AI Leader missions",
+        response: { 200: missionListResponseSchema, 401: errorResponseSchema },
+      },
+    },
+    async () => {
+      const missions = await missionOrchestrator.list();
+      return { missions };
+    },
+  );
+
+  app.post<{ Body: CreateMissionRequest }>(
+    "/api/missions",
+    {
+      schema: {
+        tags: ["missions"],
+        summary: "Create an AI Leader mission",
+        description:
+          "Creates a durable Mission. The AI Leader Orchestrator decomposes it into normal AI Teams tasks, waits for results, asks for human approval when required, and completes or fails the Mission.",
+        body: createMissionRequestSchema,
+        response: { 201: missionDetailResponseSchema, 400: errorResponseSchema, 401: errorResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      try {
+        const mission = await missionOrchestrator.create(request.body);
+        const detail = await missionOrchestrator.detail(mission.id);
+        return reply.code(201).send(detail);
+      } catch (error) {
+        return reply.code(400).send({ error: error instanceof Error ? error.message : "Invalid mission request." });
+      }
+    },
+  );
+
+  app.get<{ Params: { missionId: string } }>(
+    "/api/missions/:missionId",
+    {
+      schema: {
+        tags: ["missions"],
+        summary: "Get an AI Leader mission with events, subtasks, and approvals",
+        params: { type: "object", required: ["missionId"], properties: { missionId: { type: "string", minLength: 1 } } },
+        response: { 200: missionDetailResponseSchema, 404: errorResponseSchema, 401: errorResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const detail = await missionOrchestrator.detail(request.params.missionId);
+      if (!detail) return reply.code(404).send({ error: "Mission not found." });
+      return detail;
+    },
+  );
+
+  app.post<{ Params: { missionId: string } }>(
+    "/api/missions/:missionId/cancel",
+    {
+      schema: {
+        tags: ["missions"],
+        summary: "Cancel an AI Leader mission",
+        params: { type: "object", required: ["missionId"], properties: { missionId: { type: "string", minLength: 1 } } },
+        response: { 200: missionDetailResponseSchema, 404: errorResponseSchema, 401: errorResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const mission = await missionOrchestrator.cancel(request.params.missionId);
+      if (!mission) return reply.code(404).send({ error: "Mission not found." });
+      const detail = await missionOrchestrator.detail(mission.id);
+      return detail;
+    },
+  );
+
+  app.post<{ Params: { missionId: string; approvalId: string }; Body: { approved: boolean; response?: string } }>(
+    "/api/missions/:missionId/approvals/:approvalId/respond",
+    {
+      schema: {
+        tags: ["missions"],
+        summary: "Approve or reject a Mission human-in-the-loop request",
+        params: {
+          type: "object",
+          required: ["missionId", "approvalId"],
+          properties: {
+            missionId: { type: "string", minLength: 1 },
+            approvalId: { type: "string", minLength: 1 },
+          },
+        },
+        body: approvalResponseRequestSchema,
+        response: { 200: missionDetailResponseSchema, 404: errorResponseSchema, 401: errorResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const approval = await missionOrchestrator.respondToApproval(
+        request.params.approvalId,
+        request.body.approved,
+        request.body.response ?? null,
+      );
+      if (!approval || approval.missionId !== request.params.missionId) {
+        return reply.code(404).send({ error: "Approval not found." });
+      }
+      const detail = await missionOrchestrator.detail(request.params.missionId);
+      if (!detail) return reply.code(404).send({ error: "Mission not found." });
+      return detail;
+    },
+  );
+
   // ── Agent Routes ─────────────────────────────────────────────────────
 
   app.get(
@@ -1221,6 +1341,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
       for (const timer of state.heartbeatTimers.values()) {
         clearTimeout(timer);
       }
+      missionOrchestrator.stop();
       dispatchCleanup();
       await app.close();
       await db.close();
@@ -1240,7 +1361,9 @@ export function readOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): AiTeam
     logLevel: env.LOG_LEVEL,
     logDir: env.LOG_DIR,
     maxLogChunksPerTask: Number(env.MAX_LOG_CHUNKS_PER_TASK) || 400,
+    maxHydratedTasks: Number(env.MAX_HYDRATED_TASKS) || 200,
     agentRegistrationMode: env.AGENT_REGISTRATION_MODE === "open" ? "open" : "approval",
+    missionPollMs: Number(env.MISSION_POLL_MS) || undefined,
   };
 }
 

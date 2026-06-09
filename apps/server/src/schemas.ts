@@ -1,4 +1,5 @@
 import { parseLeaderToServerMessage, type LeaderToServerMessage } from "@ai-teams/shared";
+import type { MissionApprovalPolicy } from "@ai-teams/shared";
 
 export type RestTaskRequest = {
   atAgents?: unknown;
@@ -478,5 +479,140 @@ export const agentRegistrationTokenResponseSchema = {
   properties: {
     agent: agentRegistrationSchema,
     agentToken: { type: "string" },
+  },
+} as const;
+
+// ── Missions ────────────────────────────────────────────────────────────────
+
+export type CreateMissionRequest = {
+  objective: string;
+  workspace?: string;
+  approvalPolicy?: MissionApprovalPolicy;
+  maxIterations?: number;
+  maxTasks?: number;
+  timeoutSec?: number;
+  autoStart?: boolean;
+};
+
+export const missionStatusSchema = {
+  type: "string",
+  enum: ["created", "planning", "dispatching", "waiting_agents", "reviewing", "waiting_human", "completed", "failed", "cancelled"],
+} as const;
+
+export const missionRecordSchema = {
+  type: "object",
+  required: [
+    "id",
+    "objective",
+    "workspace",
+    "status",
+    "approvalPolicy",
+    "maxIterations",
+    "maxTasks",
+    "currentIteration",
+    "timeoutSec",
+    "result",
+    "error",
+    "createdAt",
+    "updatedAt",
+    "completedAt",
+  ],
+  properties: {
+    id: { type: "string" },
+    objective: { type: "string" },
+    workspace: nullableString,
+    status: missionStatusSchema,
+    approvalPolicy: { type: "string", enum: ["auto", "ask_on_risky_change", "manual_each_iteration"] },
+    maxIterations: { type: "number" },
+    maxTasks: { type: "number" },
+    currentIteration: { type: "number" },
+    timeoutSec: nullableNumber,
+    result: nullableString,
+    error: nullableString,
+    createdAt: { type: "string" },
+    updatedAt: { type: "string" },
+    completedAt: nullableString,
+  },
+} as const;
+
+export const missionEventSchema = {
+  type: "object",
+  required: ["id", "missionId", "type", "payload", "createdAt"],
+  properties: {
+    id: { type: "string" },
+    missionId: { type: "string" },
+    type: { type: "string" },
+    payload: { type: "object", additionalProperties: true },
+    createdAt: { type: "string" },
+  },
+} as const;
+
+export const missionSubtaskSchema = {
+  type: "object",
+  required: ["missionId", "taskId", "iteration", "role", "createdAt", "task"],
+  properties: {
+    missionId: { type: "string" },
+    taskId: { type: "string" },
+    iteration: { type: "number" },
+    role: { type: "string" },
+    createdAt: { type: "string" },
+    task: { anyOf: [taskRecordSchema, { type: "null" }] },
+  },
+} as const;
+
+export const missionApprovalSchema = {
+  type: "object",
+  required: ["id", "missionId", "status", "question", "options", "response", "createdAt", "resolvedAt"],
+  properties: {
+    id: { type: "string" },
+    missionId: { type: "string" },
+    status: { type: "string", enum: ["pending", "approved", "rejected"] },
+    question: { type: "string" },
+    options: { type: "array", items: { type: "string" } },
+    response: nullableString,
+    createdAt: { type: "string" },
+    resolvedAt: nullableString,
+  },
+} as const;
+
+export const createMissionRequestSchema = {
+  type: "object",
+  required: ["objective"],
+  properties: {
+    objective: { type: "string", minLength: 1 },
+    workspace: { type: "string" },
+    approvalPolicy: { type: "string", enum: ["auto", "ask_on_risky_change", "manual_each_iteration"], default: "ask_on_risky_change" },
+    maxIterations: { type: "integer", minimum: 1, maximum: 50, default: 6 },
+    maxTasks: { type: "integer", minimum: 1, maximum: 200, default: 20 },
+    timeoutSec: { type: "number", minimum: 1 },
+    autoStart: { type: "boolean", default: true },
+  },
+} as const;
+
+export const missionListResponseSchema = {
+  type: "object",
+  required: ["missions"],
+  properties: {
+    missions: { type: "array", items: missionRecordSchema },
+  },
+} as const;
+
+export const missionDetailResponseSchema = {
+  type: "object",
+  required: ["mission", "events", "subtasks", "approvals"],
+  properties: {
+    mission: missionRecordSchema,
+    events: { type: "array", items: missionEventSchema },
+    subtasks: { type: "array", items: missionSubtaskSchema },
+    approvals: { type: "array", items: missionApprovalSchema },
+  },
+} as const;
+
+export const approvalResponseRequestSchema = {
+  type: "object",
+  required: ["approved"],
+  properties: {
+    approved: { type: "boolean" },
+    response: { type: "string" },
   },
 } as const;

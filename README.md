@@ -90,6 +90,33 @@ queued → dispatched → accepted → running → completed | failed | cancelle
 - **main 槽** — direct/broadcast 任务，使用持久 Claude 会话
 - **queue 槽** — queue 任务，使用独立会话
 
+## AI Leader Mission
+
+AI Leader Mission 用于把一个总目标交给服务端编排器，由编排器拆分普通 AI Teams 任务、派发给 Agent、等待结果、触发 Review，并在风险节点请求人工确认。
+
+当前实现采用持久化状态机：
+
+```
+created → planning → dispatching → waiting_agents → reviewing
+        ↘ waiting_human → planning
+        ↘ completed | failed | cancelled
+```
+
+默认策略是：
+- 第一轮创建 `analyst` 和 `implementer` 两个队列子任务。
+- 子任务完成后创建 `reviewer` 队列子任务。
+- Review 完成后汇总 Mission 结果。
+- 如果目标包含生产、部署、删除、迁移、数据库、权限、密钥等风险词，`ask_on_risky_change` 会先进入人工确认。
+- 如果子任务失败或超时，会进入人工确认，避免继续盲目派发。
+
+确认策略：
+
+| 策略 | 说明 |
+|------|------|
+| `auto` | 自动推进，不主动请求每轮确认 |
+| `ask_on_risky_change` | 默认；风险目标或失败任务需要人工确认 |
+| `manual_each_iteration` | 每一轮 Leader 计划都先确认再派发 |
+
 ---
 
 ## REST API
@@ -308,6 +335,54 @@ GET /api/sessions/:sessionId/history
 
 每个回调包含 `x-ai-teams-signature` Header（HMAC-SHA256 签名），可用共享 Token 验证。
 
+### AI Leader Mission API
+
+#### 创建 Mission
+
+```
+POST /api/missions
+```
+
+```json
+{
+  "objective": "完成生产稳定性优化，保持旧版接口兼容，并完成测试",
+  "workspace": "/path/to/project",
+  "approvalPolicy": "ask_on_risky_change",
+  "maxIterations": 6,
+  "maxTasks": 20,
+  "timeoutSec": 1800,
+  "autoStart": true
+}
+```
+
+#### 查询 Mission
+
+```
+GET /api/missions
+GET /api/missions/:missionId
+```
+
+详情返回 `mission`、`events`、`subtasks`、`approvals`。`subtasks` 关联的是现有 `TaskRecord`，因此旧任务接口仍可继续查询、取消和查看输出。
+
+#### 人工确认
+
+```
+POST /api/missions/:missionId/approvals/:approvalId/respond
+```
+
+```json
+{
+  "approved": true,
+  "response": "允许继续，但不要执行生产部署"
+}
+```
+
+#### 取消 Mission
+
+```
+POST /api/missions/:missionId/cancel
+```
+
 ---
 
 ## 启动方式
@@ -358,6 +433,7 @@ AI_TEAMS_AUTH_TOKEN=dev-token EMPLOYEE_ID=bob EMPLOYEE_NAME=Bob RUNNER_MODE=fake
 | `DEFAULT_TIMEOUT_SEC` | `1800` | 任务超时秒数 |
 | `DISCONNECT_GRACE_MS` | `15000` | 断线恢复宽限期 |
 | `MAX_LOG_CHUNKS_PER_TASK` | `400` | 每个任务保留的输出日志块上限 |
+| `MISSION_POLL_MS` | `500` | AI Leader Mission 编排器轮询间隔 |
 | `DATABASE_URL` | — | PostgreSQL 连接串（见下方说明） |
 | `DB_PATH` | `data/ai-teams.db` | SQLite 数据库路径（不设 `DATABASE_URL` 时使用） |
 | `LOG_LEVEL` | `info` | 日志级别：`trace` / `debug` / `info` / `warn` / `error` |

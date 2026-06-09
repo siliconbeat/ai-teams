@@ -1276,6 +1276,150 @@ a.nav-item {
   font-family: "SFMono-Regular", "Menlo", monospace;
 }
 
+/* ── Mission page ── */
+
+.mission-panel {
+  gap: 12px;
+}
+
+.mission-create-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.6fr) repeat(3, minmax(120px, 0.7fr));
+  gap: 10px;
+  padding: 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.mission-objective-field {
+  grid-row: span 2;
+}
+
+.mission-create-actions {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.mission-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.8fr) minmax(360px, 1.4fr);
+  gap: 12px;
+  min-height: 0;
+}
+
+.mission-list,
+.mission-detail {
+  min-height: 0;
+  max-height: calc(100dvh - 270px);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.mission-row {
+  cursor: pointer;
+}
+
+.mission-row.selected {
+  border-color: rgba(103, 232, 160, 0.35);
+  background: rgba(103, 232, 160, 0.08);
+}
+
+.mission-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.mission-detail-header,
+.mission-detail-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.mission-detail-header h2 {
+  margin: 0 0 4px;
+  font-size: 16px;
+}
+
+.mission-detail-header p {
+  margin: 0;
+  color: #7f93b5;
+  font-family: "SFMono-Regular", "Menlo", monospace;
+  font-size: 11px;
+}
+
+.mission-approval {
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 210, 90, 0.28);
+  background: rgba(255, 210, 90, 0.08);
+}
+
+.mission-approval p {
+  margin: 6px 0 10px;
+  color: #d8e2f8;
+}
+
+.mission-section h3,
+.mission-result h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: #c9d6f2;
+}
+
+.mission-events {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mission-event {
+  display: grid;
+  grid-template-columns: 70px 150px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 7px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+  font-size: 11px;
+}
+
+.mission-event span {
+  color: #7f93b5;
+}
+
+.mission-event code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #9bc8ff;
+}
+
+.mission-result pre {
+  max-height: 220px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(0, 0, 0, 0.22);
+  color: #c9d6f2;
+  font-size: 11px;
+}
+
+.mission-error-result pre {
+  color: #ffb3b3;
+}
+
 /* ── Tablet (≤1100px): stacked layout ── */
 @media (max-width: 1100px) and (min-width: 641px) {
   .app-shell {

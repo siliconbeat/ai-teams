@@ -77,6 +77,7 @@ describe("认证", () => {
     const openapi = (await response.json()) as { openapi: string; paths: Record<string, unknown> };
     expect(openapi.openapi).toMatch(/^3\./);
     expect(openapi.paths["/api/tasks"]).toBeTruthy();
+    expect(openapi.paths["/api/missions"]).toBeTruthy();
   });
 });
 
@@ -161,6 +162,129 @@ describe("GET /health", () => {
     expect(body.status).toBe("ok");
     expect(body.employees).toBe(0);
     expect(body.tasks).toBe(0);
+  });
+});
+
+// ─── AI Leader Missions ─────────────────────────────────────────
+
+describe("AI Leader Missions", () => {
+  it("创建 Mission 后复用任务队列派发子任务，并在 Review 完成后结束", async () => {
+    const alice = await connectAgent("alice");
+    const bob = await connectAgent("bob");
+
+    const response = await fetch(`${httpBaseUrl}/api/missions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        objective: "实现一个兼容旧接口的稳定性优化并测试",
+        approvalPolicy: "auto",
+        maxIterations: 4,
+        maxTasks: 6,
+      }),
+    });
+    expect(response.status).toBe(201);
+    const created = (await response.json()) as { mission: { id: string; status: string }; subtasks: Array<{ taskId: string }> };
+    const missionId = created.mission.id;
+
+    await waitUntil(async () => (await getMission(missionId)).subtasks.length >= 2, 1000);
+    let detail = await getMission(missionId);
+    expect(detail.mission.status).toBe("waiting_agents");
+    expect(detail.subtasks.map((s) => s.role).sort()).toEqual(["analyst", "implementer"]);
+
+    for (const subtask of detail.subtasks) {
+      const task = server.buildSnapshot().tasks.find((t) => t.id === subtask.taskId)!;
+      const socket = task.employeeId === "alice" ? alice : bob;
+      completeTask(socket, task.id, `${subtask.role} done`);
+    }
+
+    await waitUntil(async () => (await getMission(missionId)).subtasks.some((s) => s.role === "reviewer"), 1000);
+    detail = await getMission(missionId);
+    const review = detail.subtasks.find((s) => s.role === "reviewer")!;
+    const reviewTask = server.buildSnapshot().tasks.find((t) => t.id === review.taskId)!;
+    completeTask(reviewTask.employeeId === "alice" ? alice : bob, reviewTask.id, "review passed");
+
+    await waitUntil(async () => (await getMission(missionId)).mission.status === "completed", 1000);
+    detail = await getMission(missionId);
+    expect(detail.mission.result).toContain("Mission 完成");
+    expect(detail.subtasks).toHaveLength(3);
+  });
+
+  it("风险 Mission 会暂停等待人工确认，批准后继续派发任务", async () => {
+    await connectAgent("alice");
+    const response = await fetch(`${httpBaseUrl}/api/missions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        objective: "修改生产数据库迁移策略并删除旧表",
+        approvalPolicy: "ask_on_risky_change",
+      }),
+    });
+    expect(response.status).toBe(201);
+    const created = (await response.json()) as { mission: { id: string } };
+    const missionId = created.mission.id;
+
+    await waitUntil(async () => (await getMission(missionId)).mission.status === "waiting_human", 1000);
+    let detail = await getMission(missionId);
+    const approval = detail.approvals.find((item) => item.status === "pending");
+    expect(approval).toBeTruthy();
+    expect(detail.subtasks).toHaveLength(0);
+
+    const approveResponse = await fetch(`${httpBaseUrl}/api/missions/${missionId}/approvals/${approval!.id}/respond`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ approved: true }),
+    });
+    expect(approveResponse.status).toBe(200);
+
+    await waitUntil(async () => (await getMission(missionId)).subtasks.length >= 1, 1000);
+    detail = await getMission(missionId);
+    expect(detail.mission.status).toBe("waiting_agents");
+    expect(detail.approvals.find((item) => item.id === approval!.id)?.status).toBe("approved");
+  });
+
+  it("子任务标记 NEEDS_HUMAN_APPROVAL 后请求确认，批准后继续完成", async () => {
+    const alice = await connectAgent("alice");
+    const bob = await connectAgent("bob");
+    const response = await fetch(`${httpBaseUrl}/api/missions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        objective: "验证失败审批流程",
+        approvalPolicy: "auto",
+        maxIterations: 4,
+        maxTasks: 4,
+      }),
+    });
+    expect(response.status).toBe(201);
+    const created = (await response.json()) as { mission: { id: string } };
+    const missionId = created.mission.id;
+
+    await waitUntil(async () => (await getMission(missionId)).subtasks.length >= 2, 1000);
+    const detail = await getMission(missionId);
+    for (const [index, subtask] of detail.subtasks.entries()) {
+      const task = server.buildSnapshot().tasks.find((t) => t.id === subtask.taskId)!;
+      const socket = task.employeeId === "alice" ? alice : bob;
+      completeTask(socket, subtask.taskId, index === 0 ? "NEEDS_HUMAN_APPROVAL: risky operation" : "worker done");
+    }
+
+    await waitUntil(async () => (await getMission(missionId)).mission.status === "waiting_human", 1000);
+    const waiting = await getMission(missionId);
+    const approval = waiting.approvals.find((item) => item.status === "pending")!;
+
+    const approveResponse = await fetch(`${httpBaseUrl}/api/missions/${missionId}/approvals/${approval.id}/respond`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ approved: true }),
+    });
+    expect(approveResponse.status).toBe(200);
+
+    await waitUntil(async () => (await getMission(missionId)).subtasks.some((s) => s.role === "reviewer"), 1000);
+    const afterApproval = await getMission(missionId);
+    const review = afterApproval.subtasks.find((s) => s.role === "reviewer")!;
+    const reviewTask = server.buildSnapshot().tasks.find((t) => t.id === review.taskId)!;
+    completeTask(reviewTask.employeeId === "alice" ? alice : bob, review.taskId, "review passed after approval");
+
+    await waitUntil(async () => (await getMission(missionId)).mission.status === "completed", 1000);
   });
 });
 
@@ -1343,6 +1467,24 @@ function waitForAgentDispatch(socket: WebSocket, timeoutMs = 500): Promise<Extra
   }, timeoutMs);
 }
 
+async function getMission(missionId: string) {
+  const response = await fetch(`${httpBaseUrl}/api/missions/${missionId}`, {
+    headers: { authorization: `Bearer ${TOKEN}` },
+  });
+  expect(response.status).toBe(200);
+  return response.json() as Promise<{
+    mission: { id: string; status: string; result: string | null };
+    subtasks: Array<{ taskId: string; role: string; iteration: number }>;
+    approvals: Array<{ id: string; status: string; question: string }>;
+  }>;
+}
+
+function completeTask(socket: WebSocket, taskId: string, summary: string) {
+  socket.send(JSON.stringify({ type: "task.accepted", taskId }));
+  socket.send(JSON.stringify({ type: "task.started", taskId, pid: 123, sessionId: `session-${taskId}` }));
+  socket.send(JSON.stringify({ type: "task.completed", taskId, exitCode: 0, summary }));
+}
+
 function waitForLeaderMessage<T extends ServerToLeaderMessage>(
   socket: WebSocket,
   predicate: (message: ServerToLeaderMessage) => message is T,
@@ -1416,10 +1558,10 @@ function closeSocket(socket: WebSocket) {
   return closed;
 }
 
-async function waitUntil(predicate: () => boolean, timeoutMs = 500) {
+async function waitUntil(predicate: () => boolean | Promise<boolean>, timeoutMs = 500) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    if (predicate()) {
+    if (await predicate()) {
       return;
     }
     await delay(5);

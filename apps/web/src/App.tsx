@@ -9,6 +9,11 @@ import {
   type AgentTarget,
   EmployeeSnapshot,
   LeaderToServerMessage,
+  type MissionApprovalPolicy,
+  type MissionApprovalRecord,
+  type MissionEventRecord,
+  type MissionRecord,
+  type MissionSubtaskRecord,
   ServerToLeaderMessage,
   TaskOutputChunk,
   TaskRecord,
@@ -164,7 +169,7 @@ type EmployeeTerminalLog = {
   seenFinishedTaskIds: string[];
 };
 
-type ActivePage = "monitor" | "tasks" | "employees" | "errors" | "stats" | "schedules";
+type ActivePage = "monitor" | "tasks" | "employees" | "errors" | "stats" | "schedules" | "missions";
 
 type AgentRegistryItem = AgentRegistrationRecord;
 
@@ -201,6 +206,22 @@ type ScheduleFormData = {
   workspace: string;
   timeoutSec: string;
   enabled: boolean;
+};
+
+type MissionDetail = {
+  mission: MissionRecord;
+  events: MissionEventRecord[];
+  subtasks: Array<MissionSubtaskRecord & { task: TaskRecord | null }>;
+  approvals: MissionApprovalRecord[];
+};
+
+type MissionFormData = {
+  objective: string;
+  workspace: string;
+  approvalPolicy: MissionApprovalPolicy;
+  maxIterations: string;
+  maxTasks: string;
+  timeoutSec: string;
 };
 
 const TASK_FILTERS: Array<TaskStatus | "all"> = ["all", "running", "failed", "completed", "cancelled"];
@@ -507,6 +528,18 @@ export default function App() {
   });
   const [mobileTerminalEmployeeId, setMobileTerminalEmployeeId] = useState<string | null>(null);
   const [schedules, setSchedules] = useState<ScheduleItem[]>([]);
+  const [missions, setMissions] = useState<MissionRecord[]>([]);
+  const [selectedMission, setSelectedMission] = useState<MissionDetail | null>(null);
+  const [missionLoading, setMissionLoading] = useState(false);
+  const [missionForm, setMissionForm] = useState<MissionFormData>({
+    objective: "",
+    workspace: "",
+    approvalPolicy: "ask_on_risky_change",
+    maxIterations: "6",
+    maxTasks: "20",
+    timeoutSec: "",
+  });
+  const [missionError, setMissionError] = useState<string | null>(null);
   const [agentRegistry, setAgentRegistry] = useState<AgentRegistryItem[]>([]);
   const [agentRegistryLoading, setAgentRegistryLoading] = useState(false);
   const [agentRegistryForm, setAgentRegistryForm] = useState<AgentRegistryForm>({ employeeId: "", name: "", labels: "" });
@@ -994,6 +1027,106 @@ export default function App() {
     wsRef.current?.close();
   }
 
+  // ── Mission API helpers ──
+
+  async function fetchMissions(selectId?: string) {
+    setMissionLoading(true);
+    try {
+      const res = await fetch("/api/missions", { headers: { Authorization: `Bearer ${authToken}` } });
+      if (res.ok) {
+        const data = await res.json() as { missions: MissionRecord[] };
+        setMissions(data.missions);
+        const nextId = selectId ?? selectedMission?.mission.id ?? data.missions[0]?.id;
+        if (nextId) {
+          await fetchMissionDetail(nextId);
+        } else {
+          setSelectedMission(null);
+        }
+      }
+    } catch { /* ignore */ }
+    setMissionLoading(false);
+  }
+
+  async function fetchMissionDetail(missionId: string) {
+    try {
+      const res = await fetch(`/api/missions/${missionId}`, { headers: { Authorization: `Bearer ${authToken}` } });
+      if (res.ok) {
+        const data = await res.json() as MissionDetail;
+        setSelectedMission(data);
+      }
+    } catch { /* ignore */ }
+  }
+
+  async function createMission() {
+    setMissionError(null);
+    const objective = missionForm.objective.trim();
+    if (!objective) {
+      setMissionError("请输入总目标");
+      return;
+    }
+    const body: Record<string, unknown> = {
+      objective,
+      approvalPolicy: missionForm.approvalPolicy,
+      maxIterations: Number(missionForm.maxIterations) || 6,
+      maxTasks: Number(missionForm.maxTasks) || 20,
+      autoStart: true,
+    };
+    if (missionForm.workspace.trim()) body.workspace = missionForm.workspace.trim();
+    if (missionForm.timeoutSec && Number(missionForm.timeoutSec) > 0) body.timeoutSec = Number(missionForm.timeoutSec);
+    try {
+      const res = await fetch("/api/missions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json() as MissionDetail | { error?: string };
+      if (!res.ok) {
+        setMissionError(("error" in data && data.error) || "创建 Mission 失败");
+        return;
+      }
+      const detail = data as MissionDetail;
+      setMissionForm((current) => ({ ...current, objective: "" }));
+      await fetchMissions(detail.mission.id);
+    } catch {
+      setMissionError("网络请求失败");
+    }
+  }
+
+  async function respondMissionApproval(approval: MissionApprovalRecord, approved: boolean) {
+    try {
+      const res = await fetch(`/api/missions/${approval.missionId}/approvals/${approval.id}/respond`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
+        body: JSON.stringify({ approved }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({})) as { error?: string };
+        alert(data.error || "审批请求失败");
+        return;
+      }
+      await fetchMissions(approval.missionId);
+    } catch {
+      alert("网络请求失败");
+    }
+  }
+
+  async function cancelMission(missionId: string) {
+    try {
+      const res = await fetch(`/api/missions/${missionId}/cancel`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({})) as { error?: string };
+        alert(data.error || "取消 Mission 失败");
+        return;
+      }
+      await fetchMissions(missionId);
+    } catch {
+      alert("网络请求失败");
+    }
+  }
+
   // ── Schedule API helpers ──
 
   async function fetchSchedules() {
@@ -1184,6 +1317,18 @@ export default function App() {
   useEffect(() => {
     if (authToken && activePage === "schedules") fetchSchedules();
   }, [authToken, activePage]);
+
+  useEffect(() => {
+    if (authToken && activePage === "missions") fetchMissions();
+  }, [authToken, activePage]);
+
+  useEffect(() => {
+    if (!authToken || activePage !== "missions") return;
+    const timer = setInterval(() => {
+      fetchMissions();
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [authToken, activePage, selectedMission?.mission.id]);
 
   useEffect(() => {
     if (authToken && activePage === "employees") fetchAgentRegistry();
@@ -1490,6 +1635,12 @@ export default function App() {
             onClick={() => setActivePage("schedules")}
           >
             定时任务
+          </button>
+          <button
+            className={`nav-item ${activePage === "missions" ? "active" : ""}`}
+            onClick={() => setActivePage("missions")}
+          >
+            AI Leader
           </button>
           <button
             className={`nav-item ${activePage === "errors" ? "active" : ""}`}
@@ -2178,6 +2329,204 @@ export default function App() {
                 </div>
               </div>
             )}
+          </main>
+        )}
+        {activePage === "missions" && (
+          <main className="task-log-page">
+            <section className="task-log-panel mission-panel">
+              <div className="section-title-row">
+                <div>
+                  <h1>AI Leader</h1>
+                  <p>提交一个总目标，由 AI Leader 拆分子任务、派发 Agent、等待结果并在风险节点请求确认。</p>
+                </div>
+                <button className="secondary-button" onClick={() => fetchMissions()}>
+                  刷新
+                </button>
+              </div>
+
+              <div className="mission-create-grid">
+                <label className="field mission-objective-field">
+                  <span>总目标</span>
+                  <textarea
+                    value={missionForm.objective}
+                    onChange={(e) => setMissionForm((f) => ({ ...f, objective: e.target.value }))}
+                    placeholder="例如：完成生产稳定性优化，保持旧版接口兼容，并完成测试验证。"
+                    rows={4}
+                  />
+                </label>
+                <label className="field">
+                  <span>工作目录</span>
+                  <input
+                    value={missionForm.workspace}
+                    onChange={(e) => setMissionForm((f) => ({ ...f, workspace: e.target.value }))}
+                    placeholder="可选，默认使用 Agent workspace"
+                  />
+                </label>
+                <label className="field">
+                  <span>确认策略</span>
+                  <select
+                    value={missionForm.approvalPolicy}
+                    onChange={(e) => setMissionForm((f) => ({ ...f, approvalPolicy: e.target.value as MissionApprovalPolicy }))}
+                  >
+                    <option value="ask_on_risky_change">风险操作时确认</option>
+                    <option value="manual_each_iteration">每轮计划都确认</option>
+                    <option value="auto">自动推进</option>
+                  </select>
+                </label>
+                <label className="field">
+                  <span>最大轮次</span>
+                  <input
+                    type="number"
+                    value={missionForm.maxIterations}
+                    onChange={(e) => setMissionForm((f) => ({ ...f, maxIterations: e.target.value }))}
+                    min={1}
+                    max={50}
+                  />
+                </label>
+                <label className="field">
+                  <span>最大任务数</span>
+                  <input
+                    type="number"
+                    value={missionForm.maxTasks}
+                    onChange={(e) => setMissionForm((f) => ({ ...f, maxTasks: e.target.value }))}
+                    min={1}
+                    max={200}
+                  />
+                </label>
+                <label className="field">
+                  <span>任务超时秒数</span>
+                  <input
+                    type="number"
+                    value={missionForm.timeoutSec}
+                    onChange={(e) => setMissionForm((f) => ({ ...f, timeoutSec: e.target.value }))}
+                    placeholder="可选"
+                  />
+                </label>
+                <div className="mission-create-actions">
+                  {missionError && <small className="modal-error">{missionError}</small>}
+                  <button className="primary-button" onClick={createMission} disabled={!missionForm.objective.trim()}>
+                    创建 Mission
+                  </button>
+                </div>
+              </div>
+
+              <div className="mission-layout">
+                <div className="task-table mission-list">
+                  {missionLoading && missions.length === 0 ? (
+                    <div className="history-empty">加载中...</div>
+                  ) : missions.length === 0 ? (
+                    <div className="history-empty">暂无 Mission。</div>
+                  ) : (
+                    missions.map((mission) => (
+                      <div
+                        className={`task-row mission-row ${selectedMission?.mission.id === mission.id ? "selected" : ""}`}
+                        key={mission.id}
+                        onClick={() => fetchMissionDetail(mission.id)}
+                      >
+                        <div className="task-row__main">
+                          <strong>{mission.objective}</strong>
+                          <p>轮次 {mission.currentIteration}/{mission.maxIterations} · 任务上限 {mission.maxTasks}</p>
+                        </div>
+                        <div className="task-row__side">
+                          <span className={`status-pill ${mission.status === "completed" ? "online" : mission.status === "failed" || mission.status === "cancelled" ? "offline" : "queued"}`}>
+                            {mission.status}
+                          </span>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="mission-detail">
+                  {!selectedMission ? (
+                    <div className="history-empty">选择一个 Mission 查看详情。</div>
+                  ) : (
+                    <>
+                      <div className="mission-detail-header">
+                        <div>
+                          <h2>{selectedMission.mission.objective}</h2>
+                          <p>ID: {selectedMission.mission.id}</p>
+                        </div>
+                        <div className="mission-detail-actions">
+                          <span className={`status-pill ${selectedMission.mission.status === "completed" ? "online" : selectedMission.mission.status === "failed" || selectedMission.mission.status === "cancelled" ? "offline" : "queued"}`}>
+                            {selectedMission.mission.status}
+                          </span>
+                          {!["completed", "failed", "cancelled"].includes(selectedMission.mission.status) && (
+                            <button className="secondary-button" onClick={() => cancelMission(selectedMission.mission.id)}>
+                              取消
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {selectedMission.approvals.filter((approval) => approval.status === "pending").map((approval) => (
+                        <div className="mission-approval" key={approval.id}>
+                          <strong>需要确认</strong>
+                          <p>{approval.question}</p>
+                          <div className="schedule-actions">
+                            <button className="primary-button" onClick={() => respondMissionApproval(approval, true)}>
+                              批准继续
+                            </button>
+                            <button className="secondary-button schedule-delete-btn" onClick={() => respondMissionApproval(approval, false)}>
+                              拒绝取消
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+
+                      <div className="mission-section">
+                        <h3>子任务</h3>
+                        <div className="task-table">
+                          {selectedMission.subtasks.length === 0 ? (
+                            <div className="history-empty">暂无子任务。</div>
+                          ) : selectedMission.subtasks.map((subtask) => (
+                            <div className="task-row" key={subtask.taskId}>
+                              <div className="task-row__main">
+                                <strong>{subtask.role} · 第 {subtask.iteration} 轮</strong>
+                                <p>{subtask.task?.prompt ?? subtask.taskId}</p>
+                              </div>
+                              <div className="task-row__side">
+                                {subtask.task && (
+                                  <span className={`status-pill ${subtask.task.status === "completed" ? "online" : subtask.task.status === "failed" || subtask.task.status === "timeout" ? "offline" : "queued"}`}>
+                                    {subtask.task.status}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="mission-section">
+                        <h3>事件</h3>
+                        <div className="mission-events">
+                          {selectedMission.events.map((event) => (
+                            <div className="mission-event" key={event.id}>
+                              <span>{new Date(event.createdAt).toLocaleTimeString()}</span>
+                              <strong>{event.type}</strong>
+                              <code>{JSON.stringify(event.payload)}</code>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {selectedMission.mission.result && (
+                        <div className="mission-result">
+                          <h3>结果</h3>
+                          <pre>{selectedMission.mission.result}</pre>
+                        </div>
+                      )}
+                      {selectedMission.mission.error && (
+                        <div className="mission-result mission-error-result">
+                          <h3>错误</h3>
+                          <pre>{selectedMission.mission.error}</pre>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+            </section>
           </main>
         )}
       </div>
