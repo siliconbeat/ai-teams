@@ -700,6 +700,7 @@ AI_TEAMS_AUTH_TOKEN=dev-token EMPLOYEE_ID=bob EMPLOYEE_NAME=Bob RUNNER_MODE=fake
 | `DEFAULT_TIMEOUT_SEC` | `1800` | 任务超时秒数 |
 | `DISCONNECT_GRACE_MS` | `15000` | 断线恢复宽限期 |
 | `MAX_LOG_CHUNKS_PER_TASK` | `400` | 每个任务保留的输出日志块上限 |
+| `MAX_HYDRATED_TASKS` | `200` | 启动时加载的已结束任务上限（防止 OOM） |
 | `MISSION_POLL_MS` | `500` | AI Leader Mission 编排器轮询间隔 |
 | `DATABASE_URL` | — | PostgreSQL 连接串（见下方说明） |
 | `DB_PATH` | `data/ai-teams.db` | SQLite 数据库路径（不设 `DATABASE_URL` 时使用） |
