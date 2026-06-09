@@ -300,6 +300,39 @@ DELETE /api/tasks/:taskId
 
 仅限终态任务（completed/failed/cancelled/timeout）。
 
+### 优先执行排队任务
+
+```
+POST /api/tasks/:taskId/prioritize
+```
+
+将排队中的共享队列任务提升到队列最前面（优先级设为最高值）。仅对 `status=queued` 且 `targetMode=queue` 的任务有效。
+
+```bash
+curl -X POST http://localhost:3789/api/tasks/TASK_ID/prioritize \
+  -H "Authorization: Bearer dev-token"
+```
+
+### 获取任务输出
+
+```
+GET /api/tasks/:taskId/output
+```
+
+返回指定任务的所有输出块按顺序拼接后的完整文本。
+
+```json
+{
+  "taskId": "uuid",
+  "output": "完整的任务输出文本..."
+}
+```
+
+```bash
+curl http://localhost:3789/api/tasks/TASK_ID/output \
+  -H "Authorization: Bearer dev-token"
+```
+
 ### 获取会话历史
 
 ```
@@ -336,6 +369,240 @@ GET /api/sessions/:sessionId/history
 每个回调包含 `x-ai-teams-signature` Header（HMAC-SHA256 签名），可用共享 Token 验证。
 
 ### AI Leader Mission API
+
+---
+
+## Agent 管理接口
+
+### Agent 注册列表
+
+```
+GET /api/agent-registry
+```
+
+返回所有已注册和待审批的 Agent。
+
+```json
+{
+  "agents": [
+    {
+      "employeeId": "alice",
+      "name": "Alice",
+      "status": "approved",
+      "labels": ["backend", "rust"],
+      "createdAt": "...",
+      "approvedAt": "..."
+    }
+  ]
+}
+```
+
+### 预注册 Agent 并生成 Token
+
+```
+POST /api/agent-registry
+```
+
+预先审批一个 Agent 并为其生成认证 Token。适用于生产环境批量部署 Agent 的场景。
+
+```json
+{
+  "employeeId": "alice",
+  "name": "Alice Agent",
+  "labels": ["backend"],
+  "token": "optional-custom-token-at-least-8-chars"
+}
+```
+
+**响应 `201`：**
+
+```json
+{
+  "agent": { "employeeId": "alice", "status": "approved", ... },
+  "agentToken": "generated-or-custom-token"
+}
+```
+
+将返回的 `agentToken` 配置到 Agent 进程的 `AI_TEAMS_AGENT_TOKEN` 环境变量即可。
+
+```bash
+curl -X POST http://localhost:3789/api/agent-registry \
+  -H "Authorization: Bearer dev-token" \
+  -H "Content-Type: application/json" \
+  -d '{"employeeId": "alice", "name": "Alice"}'
+```
+
+### 审批待审 Agent
+
+```
+POST /api/agent-registry/:employeeId/approve
+```
+
+审批一个待审状态的 Agent，并生成其专属 Token。
+
+```json
+{ "token": "optional-custom-token" }
+```
+
+**响应 `200`：** 返回 `{ agent, agentToken }`。
+
+### 删除 Agent 注册
+
+```
+DELETE /api/agent-registry/:employeeId
+```
+
+删除 Agent 注册记录并断开其连接。如果 Agent 有活跃任务则拒绝删除（`409`）。
+
+### 暂停 Agent 队列
+
+```
+POST /api/agents/:employeeId/pause-queue
+```
+
+暂停 Agent 的共享队列任务派发。Agent 已在运行的任务不受影响，但不再接收新的队列任务。适用于 Agent 需要维护或排错的场景。
+
+```bash
+curl -X POST http://localhost:3789/api/agents/alice/pause-queue \
+  -H "Authorization: Bearer dev-token"
+```
+
+### 恢复 Agent 队列
+
+```
+POST /api/agents/:employeeId/resume-queue
+```
+
+恢复之前因连续失败被暂停的 Agent 队列派发。也用于手动恢复被暂停的 Agent。
+
+```bash
+curl -X POST http://localhost:3789/api/agents/alice/resume-queue \
+  -H "Authorization: Bearer dev-token"
+```
+
+### 重置 Agent 会话
+
+```
+POST /api/agents/:employeeId/reset-session
+```
+
+重置 Agent 的 main 槽 Claude 会话。下一次 direct/broadcast 任务将启动新的 Claude 会话，而非 `--resume` 旧会话。适用于会话上下文过长或出错需要清理的场景。
+
+```bash
+curl -X POST http://localhost:3789/api/agents/alice/reset-session \
+  -H "Authorization: Bearer dev-token"
+```
+
+### 查看 Agent 的 Claude 会话列表
+
+```
+GET /api/employees/:employeeId/claude-sessions
+```
+
+列出指定 Agent 工作目录下的所有 Claude Code 会话文件（`.jsonl`），包括会话大小、修改时间、行数，以及首条和最新用户消息摘要。
+
+```json
+{
+  "employeeId": "alice",
+  "workspace": "/path/to/project",
+  "activeSessionId": "current-session-uuid",
+  "sessions": [
+    {
+      "id": "session-uuid",
+      "sizeBytes": 12345,
+      "modifiedAt": "...",
+      "lineCount": 42,
+      "firstUserMessage": "帮我分析项目依赖...",
+      "latestUserMessage": "继续完成剩余模块..."
+    }
+  ]
+}
+```
+
+---
+
+## 定时任务（Schedule）
+
+### 查看所有定时任务
+
+```
+GET /api/schedules
+```
+
+### 创建定时任务
+
+```
+POST /api/schedules
+```
+
+```json
+{
+  "name": "每日构建检查",
+  "cron": "0 9 * * 1-5",
+  "prompt": "运行 pnpm build 并报告结果",
+  "targetMode": "queue",
+  "workspace": "/path/to/project",
+  "enabled": true,
+  "priority": 0,
+  "requiredLabels": ["backend"]
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | 是 | 任务名称 |
+| `cron` | string | 是 | Cron 表达式（5 位） |
+| `prompt` | string | 是 | 任务提示词 |
+| `targetMode` | `"queue"` \| `"direct"` \| `"broadcast"` | 否 | 默认 `queue` |
+| `targetAgents` | string[] | 否 | direct 模式指定目标 Agent |
+| `workspace` | string | 否 | 工作目录 |
+| `timeoutSec` | number | 否 | 超时秒数 |
+| `priority` | number | 否 | 优先级 0-3 |
+| `requiredLabels` | string[] | 否 | Agent 标签过滤 |
+| `enabled` | boolean | 否 | 默认 `true` |
+
+### 更新定时任务
+
+```
+PATCH /api/schedules/:scheduleId
+```
+
+请求体同创建，所有字段可选。
+
+### 删除定时任务
+
+```
+DELETE /api/schedules/:scheduleId
+```
+
+### 手动触发定时任务
+
+```
+POST /api/schedules/:scheduleId/trigger
+```
+
+立即执行一次定时任务，不影响原有调度计划。
+
+```bash
+# 创建工作日每天 9 点执行的定时任务
+curl -X POST http://localhost:3789/api/schedules \
+  -H "Authorization: Bearer dev-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "每日构建检查",
+    "cron": "0 9 * * 1-5",
+    "prompt": "运行 pnpm build 并报告结果",
+    "targetMode": "queue"
+  }'
+
+# 手动触发一次
+curl -X POST http://localhost:3789/api/schedules/SCHEDULE_ID/trigger \
+  -H "Authorization: Bearer dev-token"
+```
+
+---
+
+## AI Leader Mission API
 
 #### 创建 Mission
 
