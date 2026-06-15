@@ -234,6 +234,10 @@ function handleServerMessage(message: ServerToEmployeeMessage) {
     send({ type: "session.reset.ack", employeeId: EMPLOYEE_ID });
     return;
   }
+  if (message.type === "server.error") {
+    console.error(`[agent:${EMPLOYEE_ID}] server error ${message.code}: ${message.message}`);
+    return;
+  }
   cancelTask(message.taskId);
 }
 
@@ -299,7 +303,8 @@ if (isCli) {
 
 选项:
   --server <url>        服务器地址
-  --token <token>       认证 Token
+  --agent-token <token> Agent Token
+  --token <token>       Agent Token（兼容旧参数）
   --id <id>             员工 ID
   --name <name>         员工名称
   --workspace <dir>     工作目录
@@ -338,13 +343,13 @@ if (isCli) {
 
   function applyCliArgsToEnv(): void {
     const cliServer = getArgValue("--server");
-    const cliToken = getArgValue("--token");
+    const cliToken = getArgValue("--agent-token") || getArgValue("--token");
     const cliId = getArgValue("--id");
     const cliName = getArgValue("--name");
     const cliWorkspace = getArgValue("--workspace");
     const cliRunner = getArgValue("--runner");
     if (cliServer) process.env.SERVER_URL = cliServer;
-    if (cliToken) process.env.AI_TEAMS_AUTH_TOKEN = cliToken;
+    if (cliToken) process.env.AI_TEAMS_AGENT_TOKEN = cliToken;
     if (cliId) process.env.EMPLOYEE_ID = cliId;
     if (cliName) process.env.EMPLOYEE_NAME = cliName;
     if (cliWorkspace) process.env.DEFAULT_WORKSPACE = cliWorkspace;
@@ -382,7 +387,7 @@ if (isCli) {
 
       // Ensure config exists
       const fileConfig = loadConfigFile();
-      const hasEnvConfig = process.env.AI_TEAMS_AUTH_TOKEN || process.env.SERVER_URL;
+      const hasEnvConfig = process.env.AI_TEAMS_AGENT_TOKEN || process.env.SERVER_URL;
       if (!fileConfig && !hasEnvConfig) {
         console.log("\n  ⚠ 未找到配置文件且未设置环境变量，请先运行 --config 配置。\n");
         process.exit(1);
@@ -427,7 +432,7 @@ if (isCli) {
       // No sub-command — foreground mode (existing behavior)
       void (async () => {
         const fileConfig = loadConfigFile();
-        const hasEnvConfig = process.env.AI_TEAMS_AUTH_TOKEN || process.env.SERVER_URL;
+        const hasEnvConfig = process.env.AI_TEAMS_AGENT_TOKEN || process.env.SERVER_URL;
         if (!fileConfig && !hasEnvConfig) {
           console.log("\n  ⚠ 未找到配置文件且未设置环境变量，启动配置向导...\n");
           await runSetup(null);

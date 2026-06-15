@@ -3,9 +3,9 @@
   "private": true,
   "packageManager": "pnpm@10.32.1",
   "scripts": {
-    "dev:server": "AI_TEAMS_AUTH_TOKEN=dev-token AGENT_REGISTRATION_MODE=open pnpm --filter @csdwd/ai-teams-server dev",
-    "dev:agent": "AI_TEAMS_AUTH_TOKEN=dev-token pnpm --filter @csdwd/ai-teams-agent dev",
-    "dev:agent:alice": "AI_TEAMS_AUTH_TOKEN=dev-token EMPLOYEE_ID=alice EMPLOYEE_NAME=Alice RUNNER_MODE=claude DEFAULT_WORKSPACE=/Users/junhang/IdeaProjects/cfhy/agent/ai-teams pnpm --filter @csdwd/ai-teams-agent dev",
+    "dev:server": "AI_TEAMS_AUTH_TOKEN=dev-token pnpm --filter @csdwd/ai-teams-server dev",
+    "dev:agent": "AI_TEAMS_AGENT_TOKEN=dev-agent-token pnpm --filter @csdwd/ai-teams-agent dev",
+    "dev:agent:alice": "AI_TEAMS_AGENT_TOKEN=dev-agent-token EMPLOYEE_ID=alice EMPLOYEE_NAME=Alice RUNNER_MODE=claude DEFAULT_WORKSPACE=/Users/junhang/IdeaProjects/cfhy/agent/ai-teams pnpm --filter @csdwd/ai-teams-agent dev",
     "dev:web": "VITE_AI_TEAMS_AUTH_TOKEN=dev-token pnpm --filter @ai-teams/web dev",
     "dev:all": "concurrently -n server,alice,web -c blue,green,magenta \"pnpm dev:server\" \"pnpm dev:agent:alice\" \"pnpm dev:web\"",
     "start:server": "pnpm --filter @csdwd/ai-teams-server start",

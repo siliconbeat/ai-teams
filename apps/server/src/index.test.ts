@@ -61,6 +61,25 @@ describe("认证", () => {
     expect(employee?.permissionMode).toBe("bypassPermissions");
   });
 
+  it("Agent 注册后立即请求任务不会因为注册竞态被关闭", async () => {
+    const agentToken = await createAgentRegistrationToken("race-agent");
+    const socket = await connectWs(`${baseUrl}/ws/agent`);
+    const registeredPromise = waitForWsMessage<ServerToEmployeeMessage>(
+      socket,
+      (message) => message.type === "agent.registered",
+    );
+
+    sendAgentRegister(socket, "race-agent", undefined, { agentToken });
+    socket.send(JSON.stringify({ type: "agent.request_task", employeeId: "race-agent" }));
+
+    await registeredPromise;
+    await delay(50);
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+    expect(server.buildSnapshot().employees).toContainEqual(
+      expect.objectContaining({ id: "race-agent", status: "online" }),
+    );
+  });
+
   it("拒绝未认证的 REST 请求", async () => {
     const response = await fetch(`${httpBaseUrl}/api/snapshot`);
     expect(response.status).toBe(401);
@@ -82,7 +101,7 @@ describe("认证", () => {
 });
 
 describe("Agent 注册审批", () => {
-  it("approval 模式下未知 Agent 先进入 pending，批准后必须带 Agent Token 才能注册", async () => {
+  it("Agent 必须先在 Web 端添加，并且员工 ID 与 Agent Token 匹配才能注册", async () => {
     await Promise.all(sockets.map((socket) => closeSocket(socket)));
     sockets = [];
     await server.close();
@@ -99,52 +118,31 @@ describe("Agent 注册审批", () => {
     baseUrl = `ws://127.0.0.1:${address.port}`;
     httpBaseUrl = `http://127.0.0.1:${address.port}`;
 
-    const pendingSocket = await connectWs(`${baseUrl}/ws/agent?token=${TOKEN}`);
-    pendingSocket.send(JSON.stringify({
-      type: "agent.register",
-      employeeId: "secure-agent",
-      name: "Secure Agent",
-      machineId: "secure-agent",
-      hostname: "secure-host",
-      labels: ["secure"],
-      activeMainTaskId: null,
-      activeQueueTaskId: null,
-      lastOutputSeq: 0,
-    }));
-    const pendingClose = await waitForClose(pendingSocket);
-    expect(pendingClose.code).toBe(1008);
+    const unknownSocket = await connectWs(`${baseUrl}/ws/agent`);
+    sendAgentRegister(unknownSocket, "secure-agent", undefined, { agentToken: "unregistered-token" });
+    const unknownClose = await waitForClose(unknownSocket);
+    expect(unknownClose).toMatchObject({ code: 1008, reason: "agent_not_registered" });
 
-    const pendingList = await fetch(`${httpBaseUrl}/api/agent-registry`, {
-      headers: { authorization: `Bearer ${TOKEN}` },
-    });
-    const pendingBody = (await pendingList.json()) as { agents: Array<{ employeeId: string; status: string }> };
-    expect(pendingBody.agents).toContainEqual(expect.objectContaining({ employeeId: "secure-agent", status: "pending" }));
-
-    const approveRes = await fetch(`${httpBaseUrl}/api/agent-registry/secure-agent/approve`, {
+    const createRes = await fetch(`${httpBaseUrl}/api/agent-registry`, {
       method: "POST",
       headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ employeeId: "secure-agent", name: "Secure Agent", labels: ["secure"] }),
     });
-    expect(approveRes.status).toBe(200);
-    const approveBody = (await approveRes.json()) as { agentToken: string };
-    expect(approveBody.agentToken.length).toBeGreaterThan(10);
+    expect(createRes.status).toBe(201);
+    const createBody = (await createRes.json()) as { agentToken: string };
+    expect(createBody.agentToken.length).toBeGreaterThan(10);
 
-    const rejectedNoAgentToken = await connectWs(`${baseUrl}/ws/agent?token=${TOKEN}`);
-    rejectedNoAgentToken.send(JSON.stringify({
-      type: "agent.register",
-      employeeId: "secure-agent",
-      name: "Secure Agent",
-      machineId: "secure-agent",
-      hostname: "secure-host",
-      labels: ["secure"],
-      activeMainTaskId: null,
-      activeQueueTaskId: null,
-      lastOutputSeq: 0,
-    }));
+    const rejectedNoAgentToken = await connectWs(`${baseUrl}/ws/agent`);
+    sendAgentRegister(rejectedNoAgentToken, "secure-agent", undefined, { labels: ["secure"] });
     const noTokenClose = await waitForClose(rejectedNoAgentToken);
-    expect(noTokenClose.code).toBe(1008);
+    expect(noTokenClose).toMatchObject({ code: 1008, reason: "agent_token_invalid" });
 
-    const approved = await connectAgent("secure-agent", undefined, { labels: ["secure"], agentToken: approveBody.agentToken });
+    const rejectedWrongAgentToken = await connectWs(`${baseUrl}/ws/agent`);
+    sendAgentRegister(rejectedWrongAgentToken, "secure-agent", undefined, { labels: ["secure"], agentToken: "wrong-token" });
+    const wrongTokenClose = await waitForClose(rejectedWrongAgentToken);
+    expect(wrongTokenClose).toMatchObject({ code: 1008, reason: "agent_token_invalid" });
+
+    const approved = await connectAgent("secure-agent", undefined, { labels: ["secure"], agentToken: createBody.agentToken });
     expect(approved.readyState).toBe(WebSocket.OPEN);
     expect(server.buildSnapshot().employees.some((e) => e.id === "secure-agent" && e.status === "online")).toBe(true);
   });
@@ -956,9 +954,10 @@ describe("WebSocket 任务调度", () => {
     const prioritized = (await prioritizeRes.json()) as { priority: number };
     expect(prioritized.priority).toBe(3);
 
-    const agent = await connectWs(`${baseUrl}/ws/agent?token=${TOKEN}`);
+    const agentToken = await createAgentRegistrationToken("alice");
+    const agent = await connectWs(`${baseUrl}/ws/agent`);
     const dispatchPromise = waitForAgentDispatch(agent);
-    sendAgentRegister(agent, "alice");
+    sendAgentRegister(agent, "alice", undefined, { agentToken });
     await waitUntil(() => server.buildSnapshot().employees.some((e) => e.id === "alice" && e.status === "online"));
 
     const dispatch = await dispatchPromise;
@@ -985,9 +984,10 @@ describe("WebSocket 任务调度", () => {
     });
     expect(prioritizeRes.status).toBe(200);
 
-    const agent = await connectWs(`${baseUrl}/ws/agent?token=${TOKEN}`);
+    const agentToken = await createAgentRegistrationToken("cpu-agent", { labels: ["cpu"] });
+    const agent = await connectWs(`${baseUrl}/ws/agent`);
     const dispatchPromise = waitForAgentDispatch(agent);
-    sendAgentRegister(agent, "cpu-agent", undefined, { labels: ["cpu"] });
+    sendAgentRegister(agent, "cpu-agent", undefined, { labels: ["cpu"], agentToken });
     await waitUntil(() => server.buildSnapshot().employees.some((e) => e.id === "cpu-agent" && e.status === "online"));
 
     const dispatch = await dispatchPromise;
@@ -1042,9 +1042,10 @@ describe("WebSocket 任务调度", () => {
     baseUrl = `ws://127.0.0.1:${address.port}`;
     httpBaseUrl = `http://127.0.0.1:${address.port}`;
 
-    const agent = await connectWs(`${baseUrl}/ws/agent?token=${TOKEN}`);
+    const agentToken = await createAgentRegistrationToken("restart-agent");
+    const agent = await connectWs(`${baseUrl}/ws/agent`);
     const dispatchPromise = waitForAgentDispatch(agent);
-    sendAgentRegister(agent, "restart-agent");
+    sendAgentRegister(agent, "restart-agent", undefined, { agentToken });
     await waitUntil(() => server.buildSnapshot().employees.some((e) => e.id === "restart-agent" && e.status === "online"));
     const dispatch = await dispatchPromise;
     expect(dispatch.prompt).toBe("high priority after restart");
@@ -1123,6 +1124,24 @@ describe("任务生命周期", () => {
     expect(completed.task.durationMs).toBe(1500);
     expect(completed.task.numTurns).toBe(3);
     expect(completed.task.summary).toBe("all done");
+  });
+
+  it("任务启动时刷新 Agent 的 Claude Code 版本号", async () => {
+    const agent = await connectAgent("alice");
+    const leader = await connectLeader();
+    const dispatchPromise = waitForAgentDispatch(agent);
+
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "refresh claude version" }));
+    const dispatch = await dispatchPromise;
+
+    const employeePromise = waitForLeaderMessage(leader, (m) => {
+      return m.type === "employee.upsert" && m.employee.id === "alice" && m.employee.claudeVersion === "9.9.9";
+    });
+    agent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 1, claudeVersion: "9.9.9" }));
+    const employeeUpdate = await employeePromise;
+
+    expect(employeeUpdate.employee.claudeVersion).toBe("9.9.9");
+    expect(server.buildSnapshot().employees.find((e) => e.id === "alice")?.claudeVersion).toBe("9.9.9");
   });
 
   it("失败生命周期：任务出错时标记 failed", async () => {
@@ -1461,17 +1480,18 @@ describe("安全", () => {
   });
 
   it("未注册的 Agent 发送任务事件被关闭连接", async () => {
-    const socket = await connectWs(`${baseUrl}/ws/agent?token=${TOKEN}`);
+    const socket = await connectWs(`${baseUrl}/ws/agent`);
     socket.send(JSON.stringify({ type: "task.accepted", taskId: "fake-id" }));
     const close = await waitForClose(socket);
     expect(close.code).toBe(1008);
   });
 
-  it("错误 Token 的 Agent 被拒绝", async () => {
-    const socket = new WebSocket(`${baseUrl}/ws/agent?token=wrong-token`);
-    sockets.push(socket);
+  it("未匹配的 Agent Token 被拒绝", async () => {
+    await createAgentRegistrationToken("token-check-agent");
+    const socket = await connectWs(`${baseUrl}/ws/agent`);
+    sendAgentRegister(socket, "token-check-agent", undefined, { agentToken: "wrong-token" });
     const close = await waitForClose(socket);
-    expect(close.code).toBe(1008);
+    expect(close).toMatchObject({ code: 1008, reason: "agent_token_invalid" });
   });
 });
 
@@ -1570,20 +1590,35 @@ async function connectLeader() {
 }
 
 async function connectAgent(employeeId: string, activeTaskId?: string, opts?: { weight?: number; labels?: string[]; agentToken?: string; permissionMode?: string }) {
-  const url = new URL(`${baseUrl}/ws/agent`);
-  url.searchParams.set("token", TOKEN);
-  if (opts?.agentToken) url.searchParams.set("agentToken", opts.agentToken);
-  const socket = await connectWs(url.toString());
-  sendAgentRegister(socket, employeeId, activeTaskId, opts);
+  const agentToken = await createAgentRegistrationToken(employeeId, opts);
+  const socket = await connectWs(`${baseUrl}/ws/agent`);
+  sendAgentRegister(socket, employeeId, activeTaskId, { ...opts, agentToken });
   await waitUntil(() => server.buildSnapshot().employees.some((e) => e.id === employeeId && e.status === "online"));
   return socket;
 }
 
-function sendAgentRegister(socket: WebSocket, employeeId: string, activeTaskId?: string, opts?: { weight?: number; labels?: string[]; permissionMode?: string }) {
+async function createAgentRegistrationToken(employeeId: string, opts?: { labels?: string[]; agentToken?: string }) {
+  const response = await fetch(`${httpBaseUrl}/api/agent-registry`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      employeeId,
+      name: employeeId,
+      labels: opts?.labels ?? [],
+      ...(opts?.agentToken ? { token: opts.agentToken } : {}),
+    }),
+  });
+  expect(response.status).toBe(201);
+  const body = (await response.json()) as { agentToken: string };
+  return body.agentToken;
+}
+
+function sendAgentRegister(socket: WebSocket, employeeId: string, activeTaskId?: string, opts?: { weight?: number; labels?: string[]; permissionMode?: string; agentToken?: string }) {
   socket.send(
     JSON.stringify({
       type: "agent.register",
       employeeId,
+      agentToken: opts?.agentToken,
       name: employeeId,
       machineId: employeeId,
       hostname: "test-host",

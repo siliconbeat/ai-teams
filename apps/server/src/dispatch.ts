@@ -45,8 +45,6 @@ export type DispatchContext = {
   log: FastifyInstance["log"];
   encryptor?: MaybeEncryptor;
   maxLogChunksPerTask: number;
-  agentRegistrationMode: "open" | "approval";
-  getAgentToken?: (socket: WebSocket) => string | null;
   hashAgentToken?: (token: string) => string;
 };
 
@@ -766,31 +764,9 @@ export function createDispatch(ctx: DispatchContext) {
   async function validateAgentRegistration(message: Extract<EmployeeToServerMessage, { type: "agent.register" }>, socket: WebSocket) {
     const now = nowIso();
     const registration = await getAgentRegistration(db, message.employeeId);
-    if (ctx.agentRegistrationMode === "open") {
-      await upsertAgentRegistration(db, {
-        employeeId: message.employeeId,
-        name: message.name,
-        machineId: message.machineId,
-        hostname: message.hostname,
-        labels: message.labels,
-        status: "approved",
-        approvedAt: registration?.approvedAt ?? now,
-        lastSeenAt: now,
-      });
-      return true;
-    }
 
     if (!registration) {
-      await upsertAgentRegistration(db, {
-        employeeId: message.employeeId,
-        name: message.name,
-        machineId: message.machineId,
-        hostname: message.hostname,
-        labels: message.labels,
-        status: "pending",
-        lastSeenAt: now,
-      });
-      socket.close(1008, "agent_pending_approval");
+      socket.close(1008, "agent_not_registered");
       return false;
     }
 
@@ -808,7 +784,7 @@ export function createDispatch(ctx: DispatchContext) {
       return false;
     }
 
-    const agentToken = ctx.getAgentToken?.(socket);
+    const agentToken = message.agentToken;
     const tokenHash = agentToken && ctx.hashAgentToken ? ctx.hashAgentToken(agentToken) : null;
     if (!registration.tokenHash || !tokenHash || tokenHash !== registration.tokenHash) {
       socket.close(1008, "agent_token_invalid");
@@ -1010,6 +986,13 @@ export function createDispatch(ctx: DispatchContext) {
         task.status = "running";
         task.sessionId = message.sessionId ?? task.sessionId;
         task.startedAt = task.startedAt ?? nowIso();
+        if (message.claudeVersion) {
+          const employee = state.employees.get(socketEmployeeId);
+          if (employee && employee.claudeVersion !== message.claudeVersion) {
+            employee.claudeVersion = message.claudeVersion;
+            upsertEmployee(employee);
+          }
+        }
         upsertTask(task);
         postTaskWebhook(task, "task.started");
         log.info({ taskId: task.id, employeeId: socketEmployeeId, sessionId: task.sessionId, pid: message.pid }, "Task started");

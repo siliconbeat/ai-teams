@@ -19,6 +19,7 @@ import {
 } from "./config.js";
 import { ensureWorkspaceClaudeMd, ensureClaudeHookFiles } from "./records.js";
 import { resetClaudeSession } from "./state.js";
+import { getClaudeVersion } from "./claude-version.js";
 
 function resolveWorkspace(raw: string | null | undefined): string {
   if (!raw || !raw.trim()) {
@@ -274,7 +275,7 @@ export function shouldRetryWithFreshClaudeSession(
 export function runFakeTask(taskId: string, prompt: string, deps: RunnerDeps) {
   const { findActiveTask, send, emitOutput, finishTask } = deps;
   const task = findActiveTask(taskId);
-  send({ type: "task.started", taskId, pid: process.pid, sessionId: task?.claudeSessionId ?? null });
+  send({ type: "task.started", taskId, pid: process.pid, sessionId: task?.claudeSessionId ?? null, claudeVersion: getClaudeVersion({ refresh: true }) });
   const steps = [
     `收到任务：${prompt}\n`,
     "分析任务上下文...\n",
@@ -352,7 +353,7 @@ export function runClaudeTask(taskId: string, prompt: string, workspace: string 
   currentTask.generation += 1;
   const generation = currentTask.generation;
   currentTask.child = child;
-  send({ type: "task.started", taskId, pid: child.pid ?? 0, sessionId: currentTask.claudeSessionId });
+  send({ type: "task.started", taskId, pid: child.pid ?? 0, sessionId: currentTask.claudeSessionId, claudeVersion: getClaudeVersion({ refresh: true }) });
   emitOutput(taskId, "stdout", `[agent] permission_mode: ${permissionMode}\n`);
 
   const stdoutReader = readline.createInterface({ input: child.stdout });

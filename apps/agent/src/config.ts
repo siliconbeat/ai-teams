@@ -7,7 +7,6 @@ export let fileConfig: AgentConfig | null = loadConfigFile();
 
 export let SERVER_PORT = process.env.AI_TEAMS_SERVER_PORT || "3789";
 export let SERVER_URL = process.env.SERVER_URL || fileConfig?.serverUrl || `ws://localhost:${SERVER_PORT}`;
-export let AUTH_TOKEN = process.env.AI_TEAMS_AUTH_TOKEN || fileConfig?.authToken || "";
 export let AGENT_TOKEN = process.env.AI_TEAMS_AGENT_TOKEN || fileConfig?.agentToken || "";
 export let EMPLOYEE_ID = process.env.EMPLOYEE_ID || fileConfig?.employeeId || "emp_local";
 export let EMPLOYEE_NAME = process.env.EMPLOYEE_NAME || fileConfig?.employeeName || "Local Agent";
@@ -42,7 +41,6 @@ export function reinitializeConfig(): void {
   fileConfig = loadConfigFile();
   SERVER_PORT = process.env.AI_TEAMS_SERVER_PORT || "3789";
   SERVER_URL = process.env.SERVER_URL || fileConfig?.serverUrl || `ws://localhost:${SERVER_PORT}`;
-  AUTH_TOKEN = process.env.AI_TEAMS_AUTH_TOKEN || fileConfig?.authToken || "";
   AGENT_TOKEN = process.env.AI_TEAMS_AGENT_TOKEN || fileConfig?.agentToken || "";
   EMPLOYEE_ID = process.env.EMPLOYEE_ID || fileConfig?.employeeId || "emp_local";
   EMPLOYEE_NAME = process.env.EMPLOYEE_NAME || fileConfig?.employeeName || "Local Agent";

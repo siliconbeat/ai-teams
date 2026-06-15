@@ -1,4 +1,3 @@
-import { execSync } from "node:child_process";
 import crypto from "node:crypto";
 import os from "node:os";
 import WebSocket from "ws";
@@ -11,7 +10,6 @@ import {
   type ServerToEmployeeMessage,
 } from "@ai-teams/shared";
 import {
-  AUTH_TOKEN,
   AGENT_TOKEN,
   EMPLOYEE_ID,
   EMPLOYEE_NAME,
@@ -23,21 +21,10 @@ import {
   MAX_BUFFERED_MESSAGES,
   type ActiveTask,
 } from "./config.js";
+import { getClaudeVersion } from "./claude-version.js";
 
 declare const PKG_VERSION: string;
 const version: string = typeof PKG_VERSION !== "undefined" ? PKG_VERSION : "dev";
-
-let cachedClaudeVersion: string | undefined;
-function getClaudeVersion(): string | undefined {
-  if (cachedClaudeVersion !== undefined) return cachedClaudeVersion || undefined;
-  try {
-    const raw = execSync("claude --version 2>/dev/null", { timeout: 5000, encoding: "utf8" }).trim();
-    cachedClaudeVersion = raw.split(/\s/)[0] || raw;
-  } catch {
-    cachedClaudeVersion = "";
-  }
-  return cachedClaudeVersion || undefined;
-}
 
 // ---------------------------------------------------------------------------
 // Encryption helper
@@ -84,10 +71,6 @@ export type ConnectionState = {
 
 export function buildAgentWsUrl() {
   const url = new URL("/ws/agent", SERVER_URL);
-  url.searchParams.set("token", AUTH_TOKEN);
-  if (AGENT_TOKEN) {
-    url.searchParams.set("agentToken", AGENT_TOKEN);
-  }
   return url.toString();
 }
 
@@ -156,6 +139,7 @@ export function registerAgent(
   send(state, {
     type: "agent.register",
     employeeId: EMPLOYEE_ID,
+    agentToken: AGENT_TOKEN,
     name: EMPLOYEE_NAME,
     machineId: EMPLOYEE_ID,
     hostname: os.hostname(),
@@ -180,8 +164,8 @@ export function connect(
   getQueueTask: () => ActiveTask | null,
   onMessage: (message: ServerToEmployeeMessage) => void,
 ) {
-  if (!AUTH_TOKEN) {
-    console.error("[agent] AI_TEAMS_AUTH_TOKEN is required.");
+  if (!AGENT_TOKEN) {
+    console.error("[agent] AI_TEAMS_AGENT_TOKEN is required. 请先在 Web 端添加 Agent 并复制 Agent Token。");
     process.exit(1);
   }
 
@@ -191,15 +175,17 @@ export function connect(
     console.log(`[agent:${EMPLOYEE_ID}] connected to ${SERVER_URL}`);
     resetReconnectAttempt();
     registerAgent(state, getMainTask(), getQueueTask());
-    flushBufferedMessages(state);
-    requestTask(state);
-    startHeartbeat(state);
   });
 
   state.socket.on("message", (raw: Buffer) => {
     try {
       const decrypted = decrypt(raw.toString());
       const message = parseServerToEmployeeMessage(parseJsonMessage(decrypted));
+      if (message.type === "agent.registered") {
+        flushBufferedMessages(state);
+        requestTask(state);
+        startHeartbeat(state);
+      }
       onMessage(message);
     } catch (error) {
       console.error(`[agent:${EMPLOYEE_ID}] invalid server message`, error);
@@ -209,7 +195,7 @@ export function connect(
   state.socket.on("close", (code, reason) => {
     if (code === 1008) {
       console.error(`[agent:${EMPLOYEE_ID}] 认证失败：Token 无效或服务器拒绝连接。${reason ? ` (${reason})` : ""}`);
-      console.error(`[agent:${EMPLOYEE_ID}] 请检查 AI_TEAMS_AUTH_TOKEN 配置后重新启动。`);
+      console.error(`[agent:${EMPLOYEE_ID}] 请检查 Agent Token 与员工 ID 是否和 Web 端注册记录一致。`);
       process.exit(1);
     }
     console.log(`[agent:${EMPLOYEE_ID}] disconnected, reconnecting in ${RECONNECT_MS}ms...`);

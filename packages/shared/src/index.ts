@@ -180,12 +180,14 @@ export type ServerToEmployeeMessage =
   | { type: "task.cancel"; taskId: string }
   | { type: "queue.resume" }
   | { type: "agent.registered"; consecutiveQueueFailures: number }
-  | { type: "session.reset" };
+  | { type: "session.reset" }
+  | { type: "server.error"; code: string; message: string };
 
 export type EmployeeToServerMessage =
   | {
       type: "agent.register";
       employeeId: string;
+      agentToken?: string;
       name: string;
       machineId: string;
       hostname: string;
@@ -201,7 +203,7 @@ export type EmployeeToServerMessage =
   | { type: "agent.heartbeat"; employeeId: string }
   | { type: "agent.request_task"; employeeId: string }
   | { type: "task.accepted"; taskId: string }
-  | { type: "task.started"; taskId: string; pid: number; sessionId?: string | null }
+  | { type: "task.started"; taskId: string; pid: number; sessionId?: string | null; claudeVersion?: string }
   | { type: "task.output"; taskId: string; stream: "stdout" | "stderr"; seq: number; content: string; delta?: boolean }
   | {
       type: "task.completed";
@@ -332,6 +334,7 @@ export function parseEmployeeToServerMessage(value: unknown): EmployeeToServerMe
     return {
       type,
       employeeId: nonEmptyStringField(message, "employeeId"),
+      agentToken: optionalStringField(message, "agentToken"),
       name: nonEmptyStringField(message, "name"),
       machineId: nonEmptyStringField(message, "machineId"),
       hostname: nonEmptyStringField(message, "hostname"),
@@ -364,6 +367,7 @@ export function parseEmployeeToServerMessage(value: unknown): EmployeeToServerMe
       taskId: nonEmptyStringField(message, "taskId"),
       pid: nonNegativeNumberField(message, "pid"),
       sessionId: optionalNullableStringField(message, "sessionId"),
+      claudeVersion: optionalStringField(message, "claudeVersion"),
     };
   }
 
@@ -445,6 +449,14 @@ export function parseServerToEmployeeMessage(value: unknown): ServerToEmployeeMe
 
   if (type === "session.reset") {
     return { type };
+  }
+
+  if (type === "server.error") {
+    return {
+      type,
+      code: nonEmptyStringField(message, "code"),
+      message: nonEmptyStringField(message, "message"),
+    };
   }
 
   throw new ProtocolError(`Unsupported server-to-employee message type: ${type}`);

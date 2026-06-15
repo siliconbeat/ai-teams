@@ -38,6 +38,7 @@ describe("protocol parsing", () => {
       parseEmployeeToServerMessage({
         type: "agent.register",
         employeeId: "alice",
+        agentToken: "agent-token",
         name: "Alice",
         machineId: "alice",
         hostname: "host",
@@ -46,7 +47,7 @@ describe("protocol parsing", () => {
         activeQueueTaskId: "task-2",
         lastOutputSeq: 4,
       }),
-    ).toMatchObject({ activeMainTaskId: "task-1", activeQueueTaskId: "task-2", lastOutputSeq: 4 });
+    ).toMatchObject({ agentToken: "agent-token", activeMainTaskId: "task-1", activeQueueTaskId: "task-2", lastOutputSeq: 4 });
   });
 
   it("accepts task started session ids", () => {
@@ -56,8 +57,9 @@ describe("protocol parsing", () => {
         taskId: "task-1",
         pid: 123,
         sessionId: "session-1",
+        claudeVersion: "1.2.3",
       }),
-    ).toMatchObject({ type: "task.started", sessionId: "session-1" });
+    ).toMatchObject({ type: "task.started", sessionId: "session-1", claudeVersion: "1.2.3" });
   });
 
   it("rejects malformed server-to-agent dispatch messages", () => {
@@ -133,6 +135,19 @@ describe("protocol parsing", () => {
         timeoutSec: 30,
       }),
     ).not.toHaveProperty("sessionId");
+  });
+
+  it("accepts server.error messages for agents", () => {
+    expect(
+      parseServerToEmployeeMessage({
+        type: "server.error",
+        code: "agent_not_registered",
+        message: "Agent must register before sending task events.",
+      }),
+    ).toMatchObject({
+      type: "server.error",
+      code: "agent_not_registered",
+    });
   });
 });
 

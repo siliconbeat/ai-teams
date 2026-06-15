@@ -9,7 +9,6 @@ const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 
 export type AgentConfig = {
   serverUrl: string;
-  authToken: string;
   agentToken?: string;
   employeeId: string;
   employeeName: string;
@@ -46,7 +45,6 @@ export async function runSetup(existing: AgentConfig | null): Promise<AgentConfi
   console.log("");
 
   const serverUrl = await rl.question(`  服务器地址 [${existing?.serverUrl ?? "ws://localhost:3789"}]: `);
-  const authToken = await rl.question(`  认证 Token${existing ? " [******]" : ""}: `);
   const agentToken = await rl.question(`  Agent Token${existing?.agentToken ? " [******]" : ""}: `);
   const employeeId = await rl.question(`  员工 ID [${existing?.employeeId ?? "emp_local"}]: `);
   const employeeName = await rl.question(`  员工名称 [${existing?.employeeName ?? "Local Agent"}]: `);
@@ -60,7 +58,6 @@ export async function runSetup(existing: AgentConfig | null): Promise<AgentConfi
   const parsedWeight = Number(weight.trim() || existing?.weight || 1);
   const config: AgentConfig = {
     serverUrl: serverUrl.trim() || existing?.serverUrl || "ws://localhost:3789",
-    authToken: authToken.trim() || existing?.authToken || "",
     agentToken: agentToken.trim() || existing?.agentToken || "",
     employeeId: employeeId.trim() || existing?.employeeId || "emp_local",
     employeeName: employeeName.trim() || existing?.employeeName || "Local Agent",

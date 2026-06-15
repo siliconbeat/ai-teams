@@ -131,7 +131,6 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
   const disconnectGraceMs = options.disconnectGraceMs ?? 15000;
   const maxLogChunksPerTask = options.maxLogChunksPerTask ?? 400;
   const maxHydratedTasks = options.maxHydratedTasks ?? 200;
-  const agentRegistrationMode = options.agentRegistrationMode ?? "approval";
   const dataDir = options.dataDir ?? path.join(process.cwd(), "data");
   const dbPath = options.dbPath ?? path.join(dataDir, "ai-teams.db");
   let closing = false;
@@ -202,8 +201,6 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     app.log.info({ webDir }, "Web UI enabled");
   }
 
-  const agentSocketTokens = new WeakMap<WebSocket, string | null>();
-
   const encryptor = createEncryptor(process.env.AI_TEAMS_ENCRYPTION_KEY);
   const dispatchCtx: DispatchContext = {
     state,
@@ -214,8 +211,6 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     disconnectGraceMs,
     encryptor,
     maxLogChunksPerTask,
-    agentRegistrationMode,
-    getAgentToken: (socket) => agentSocketTokens.get(socket) ?? null,
     hashAgentToken: (token) => hashAgentToken(options.authToken, token),
   };
   const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage, cancelTaskById, patchTaskById, prioritizeTask, startDisconnectRecovery, resumeAgentQueue, pauseAgentQueue, resetAgentSession, cleanup: dispatchCleanup } = createDispatch(dispatchCtx);
@@ -1260,27 +1255,21 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     },
   );
 
-  app.get("/ws/agent", { websocket: true }, (socket, request) => {
-    if (!isAuthorized(options.authToken, request.url, request.headers)) {
-      socket.close(1008, "unauthorized");
-      return;
-    }
-    const url = new URL(request.url, "http://localhost");
-    const headerAgentToken = typeof request.headers["x-ai-teams-agent-token"] === "string"
-      ? request.headers["x-ai-teams-agent-token"]
-      : "";
-    agentSocketTokens.set(socket, headerAgentToken || url.searchParams.get("agentToken") || null);
+  app.get("/ws/agent", { websocket: true }, (socket) => {
     app.log.info("Agent connected");
 
+    let messageQueue = Promise.resolve();
     socket.on("message", (raw: WebSocket.RawData) => {
-      void (async () => {
-        const decrypted = encryptor.decrypt(raw.toString());
-        const message = parseEmployeeToServerMessage(parseJsonMessage(decrypted));
-        await handleAgentMessage(message, socket);
-      })().catch((error) => {
-        app.log.error({ error }, "Failed to parse agent message");
-        socket.close(1008, "invalid_message");
-      });
+      messageQueue = messageQueue
+        .then(async () => {
+          const decrypted = encryptor.decrypt(raw.toString());
+          const message = parseEmployeeToServerMessage(parseJsonMessage(decrypted));
+          await handleAgentMessage(message, socket);
+        })
+        .catch((error) => {
+          app.log.error({ error }, "Failed to parse agent message");
+          socket.close(1008, "invalid_message");
+        });
     });
 
     socket.on("close", () => {
