@@ -1234,6 +1234,10 @@ export default function App() {
 
   async function saveSchedule() {
     setScheduleError(null);
+    if (scheduleForm.targetMode === "direct" && scheduleForm.targetAgents.length === 0) {
+      setScheduleError("指定 Agent 模式至少选择一个目标 Agent");
+      return;
+    }
     const body: Record<string, unknown> = {
       name: scheduleForm.name,
       cron: scheduleForm.cron,
@@ -2334,7 +2338,7 @@ export default function App() {
                       className="primary-button"
                       style={{ width: "auto", marginTop: 0, padding: "8px 20px" }}
                       onClick={saveSchedule}
-                      disabled={!scheduleForm.name || !scheduleForm.cron || !scheduleForm.prompt}
+                      disabled={!scheduleForm.name || !scheduleForm.cron || !scheduleForm.prompt || (scheduleForm.targetMode === "direct" && scheduleForm.targetAgents.length === 0)}
                     >
                       {editingSchedule ? "保存" : "创建"}
                     </button>

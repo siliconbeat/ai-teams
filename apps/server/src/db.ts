@@ -294,7 +294,7 @@ export async function initDb(db: Database) {
   try {
     await db.run("ALTER TABLE tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0");
   } catch (err) {
-    const msg = String(err?.["message"] ?? err ?? "");
+    const msg = err instanceof Error ? err.message : String(err ?? "");
     if (!msg.includes("duplicate column") && !msg.includes("already exists")) {
       console.warn("Migration retry_count failed:", msg);
     }

@@ -523,6 +523,20 @@ function makeLeaderDecision(mission: MissionRecord, tasks: TaskRecord[], events:
   }
 
   if (failedTasks.length > 0 && approvedFailureContinuation) {
+    if (!hasReviewTask) {
+      return {
+        summary: "人类已确认失败分支，继续派发失败复盘与补救建议任务。",
+        actions: [
+          {
+            type: "create_task",
+            target: "queue",
+            role: "reviewer",
+            priority: 3,
+            prompt: buildFailureReviewPrompt(mission, tasks),
+          },
+        ],
+      };
+    }
     return {
       summary: "人类已确认失败分支，Mission 以部分结果结束。",
       actions: [
@@ -647,6 +661,27 @@ function buildReviewPrompt(mission: MissionRecord, completedTasks: TaskRecord[])
     "- 是否保持旧版功能和接口兼容。",
     "- 还需要补充哪些测试。",
     "- 如果需要人类确认，输出 NEEDS_HUMAN_APPROVAL。",
+  ].join("\n");
+}
+
+function buildFailureReviewPrompt(mission: MissionRecord, tasks: TaskRecord[]) {
+  const summaries = tasks.map((task, index) => {
+    const result = task.summary || task.error || task.prompt;
+    return `子任务 ${index + 1} (${task.id}, ${task.status}, ${task.employeeId ?? "unassigned"}):\n${result}`;
+  }).join("\n\n");
+  return [
+    "你是 AI Teams 中由 AI Leader 指派的失败复盘 Agent。",
+    `Mission ID: ${mission.id}`,
+    `总目标: ${mission.objective}`,
+    "",
+    "以下子任务中存在失败或超时。人类已批准继续下一轮，请基于当前结果复盘并给出补救建议:",
+    summaries,
+    "",
+    "输出:",
+    "- 哪些目标已经完成，哪些没有完成。",
+    "- 失败或超时的可能原因。",
+    "- 推荐的下一步补救方式和验证方式。",
+    "- 如果继续执行会有风险，输出 NEEDS_HUMAN_APPROVAL。",
   ].join("\n");
 }
 

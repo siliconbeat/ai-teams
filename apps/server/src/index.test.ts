@@ -163,6 +163,33 @@ describe("GET /health", () => {
     expect(body.employees).toBe(0);
     expect(body.tasks).toBe(0);
   });
+
+  it("默认数据库路径与 health 返回路径一致", async () => {
+    await Promise.all(sockets.map((socket) => closeSocket(socket)));
+    sockets = [];
+    await server.close();
+
+    const dataDir = path.join(tmpDir, "data-root");
+    server = await createAiTeamsServer({
+      authToken: TOKEN,
+      dataDir,
+      defaultTimeoutSec: 0.08,
+      disconnectGraceMs: 80,
+      agentRegistrationMode: "open",
+      logger: false,
+    });
+    await server.app.listen({ port: 0, host: "127.0.0.1" });
+    const address = server.app.server.address() as AddressInfo;
+    httpBaseUrl = `http://127.0.0.1:${address.port}`;
+
+    const response = await fetch(`${httpBaseUrl}/health`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { dbPath: string };
+    expect(body.dbPath).toBe(path.join(dataDir, "ai-teams.db"));
+    expect(fs.existsSync(body.dbPath)).toBe(true);
+  });
 });
 
 // ─── AI Leader Missions ─────────────────────────────────────────
@@ -283,6 +310,65 @@ describe("AI Leader Missions", () => {
     const review = afterApproval.subtasks.find((s) => s.role === "reviewer")!;
     const reviewTask = server.buildSnapshot().tasks.find((t) => t.id === review.taskId)!;
     completeTask(reviewTask.employeeId === "alice" ? alice : bob, review.taskId, "review passed after approval");
+
+    await waitUntil(async () => (await getMission(missionId)).mission.status === "completed", 1000);
+  });
+
+  it("子任务失败后批准继续会派发失败复盘任务，而不是直接结束", async () => {
+    const alice = await connectAgent("alice");
+    const bob = await connectAgent("bob");
+    const response = await fetch(`${httpBaseUrl}/api/missions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        objective: "验证失败后继续流程",
+        approvalPolicy: "auto",
+        maxIterations: 4,
+        maxTasks: 6,
+      }),
+    });
+    expect(response.status).toBe(201);
+    const created = (await response.json()) as { mission: { id: string } };
+    const missionId = created.mission.id;
+
+    await waitUntil(async () => (await getMission(missionId)).subtasks.length >= 2, 1000);
+    const detail = await getMission(missionId);
+    for (const [index, subtask] of detail.subtasks.entries()) {
+      if (index === 0) {
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+          await waitUntil(() => {
+            const task = server.buildSnapshot().tasks.find((t) => t.id === subtask.taskId);
+            return Boolean(task?.employeeId && task.status === "dispatched");
+          }, 1000);
+          const task = server.buildSnapshot().tasks.find((t) => t.id === subtask.taskId)!;
+          const socket = task.employeeId === "alice" ? alice : bob;
+          socket.send(JSON.stringify({ type: "task.started", taskId: subtask.taskId, pid: 123 }));
+          socket.send(JSON.stringify({ type: "task.failed", taskId: subtask.taskId, error: `worker failed ${attempt}` }));
+          await delay(20);
+        }
+      } else {
+        const task = server.buildSnapshot().tasks.find((t) => t.id === subtask.taskId)!;
+        const socket = task.employeeId === "alice" ? alice : bob;
+        completeTask(socket, subtask.taskId, "worker done");
+      }
+    }
+
+    await waitUntil(async () => (await getMission(missionId)).mission.status === "waiting_human", 1000);
+    const waiting = await getMission(missionId);
+    const approval = waiting.approvals.find((item) => item.status === "pending")!;
+    const approveResponse = await fetch(`${httpBaseUrl}/api/missions/${missionId}/approvals/${approval.id}/respond`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ approved: true }),
+    });
+    expect(approveResponse.status).toBe(200);
+
+    await waitUntil(async () => (await getMission(missionId)).subtasks.some((s) => s.role === "reviewer"), 1000);
+    const afterApproval = await getMission(missionId);
+    expect(afterApproval.mission.status).toBe("waiting_agents");
+    const review = afterApproval.subtasks.find((s) => s.role === "reviewer")!;
+    const reviewTask = server.buildSnapshot().tasks.find((t) => t.id === review.taskId)!;
+    completeTask(reviewTask.employeeId === "alice" ? alice : bob, review.taskId, "failure review done");
 
     await waitUntil(async () => (await getMission(missionId)).mission.status === "completed", 1000);
   });
@@ -774,6 +860,21 @@ describe("WebSocket 任务调度", () => {
     expect((await bobDispatch).prompt).toBe("run all");
   });
 
+  it("broadcast 不会给已离线 Agent 创建失败任务", async () => {
+    await connectAgent("alice");
+    const bob = await connectAgent("bob");
+    bob.close();
+    await waitUntil(() => server.buildSnapshot().employees.some((e) => e.id === "bob" && e.status === "offline"));
+    const leader = await connectLeader();
+
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "all", prompt: "online only" }));
+    await delay(30);
+
+    const matching = server.buildSnapshot().tasks.filter((task) => task.prompt === "online only");
+    expect(matching).toHaveLength(1);
+    expect(matching[0]!.employeeId).toBe("alice");
+  });
+
   it("direct 分发给指定 Agent", async () => {
     const alice = await connectAgent("alice");
     const bob = await connectAgent("bob");
@@ -980,6 +1081,14 @@ describe("WebSocket 任务调度", () => {
     const updated = server.buildSnapshot().tasks.find((t) => t.id === queuedTask!.id);
     expect(updated!.status).toBe("cancelled");
   });
+
+  it("WebSocket 取消不存在任务会返回 command.error", async () => {
+    const leader = await connectLeader();
+    const errorPromise = waitForLeaderMessage(leader, (message) => message.type === "command.error");
+    leader.send(JSON.stringify({ type: "task.cancel", taskId: "missing-task" }));
+    const error = await errorPromise;
+    expect(error.code).toBe("not_found");
+  });
 });
 
 // ─── 任务生命周期 ──────────────────────────────────────────────
@@ -1051,6 +1160,22 @@ describe("任务生命周期", () => {
     agent.send(JSON.stringify({ type: "task.completed", taskId: dispatch.taskId, exitCode: 0, summary: "late" }));
     await delay(30);
     expect(server.buildSnapshot().tasks.find((t) => t.id === dispatch.taskId)?.status).toBe("timeout");
+  });
+
+  it("queue 任务超时重排后接受原 Agent 的取消回执且不断开连接", async () => {
+    const agent = await connectAgent("alice");
+    const leader = await connectLeader();
+    const dispatchPromise = waitForAgentDispatch(agent);
+
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "queue timeout ack", timeoutSec: 0.03 }));
+    const dispatch = await dispatchPromise;
+    agent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 1 }));
+
+    await waitUntil(() => server.buildSnapshot().tasks.some((task) => task.id === dispatch.taskId && task.status === "queued"), 500);
+    const closed = waitForClose(agent, 80).then(() => true, () => false);
+    agent.send(JSON.stringify({ type: "task.cancelled", taskId: dispatch.taskId }));
+    expect(await closed).toBe(false);
+    expect(agent.readyState).toBe(WebSocket.OPEN);
   });
 
   it("Agent 完成后释放员工槽位", async () => {
@@ -1385,6 +1510,26 @@ describe("Webhook 回调", () => {
     } finally {
       await webhook.close();
     }
+  });
+});
+
+// ─── 定时任务 ──────────────────────────────────────────────────
+
+describe("Schedules", () => {
+  it("拒绝没有目标 Agent 的 direct 定时任务", async () => {
+    const response = await fetch(`${httpBaseUrl}/api/schedules`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "empty direct",
+        cron: "*/5 * * * * *",
+        targetMode: "direct",
+        prompt: "run direct",
+      }),
+    });
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toContain("Direct schedules");
   });
 });
 

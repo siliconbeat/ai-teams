@@ -18,7 +18,7 @@ import {
   type StateSnapshot,
 } from "@ai-teams/shared";
 import { daemonize, stopDaemon, getDaemonStatus } from "@ai-teams/shared/daemon";
-import { createDatabaseFromEnv, initDb, hydrateState, type Database, queryTasks, getTaskById, getTaskLogsByTaskId, deleteTask, updateTaskFields, dbRowToTask, upsertSchedule, getAllSchedules, getScheduleById, deleteScheduleRow, updateScheduleFields, type ScheduleRecord, listAgentRegistrations, upsertAgentRegistration, deleteAgentRegistration, deleteEmployee } from "./db.js";
+import { createDatabaseFromEnv, initDb, hydrateState, type Database, queryTasks, getTaskById, getTaskLogsByTaskId, deleteTask, dbRowToTask, upsertSchedule, getAllSchedules, getScheduleById, deleteScheduleRow, updateScheduleFields, type ScheduleRecord, listAgentRegistrations, upsertAgentRegistration, deleteAgentRegistration, deleteEmployee } from "./db.js";
 import { type RestTaskRequest, errorResponseSchema, snapshotSchema, sessionHistorySchema, restTaskRequestSchema, restTaskAcceptedSchema, taskListResponseSchema, taskRecordSchema, taskOutputResponseSchema, taskPatchSchema, parseRestTaskRequest, claudeSessionsResponseSchema, createScheduleRequestSchema, updateScheduleRequestSchema, scheduleResponseSchema, scheduleListResponseSchema, agentRegistrationListResponseSchema, createAgentRegistrationRequestSchema, agentRegistrationTokenResponseSchema, createMissionRequestSchema, missionListResponseSchema, missionDetailResponseSchema, approvalResponseRequestSchema, type CreateScheduleRequest, type UpdateScheduleRequest, type CreateMissionRequest } from "./schemas.js";
 import { createDispatch, nowIso, sendJson } from "./dispatch.js";
 import type { DispatchContext } from "./dispatch.js";
@@ -139,8 +139,8 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
 
   const db = await createDatabaseFromEnv({
     AI_TEAMS_AUTH_TOKEN: options.authToken,
-    DATA_DIR: options.dataDir,
-    DB_PATH: options.dbPath,
+    DATA_DIR: dataDir,
+    DB_PATH: dbPath,
     DATABASE_URL: process.env.DATABASE_URL,
   });
   await initDb(db);
@@ -218,7 +218,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     getAgentToken: (socket) => agentSocketTokens.get(socket) ?? null,
     hashAgentToken: (token) => hashAgentToken(options.authToken, token),
   };
-  const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage, cancelTaskById, prioritizeTask, startDisconnectRecovery, resumeAgentQueue, pauseAgentQueue, resetAgentSession, cleanup: dispatchCleanup } = createDispatch(dispatchCtx);
+  const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage, cancelTaskById, patchTaskById, prioritizeTask, startDisconnectRecovery, resumeAgentQueue, pauseAgentQueue, resetAgentSession, cleanup: dispatchCleanup } = createDispatch(dispatchCtx);
   const missionOrchestrator = createLeaderOrchestrator({
     db,
     state,
@@ -385,6 +385,18 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     } catch { /* ignore */ }
 
     return { employeeId, workspace, activeSessionId, sessions };
+  }
+
+  function validateScheduleTargetConfig(
+    input: { targetMode?: "queue" | "direct" | "broadcast"; targetAgents?: string[] },
+    existing?: ScheduleRecord,
+  ) {
+    const targetMode = input.targetMode ?? existing?.targetMode ?? "queue";
+    const targetAgents = input.targetAgents ?? existing?.targetAgents ?? [];
+    if (targetMode === "direct" && targetAgents.length === 0) {
+      return "Direct schedules must select at least one target agent.";
+    }
+    return null;
   }
 
   const staticExts = new Set([".html", ".js", ".css", ".ico", ".png", ".jpg", ".svg", ".woff", ".woff2", ".ttf", ".map"]);
@@ -656,23 +668,18 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
         response: {
           200: taskRecordSchema,
           404: errorResponseSchema,
+          409: errorResponseSchema,
           401: errorResponseSchema,
         },
       },
     },
     async (request, reply) => {
-      const allowed = new Set(["status", "timeoutSec", "cliConfig"]);
-      const fields: Record<string, unknown> = {};
-      for (const [key, value] of Object.entries(request.body)) {
-        if (allowed.has(key)) {
-          fields[key] = value;
-        }
+      const result = patchTaskById(request.params.taskId, request.body);
+      if (!result.ok) {
+        const code = result.code === "not_found" ? 404 : 409;
+        return reply.code(code).send({ error: result.message });
       }
-      const row = await updateTaskFields(db, request.params.taskId, fields);
-      if (!row) {
-        return reply.code(404).send({ error: "Task not found." });
-      }
-      return dbRowToTask(row, defaultTimeoutSec);
+      return result.task;
     },
   );
 
@@ -1114,6 +1121,10 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     },
     async (request, reply) => {
       const body = request.body;
+      const targetError = validateScheduleTargetConfig(body);
+      if (targetError) {
+        return reply.code(400).send({ error: targetError });
+      }
       const id = randomUUID();
       const now = new Date().toISOString();
       const schedule: ScheduleRecord = {
@@ -1163,6 +1174,10 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     async (request, reply) => {
       const existing = await getScheduleById(db, request.params.scheduleId);
       if (!existing) return reply.code(404).send({ error: "Schedule not found." });
+      const targetError = validateScheduleTargetConfig(request.body, existing);
+      if (targetError) {
+        return reply.code(400).send({ error: targetError });
+      }
       const fields: Record<string, unknown> = {};
       if (request.body.name !== undefined) fields.name = request.body.name;
       if (request.body.cron !== undefined) fields.cronExpr = request.body.cron;

@@ -667,7 +667,9 @@ export function createDispatch(ctx: DispatchContext) {
       return [];
     }
     if (target === "all") {
-      return [...state.employees.values()].map((employee) => employee.id);
+      return [...state.employees.values()]
+        .filter((employee) => employee.status === "online" && state.agentSockets.get(employee.id)?.readyState === WebSocket.OPEN)
+        .map((employee) => employee.id);
     }
     return [...new Set(target)];
   }
@@ -974,12 +976,26 @@ export function createDispatch(ctx: DispatchContext) {
       return;
     }
 
+    const task = state.tasks.get(message.taskId);
+    if (
+      message.type === "task.cancelled" &&
+      task &&
+      task.status === "queued" &&
+      task.targetMode === "queue" &&
+      task.employeeId === null &&
+      state.employees.get(socketEmployeeId)?.queueTaskId === task.id
+    ) {
+      log.info({ taskId: task.id, employeeId: socketEmployeeId }, "Stale queue cancel acknowledgement received after task was re-enqueued");
+      setQueueTask(socketEmployeeId, null, null);
+      dispatchNextQueuedTask(socketEmployeeId);
+      return;
+    }
+
     if (!taskBelongsToSocket(message.taskId, socketEmployeeId, socket)) {
       socket.close(1008, "task_owner_mismatch");
       return;
     }
 
-    const task = state.tasks.get(message.taskId);
     if (!task || TERMINAL_STATUSES.has(task.status)) {
       return;
     }
@@ -1132,6 +1148,44 @@ export function createDispatch(ctx: DispatchContext) {
     return { ok: true, task };
   }
 
+  function patchTaskById(taskId: string, fields: Record<string, unknown>): { ok: true; task: TaskRecord } | { ok: false; code: string; message: string } {
+    const task = state.tasks.get(taskId);
+    if (!task) {
+      return { ok: false, code: "not_found", message: "任务不存在。" };
+    }
+
+    if (fields.status === "cancelled") {
+      return cancelTaskById(taskId);
+    }
+
+    if (TERMINAL_STATUSES.has(task.status)) {
+      return { ok: false, code: "already_terminal", message: `任务已处于终态 ${task.status}，无法更新。` };
+    }
+
+    if (fields.cliConfig !== undefined) {
+      if (task.status !== "queued") {
+        return { ok: false, code: "already_dispatched", message: "任务已分发，无法修改 CLI 配置。" };
+      }
+      task.cliConfig = fields.cliConfig && typeof fields.cliConfig === "object" && !Array.isArray(fields.cliConfig)
+        ? fields.cliConfig as TaskRecord["cliConfig"]
+        : null;
+    }
+
+    if (fields.timeoutSec !== undefined) {
+      if (typeof fields.timeoutSec !== "number" || !Number.isFinite(fields.timeoutSec) || fields.timeoutSec <= 0) {
+        return { ok: false, code: "invalid_timeout", message: "timeoutSec 必须是正数。" };
+      }
+      task.timeoutSec = fields.timeoutSec;
+      if (task.status !== "queued") {
+        clearTaskTimeout(task.id);
+        state.taskTimeouts.set(task.id, setTimeout(() => markTaskTimeout(task), task.timeoutSec * 1000));
+      }
+    }
+
+    upsertTask(task);
+    return { ok: true, task };
+  }
+
   function handleLeaderMessage(message: LeaderToServerMessage, socket: WebSocket) {
     switch (message.type) {
       case "command.dispatch": {
@@ -1161,7 +1215,16 @@ export function createDispatch(ctx: DispatchContext) {
         );
         break;
       case "task.cancel":
-        cancelTaskById(message.taskId);
+        {
+          const result = cancelTaskById(message.taskId);
+          if (!result.ok) {
+            sendJson<ServerToLeaderMessage>(socket, {
+              type: "command.error",
+              code: result.code,
+              message: result.message,
+            }, ctx.encryptor);
+          }
+        }
         break;
     }
   }
@@ -1323,6 +1386,7 @@ export function createDispatch(ctx: DispatchContext) {
     handleAgentMessage,
     handleLeaderMessage,
     cancelTaskById,
+    patchTaskById,
     prioritizeTask,
     startDisconnectRecovery,
     resumeAgentQueue,
