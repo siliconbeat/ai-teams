@@ -1,6 +1,6 @@
 {
   "name": "@csdwd/ai-teams-server",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "AI Teams central server — Fastify HTTP + WebSocket server for task dispatch, employee management, and web UI",
   "type": "module",
   "bin": {
