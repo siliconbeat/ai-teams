@@ -1051,6 +1051,53 @@ describe("WebSocket 任务调度", () => {
     expect(dispatch.prompt).toBe("high priority after restart");
   });
 
+  it("服务重启后清理员工快照里的已重排槽位", async () => {
+    const dbPath = path.join(tmpDir, "restart-stale-slot.db");
+    await Promise.all(sockets.map((socket) => closeSocket(socket)));
+    sockets = [];
+    await server.close();
+    server = await createAiTeamsServer({
+      authToken: TOKEN,
+      dbPath,
+      defaultTimeoutSec: 2,
+      disconnectGraceMs: 80,
+      agentRegistrationMode: "open",
+      logger: false,
+    });
+    await server.app.listen({ port: 0, host: "127.0.0.1" });
+    let address = server.app.server.address() as AddressInfo;
+    baseUrl = `ws://127.0.0.1:${address.port}`;
+    httpBaseUrl = `http://127.0.0.1:${address.port}`;
+
+    const agent = await connectAgent("stale-agent");
+    const leader = await connectLeader();
+    const dispatchPromise = waitForAgentDispatch(agent);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "stale slot after restart", timeoutSec: 2 }));
+    const dispatch = await dispatchPromise;
+    expect(server.buildSnapshot().employees.find((e) => e.id === "stale-agent")?.queueTaskId).toBe(dispatch.taskId);
+
+    await Promise.all(sockets.map((socket) => closeSocket(socket)));
+    sockets = [];
+    await server.close();
+
+    server = await createAiTeamsServer({
+      authToken: TOKEN,
+      dbPath,
+      defaultTimeoutSec: 2,
+      disconnectGraceMs: 80,
+      agentRegistrationMode: "open",
+      logger: false,
+    });
+    await server.app.listen({ port: 0, host: "127.0.0.1" });
+    address = server.app.server.address() as AddressInfo;
+    baseUrl = `ws://127.0.0.1:${address.port}`;
+    httpBaseUrl = `http://127.0.0.1:${address.port}`;
+
+    const snapshot = server.buildSnapshot();
+    expect(snapshot.employees.find((e) => e.id === "stale-agent")?.queueTaskId).toBeNull();
+    expect(snapshot.tasks.find((t) => t.id === dispatch.taskId)?.status).toBe("queued");
+  });
+
   it("WebSocket task.cancel 取消运行中的任务", async () => {
     const agent = await connectAgent("alice");
     const leader = await connectLeader();
@@ -1159,6 +1206,35 @@ describe("任务生命周期", () => {
 
     expect(failed.task.error).toBe("something broke");
     expect(failed.task.status).toBe("failed");
+  });
+
+  it("queue 任务最终失败后释放队列槽位", async () => {
+    const agent = await connectAgent("alice");
+    const leader = await connectLeader();
+    let dispatchPromise = waitForAgentDispatch(agent);
+
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "queue fails finally", timeoutSec: 2 }));
+    let dispatch = await dispatchPromise;
+    const taskId = dispatch.taskId;
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      agent.send(JSON.stringify({ type: "task.started", taskId, pid: attempt + 1 }));
+      if (attempt < 3) {
+        dispatchPromise = waitForAgentDispatch(agent);
+        agent.send(JSON.stringify({ type: "task.failed", taskId, error: `failed ${attempt}` }));
+        dispatch = await dispatchPromise;
+        expect(dispatch.taskId).toBe(taskId);
+      } else {
+        agent.send(JSON.stringify({ type: "task.failed", taskId, error: "failed finally" }));
+      }
+    }
+
+    await waitUntil(() => {
+      const snapshot = server.buildSnapshot();
+      const task = snapshot.tasks.find((t) => t.id === taskId);
+      const alice = snapshot.employees.find((e) => e.id === "alice");
+      return task?.status === "failed" && alice?.queueTaskId === null;
+    }, 800);
   });
 
   it("超时后标记 timeout 且忽略迟到完成事件", async () => {

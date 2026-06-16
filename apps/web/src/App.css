@@ -949,6 +949,11 @@ a.nav-item {
   font-size: 12px;
 }
 
+.danger-button {
+  color: #ffd6d6;
+  background: rgba(255, 89, 89, 0.14);
+}
+
 .history-list {
   display: flex;
   flex-direction: column;

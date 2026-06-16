@@ -23,7 +23,8 @@ export let CLAUDE_PERMISSION_MODE =
 export let DEFAULT_WORKSPACE = process.env.DEFAULT_WORKSPACE || fileConfig?.workspace || process.cwd();
 export let MAX_BUFFERED_MESSAGES = Number(process.env.AGENT_BUFFER_LIMIT) || 400;
 export const MAX_ERROR_TAIL = 16000;
-export const CLAUDE_MISSING_CONVERSATION_PATTERN = /No conversation found with session ID|Session ID .+ is already in use/i;
+export const CLAUDE_MISSING_CONVERSATION_PATTERN = /No conversation found with session ID/i;
+export const CLAUDE_SESSION_BUSY_PATTERN = /Session ID .+ is already in use/i;
 export let AGENT_RECORDS_DIR =
   process.env.AGENT_RECORDS_DIR || path.join(DEFAULT_WORKSPACE, ".ai-teams", "agents", EMPLOYEE_ID);
 export let STATE_FILE = process.env.AGENT_STATE_FILE || path.join(AGENT_RECORDS_DIR, "session-state.json");

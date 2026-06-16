@@ -198,6 +198,42 @@ export function createDispatch(ctx: DispatchContext) {
     upsertEmployee(employee);
   }
 
+  function releaseTaskSlots(taskId: string, dispatchNext = true) {
+    let released = false;
+    for (const employee of state.employees.values()) {
+      if (employee.mainTaskId === taskId) {
+        setMainTask(employee.id, null, null);
+        released = true;
+        if (dispatchNext) {
+          dispatchNextMainQueuedTask(employee.id);
+        }
+      }
+      if (employee.queueTaskId === taskId) {
+        setQueueTask(employee.id, null, null);
+        released = true;
+        if (dispatchNext) {
+          dispatchNextQueuedTask(employee.id);
+        }
+      }
+    }
+    return released;
+  }
+
+  function scheduleStaleQueueSlotRelease(taskId: string, employeeId: string | null) {
+    if (!employeeId) return;
+    const timer = setTimeout(() => {
+      const task = state.tasks.get(taskId);
+      const employee = state.employees.get(employeeId);
+      if (!task || !employee || employee.queueTaskId !== taskId) return;
+      if (task.status === "queued" && task.employeeId === null) {
+        log.warn({ taskId, employeeId }, "Queue task cancel acknowledgement timed out, releasing stale slot");
+        releaseTaskSlots(taskId);
+        dispatchSharedQueuedTasks();
+      }
+    }, 15_000);
+    timer.unref();
+  }
+
   const MAX_QUEUE_RETRY = 3;
   const MAX_CONSECUTIVE_QUEUE_FAILURES = 5;
   const AUTO_RESUME_MS = 10 * 60 * 1000; // 10 minutes
@@ -270,16 +306,8 @@ export function createDispatch(ctx: DispatchContext) {
     log.warn({ taskId, employeeId, error }, "Task failed");
     upsertTask(task);
     postTaskWebhook(task, "task.failed");
-    if (employeeId) {
-      const isMainSlot = !isQueueTask;
-      if (isMainSlot) {
-        setMainTask(employeeId, null, null);
-        dispatchNextMainQueuedTask(employeeId);
-      } else {
-        setQueueTask(employeeId, null, null);
-        dispatchNextQueuedTask(employeeId);
-      }
-    } else {
+    const released = releaseTaskSlots(task.id);
+    if (!employeeId && !released) {
       removeFromSharedQueue(task.id);
       dispatchSharedQueuedTasks();
     }
@@ -332,6 +360,7 @@ export function createDispatch(ctx: DispatchContext) {
     // Don't clear slot — agent hasn't processed cancel yet
 
     if (isQueueTask && reEnqueueOrTerminalFail(current, employeeId, error, { clearSlot: false })) {
+      scheduleStaleQueueSlotRelease(current.id, employeeId);
       return;
     }
 
@@ -343,16 +372,7 @@ export function createDispatch(ctx: DispatchContext) {
     log.warn({ taskId: task.id, employeeId, timeoutSec: task.timeoutSec }, "Task timed out");
     upsertTask(current);
     postTaskWebhook(current, "task.timeout");
-    if (employeeId) {
-      const isMainSlot = !isQueueTask;
-      if (isMainSlot) {
-        setMainTask(employeeId, null, null);
-        dispatchNextMainQueuedTask(employeeId);
-      } else {
-        setQueueTask(employeeId, null, null);
-        dispatchNextQueuedTask(employeeId);
-      }
-    }
+    releaseTaskSlots(current.id);
   }
 
   function enqueueSharedTask(taskId: string) {
@@ -1041,16 +1061,7 @@ export function createDispatch(ctx: DispatchContext) {
             log.info({ employeeId: task.employeeId }, "Consecutive queue failure count reset after successful task");
           }
         }
-        if (task.employeeId) {
-          const isMainSlot = task.targetMode !== "queue";
-          if (isMainSlot) {
-            setMainTask(task.employeeId, null, null);
-            dispatchNextMainQueuedTask(task.employeeId);
-          } else {
-            setQueueTask(task.employeeId, null, null);
-            dispatchNextQueuedTask(task.employeeId);
-          }
-        }
+        releaseTaskSlots(task.id);
         break;
       case "task.failed":
         markTaskFailed(message.taskId, message.error);
@@ -1059,10 +1070,7 @@ export function createDispatch(ctx: DispatchContext) {
         if (task.status === "queued") {
           // Task was already re-enqueued (e.g., after timeout), just clear the slot
           log.info({ taskId: task.id, employeeId: task.employeeId }, "Task already re-enqueued, clearing slot from cancel response");
-          if (task.employeeId) {
-            setQueueTask(task.employeeId, null, null);
-            dispatchNextQueuedTask(task.employeeId);
-          }
+          releaseTaskSlots(task.id);
           break;
         }
         task.status = "cancelled";
@@ -1072,16 +1080,7 @@ export function createDispatch(ctx: DispatchContext) {
         log.info({ taskId: task.id, employeeId: task.employeeId }, "Task cancelled");
         upsertTask(task);
         postTaskWebhook(task, "task.cancelled");
-        if (task.employeeId) {
-          const isMainSlot = task.targetMode !== "queue";
-          if (isMainSlot) {
-            setMainTask(task.employeeId, null, null);
-            dispatchNextMainQueuedTask(task.employeeId);
-          } else {
-            setQueueTask(task.employeeId, null, null);
-            dispatchNextQueuedTask(task.employeeId);
-          }
-        }
+        releaseTaskSlots(task.id);
         break;
     }
   }
@@ -1092,6 +1091,9 @@ export function createDispatch(ctx: DispatchContext) {
       return { ok: false, code: "not_found", message: "任务不存在。" };
     }
     if (TERMINAL_STATUSES.has(task.status)) {
+      if (releaseTaskSlots(task.id)) {
+        return { ok: true, task };
+      }
       return { ok: false, code: "already_terminal", message: `任务已处于终态 ${task.status}，无法取消。` };
     }
     if (task.status === "queued") {
@@ -1116,6 +1118,7 @@ export function createDispatch(ctx: DispatchContext) {
       task.summary = "任务已取消。";
       upsertTask(task);
       postTaskWebhook(task, "task.cancelled");
+      releaseTaskSlots(task.id);
       return { ok: true, task };
     }
     if (!task.employeeId) {

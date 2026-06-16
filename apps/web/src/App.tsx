@@ -374,6 +374,7 @@ function formatElapsed(ms: number): string {
 
 function SlotStrip({ label, task, onCancel }: { label: string; task: TaskRecord | undefined; onCancel: (id: string) => void }) {
   const isActive = task && (task.status === "running" || task.status === "accepted" || task.status === "dispatched");
+  const isStaleSlot = task && !isActive && (task.status === "queued" || isTerminalStatus(task.status));
   const startedAt = task?.startedAt;
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -395,6 +396,11 @@ function SlotStrip({ label, task, onCancel }: { label: string; task: TaskRecord 
             取消
           </button>
         </>
+      ) : null}
+      {isStaleSlot ? (
+        <button className="secondary-button danger-button" onClick={() => onCancel(task.id)}>
+          清理
+        </button>
       ) : null}
     </div>
   );

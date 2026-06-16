@@ -13,6 +13,7 @@ import {
   CLAUDE_HOOKS_ENABLED,
   CLAUDE_HOOK_SETTINGS,
   CLAUDE_MISSING_CONVERSATION_PATTERN,
+  CLAUDE_SESSION_BUSY_PATTERN,
   MAX_ERROR_TAIL,
   type ActiveTask,
   type AgentState,
@@ -261,14 +262,14 @@ export function shouldRetryWithFreshClaudeSession(
   findActiveTask: RunnerDeps["findActiveTask"],
 ) {
   const task = findActiveTask(taskId);
+  const isMissingConversation = task ? CLAUDE_MISSING_CONVERSATION_PATTERN.test(task.stderrTail) : false;
+  const isSessionBusy = task ? CLAUDE_SESSION_BUSY_PATTERN.test(task.stderrTail) : false;
   return (
     exitCode !== 0 &&
     task !== null &&
-    task.targetMode !== "queue" &&
-    !task.resumingSession &&
     !task.cancelRequested &&
     !task.retriedWithFreshSession &&
-    CLAUDE_MISSING_CONVERSATION_PATTERN.test(task.stderrTail)
+    (isSessionBusy || (!task.resumingSession && task.targetMode !== "queue" && isMissingConversation))
   );
 }
 
@@ -399,7 +400,7 @@ export function runClaudeTask(taskId: string, prompt: string, workspace: string 
       const newState = resetClaudeSession();
       setAgentState(newState);
       fresh.claudeSessionId = newState.claudeSessionId;
-      emitOutput(taskId, "stdout", "\n[agent] Claude resume session was missing. Starting a new session and retrying this task.\n");
+      emitOutput(taskId, "stdout", "\n[agent] Claude session is unavailable or already in use. Starting a new session and retrying this task.\n");
       runClaudeTask(taskId, prompt, workspace, deps);
       return;
     }

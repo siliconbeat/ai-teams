@@ -366,6 +366,27 @@ export async function hydrateState(db: Database, state: StateStore, defaultTimeo
     }
   }
 
+  for (const employee of state.employees.values()) {
+    let changed = false;
+    const mainTask = employee.mainTaskId ? state.tasks.get(employee.mainTaskId) : null;
+    if (employee.mainTaskId && (!mainTask || TERMINAL_STATUSES.has(mainTask.status) || mainTask.status === "queued")) {
+      employee.mainTaskId = null;
+      employee.mainTaskPrompt = null;
+      changed = true;
+    }
+
+    const queueTask = employee.queueTaskId ? state.tasks.get(employee.queueTaskId) : null;
+    if (employee.queueTaskId && (!queueTask || TERMINAL_STATUSES.has(queueTask.status) || queueTask.status === "queued")) {
+      employee.queueTaskId = null;
+      employee.queueTaskPrompt = null;
+      changed = true;
+    }
+
+    if (changed) {
+      await persistEmployee(db, employee);
+    }
+  }
+
   // Only load logs for hydrated tasks
   if (hydratedIds.size > 0) {
     const idList = [...hydratedIds];
