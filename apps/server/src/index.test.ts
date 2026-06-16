@@ -800,7 +800,7 @@ describe("POST /api/tasks/:taskId/cancel — 取消/终止任务", () => {
     expect(response.status).toBe(404);
   });
 
-  it("409 取消已完成的任务", async () => {
+  it("取消已完成的任务保持幂等成功", async () => {
     const agent = await connectAgent("alice");
     const dispatchPromise = waitForAgentDispatch(agent);
 
@@ -818,10 +818,12 @@ describe("POST /api/tasks/:taskId/cancel — 取消/终止任务", () => {
       method: "POST",
       headers: { authorization: `Bearer ${TOKEN}` },
     });
-    expect(cancelRes.status).toBe(409);
+    expect(cancelRes.status).toBe(200);
+    const body = await cancelRes.json() as { status: string };
+    expect(body.status).toBe("completed");
   });
 
-  it("409 取消已取消的任务", async () => {
+  it("重复取消已取消的任务保持幂等成功", async () => {
     const createRes = await fetch(`${httpBaseUrl}/api/tasks`, {
       method: "POST",
       headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
@@ -838,7 +840,9 @@ describe("POST /api/tasks/:taskId/cancel — 取消/终止任务", () => {
       method: "POST",
       headers: { authorization: `Bearer ${TOKEN}` },
     });
-    expect(secondCancel.status).toBe(409);
+    expect(secondCancel.status).toBe(200);
+    const body = await secondCancel.json() as { status: string };
+    expect(body.status).toBe("cancelled");
   });
 });
 

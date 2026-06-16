@@ -722,9 +722,11 @@ export default function App() {
   const activeTasksByEmployee = useMemo(() => {
     const map: Record<string, { main?: TaskRecord; queue?: TaskRecord }> = {};
     for (const employee of employeeList) {
+      const mainTask = employee.mainTaskId ? tasks[employee.mainTaskId] : undefined;
+      const queueTask = employee.queueTaskId ? tasks[employee.queueTaskId] : undefined;
       map[employee.id] = {
-        main: employee.mainTaskId ? tasks[employee.mainTaskId] : undefined,
-        queue: employee.queueTaskId ? tasks[employee.queueTaskId] : undefined,
+        main: mainTask && ACTIVE_STATUSES.has(mainTask.status) ? mainTask : undefined,
+        queue: queueTask && ACTIVE_STATUSES.has(queueTask.status) ? queueTask : undefined,
       };
     }
     return map;
@@ -1427,11 +1429,33 @@ export default function App() {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       return;
     }
+    const task = tasks[taskId];
+    if (task && (task.status === "queued" || isTerminalStatus(task.status))) {
+      setEmployees((current) => {
+        let changed = false;
+        const next: Record<string, EmployeeSnapshot> = {};
+        for (const [employeeId, employee] of Object.entries(current)) {
+          if (employee.mainTaskId !== taskId && employee.queueTaskId !== taskId) {
+            next[employeeId] = employee;
+            continue;
+          }
+          changed = true;
+          next[employeeId] = {
+            ...employee,
+            mainTaskId: employee.mainTaskId === taskId ? null : employee.mainTaskId,
+            mainTaskPrompt: employee.mainTaskId === taskId ? null : employee.mainTaskPrompt,
+            queueTaskId: employee.queueTaskId === taskId ? null : employee.queueTaskId,
+            queueTaskPrompt: employee.queueTaskId === taskId ? null : employee.queueTaskPrompt,
+          };
+        }
+        return changed ? next : current;
+      });
+    }
     const payload: LeaderToServerMessage = { type: "task.cancel", taskId };
     webCryptoEncrypt(JSON.stringify(payload)).then((encrypted) => {
       wsRef.current?.send(encrypted);
     });
-  }, []);
+  }, [tasks]);
 
   const prioritizeTask = useCallback(async (taskId: string) => {
     try {

@@ -1091,10 +1091,8 @@ export function createDispatch(ctx: DispatchContext) {
       return { ok: false, code: "not_found", message: "任务不存在。" };
     }
     if (TERMINAL_STATUSES.has(task.status)) {
-      if (releaseTaskSlots(task.id)) {
-        return { ok: true, task };
-      }
-      return { ok: false, code: "already_terminal", message: `任务已处于终态 ${task.status}，无法取消。` };
+      releaseTaskSlots(task.id);
+      return { ok: true, task };
     }
     if (task.status === "queued") {
       if (task.employeeId) {
