@@ -1,6 +1,6 @@
 {
   "name": "@csdwd/ai-teams-agent",
-  "version": "0.7.0",
+  "version": "0.8.1",
   "description": "AI Teams agent — connects to server via WebSocket, spawns Claude CLI to execute tasks",
   "type": "module",
   "bin": {
