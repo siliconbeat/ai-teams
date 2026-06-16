@@ -25,6 +25,7 @@ import { App as AntApp, Avatar, ConfigProvider, theme } from "antd";
 import { Bubble, ThoughtChain, Sender, Suggestion } from "@ant-design/x";
 import type { BubbleProps } from "@ant-design/x";
 import { XMarkdown } from "@ant-design/x-markdown";
+import { BorderBeam } from "border-beam";
 
 // ---------------------------------------------------------------------------
 // Web Crypto E2E decryption (AES-256-GCM)
@@ -427,6 +428,9 @@ const EmployeeCard = memo(function EmployeeCard({
   const activeTask = mainTask ?? queueTask;
   const taskStatus = activeTask?.status ?? displayTask?.status ?? "idle";
   const presence = getAgentPresence(employee, activeTask);
+  const terminalWindow = (
+    <pre className="log-window" ref={logRef} dangerouslySetInnerHTML={{ __html: renderTerminalHtml(terminalText) }} />
+  );
 
   useEffect(() => {
     if (prevTerminalText.current !== terminalText) {
@@ -491,7 +495,11 @@ const EmployeeCard = memo(function EmployeeCard({
       </div>
       <SlotStrip label="主任务" task={mainTask} onCancel={cancelTask} />
       <SlotStrip label="队列" task={queueTask} onCancel={cancelTask} />
-      <pre className="log-window" ref={logRef} dangerouslySetInnerHTML={{ __html: renderTerminalHtml(terminalText) }} />
+      {presence.className === "busy" ? (
+        <BorderBeam className="log-window-beam" size="md" colorVariant="sunset" theme="dark" borderRadius={10}>
+          {terminalWindow}
+        </BorderBeam>
+      ) : terminalWindow}
     </article>
   );
 }, (prev, next) => {
