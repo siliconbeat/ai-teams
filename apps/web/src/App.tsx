@@ -422,7 +422,6 @@ const EmployeeCard = memo(function EmployeeCard({
   onPauseQueue: (employeeId: string) => void;
 }) {
   const logRef = useRef<HTMLPreElement | null>(null);
-  const prevTerminalText = useRef(terminalText);
   const [menuOpen, setMenuOpen] = useState(false);
 
   const activeTask = mainTask ?? queueTask;
@@ -433,11 +432,11 @@ const EmployeeCard = memo(function EmployeeCard({
   );
 
   useEffect(() => {
-    if (prevTerminalText.current !== terminalText) {
-      prevTerminalText.current = terminalText;
+    const frame = requestAnimationFrame(() => {
       const el = logRef.current;
       if (el) el.scrollTop = el.scrollHeight;
-    }
+    });
+    return () => cancelAnimationFrame(frame);
   }, [terminalText]);
 
   return (
@@ -747,6 +746,29 @@ export default function App() {
     }
     return map;
   }, [activeTasksByEmployee, employeeList, latestTasksByEmployee]);
+
+  const agentStatusStats = useMemo(() => {
+    let online = 0;
+    let offline = 0;
+    let abnormal = 0;
+    for (const employee of employeeList) {
+      const displayTask = displayTasksByEmployee[employee.id];
+      const isAbnormal =
+        employee.queuePaused ||
+        employee.consecutiveQueueFailures >= 5 ||
+        displayTask?.status === "failed" ||
+        displayTask?.status === "timeout" ||
+        displayTask?.status === "cancelled";
+      if (isAbnormal) {
+        abnormal += 1;
+      } else if (employee.status === "offline") {
+        offline += 1;
+      } else {
+        online += 1;
+      }
+    }
+    return { online, offline, abnormal };
+  }, [displayTasksByEmployee, employeeList]);
 
   const tasksByEmployee = useMemo(() => {
     const map = new Map<string, TaskRecord[]>();
@@ -1879,6 +1901,11 @@ export default function App() {
                 <p>{connectionError ?? (connected ? "已连接服务端" : "正在等待服务端连接")}</p>
               </div>
               <div className="board-header-indicators">
+                <div className="agent-status-summary" aria-label="Agent 状态统计">
+                  <span className="agent-status-count online">在线 <strong>{agentStatusStats.online}</strong></span>
+                  <span className="agent-status-count offline">离线 <strong>{agentStatusStats.offline}</strong></span>
+                  <span className="agent-status-count abnormal">异常 <strong>{agentStatusStats.abnormal}</strong></span>
+                </div>
                 <QueueIndicator tasks={tasks} />
                 <div className={`status-pill ${connected ? "online" : "offline"}`}>
                   {connected ? "Leader Online" : "Leader Offline"}

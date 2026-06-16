@@ -546,6 +546,51 @@ a.nav-item {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.agent-status-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.agent-status-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 58px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  color: #92a6c8;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.agent-status-count strong {
+  color: #f3f7ff;
+  font-size: 12px;
+}
+
+.agent-status-count.online {
+  background: rgba(103, 232, 160, 0.1);
+  color: #9df6b5;
+}
+
+.agent-status-count.offline {
+  background: rgba(245, 168, 168, 0.1);
+  color: #f5a8a8;
+}
+
+.agent-status-count.abnormal {
+  background: rgba(250, 173, 20, 0.12);
+  color: #ffd28a;
 }
 
 .queue-indicator {
