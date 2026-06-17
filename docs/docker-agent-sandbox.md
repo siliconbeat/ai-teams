@@ -20,7 +20,7 @@ pnpm dev:server
 pnpm dev:web
 ```
 
-开发模式 Server 使用 `dev-token`，并且默认开放 Agent 注册。
+开发模式 Server 使用 `dev-token`。Agent 仍需要先在 Web「员工管理」里添加或批准，并复制生成的 Agent Token。
 
 生产模式需要显式设置共享 Token：
 
@@ -42,19 +42,13 @@ cp docker/agent.env.example docker/agent.env
 开发模式最少保留：
 
 ```env
-AI_TEAMS_AUTH_TOKEN=dev-token
+AI_TEAMS_AGENT_TOKEN=从员工管理复制的-agent-token
 SERVER_URL=ws://host.docker.internal:3789
 EMPLOYEE_ID=alice
 EMPLOYEE_NAME=Alice
 RUNNER_MODE=claude
 CLAUDE_PERMISSION_MODE=bypassPermissions
 AI_TEAMS_AGENT_WORKSPACE=./sandbox/agent-alice
-```
-
-生产审批模式还要设置：
-
-```env
-AI_TEAMS_AGENT_TOKEN=从员工管理复制的-agent-token
 ```
 
 ## 3. 构建并启动 Agent 容器

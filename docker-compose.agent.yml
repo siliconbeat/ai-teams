@@ -9,7 +9,6 @@ services:
     container_name: ai-teams-agent-alice
     restart: unless-stopped
     environment:
-      AI_TEAMS_AUTH_TOKEN: ${AI_TEAMS_AUTH_TOKEN:-dev-token}
       AI_TEAMS_AGENT_TOKEN: ${AI_TEAMS_AGENT_TOKEN:-}
       SERVER_URL: ${SERVER_URL:-ws://host.docker.internal:3789}
       EMPLOYEE_ID: ${EMPLOYEE_ID:-alice}

@@ -2,6 +2,7 @@
 .github
 .idea
 .superpowers
+docs/superpowers
 .playwright-mcp
 .claude
 .ai-teams

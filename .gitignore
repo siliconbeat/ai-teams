@@ -32,13 +32,16 @@ pnpm-debug.log*
 .agent-state*.json
 .ai-teams/
 .local-ai-teams-data/
+docs/superpowers/
 sandbox/
 
 # Tool caches
+.claude/
 .cache/
+.playwright-mcp/
+.superpowers/
 .vite/
 .turbo/
 
 # OS files
 .DS_Store
-.superpowers/

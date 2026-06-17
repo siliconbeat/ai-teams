@@ -37,13 +37,19 @@
 # 安装依赖
 pnpm install
 
-# 开发模式（内置 dev-token 认证）
-pnpm dev:all
+# 启动 Server 和 Web（Web 使用 dev-token 登录）
+pnpm dev:server
+pnpm dev:web
 ```
 
-`dev:all` 会同时启动：
+然后打开 `http://localhost:5173`，使用 `dev-token` 登录，在「员工管理」里添加 Agent 并复制生成的 Agent Token，再启动 Agent：
+
+```bash
+AI_TEAMS_AGENT_TOKEN=<agent-token> EMPLOYEE_ID=alice EMPLOYEE_NAME=Alice DEFAULT_WORKSPACE=$PWD pnpm dev:agent:alice
+```
+
+开发服务地址：
 - Server — `http://localhost:3789`
-- Agent (alice) — 连接 Server，RUNNER_MODE=claude
 - Web — `http://localhost:5173`
 
 如果需要把真实 Agent 放进 Docker 沙箱，只让 Claude Code CLI 访问一个专用 workspace，请参考 [Docker Agent 沙箱运行](docs/docker-agent-sandbox.md)。
@@ -660,7 +666,7 @@ POST /api/missions/:missionId/cancel
 pnpm dev:server          # Server on :3789
 pnpm dev:agent:alice     # Agent with EMPLOYEE_ID=alice
 pnpm dev:web             # Web on :5173
-pnpm dev:all             # 全部启动
+pnpm dev:all             # 全部启动；Agent 仍需要预先在 Web 端生成并匹配 Agent Token
 ```
 
 开发模式自动使用 `dev-token`。
@@ -670,7 +676,11 @@ pnpm dev:all             # 全部启动
 ```bash
 export AI_TEAMS_AUTH_TOKEN=your-secret-token
 pnpm build
-pnpm start:all
+pnpm start:server
+pnpm start:web
+
+# 先在 Web「员工管理」生成并复制对应 Agent Token
+AI_TEAMS_AGENT_TOKEN=<agent-token> pnpm start:agent:alice
 ```
 
 生产模式默认启用 Agent 审批。先在 Web「员工管理」里添加或批准 Agent，复制生成的 Agent Token，再在对应 Agent 进程配置 `AI_TEAMS_AGENT_TOKEN` 后启动。
@@ -678,16 +688,16 @@ pnpm start:all
 ### 多员工
 
 ```bash
-AI_TEAMS_AUTH_TOKEN=dev-token EMPLOYEE_ID=alice EMPLOYEE_NAME=Alice RUNNER_MODE=claude pnpm --filter @ai-teams/agent dev
-AI_TEAMS_AUTH_TOKEN=dev-token EMPLOYEE_ID=bob EMPLOYEE_NAME=Bob RUNNER_MODE=fake pnpm --filter @ai-teams/agent dev
+AI_TEAMS_AGENT_TOKEN=<alice-agent-token> EMPLOYEE_ID=alice EMPLOYEE_NAME=Alice RUNNER_MODE=claude pnpm --filter @csdwd/ai-teams-agent dev
+AI_TEAMS_AGENT_TOKEN=<bob-agent-token> EMPLOYEE_ID=bob EMPLOYEE_NAME=Bob RUNNER_MODE=fake pnpm --filter @csdwd/ai-teams-agent dev
 ```
 
 ### 环境变量
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `AI_TEAMS_AUTH_TOKEN` | — | 共享认证 Token（生产必填） |
-| `AI_TEAMS_AGENT_TOKEN` | — | Agent 独立 Token（生产审批模式下必填） |
+| `AI_TEAMS_AUTH_TOKEN` | — | Server/Web/API 共享认证 Token（生产必填，不配置到 Agent） |
+| `AI_TEAMS_AGENT_TOKEN` | — | Agent 独立 Token。先在 Web「员工管理」生成，再配置到对应 Agent |
 | `AGENT_REGISTRATION_MODE` | `approval` | Agent 注册模式：`approval` 需要 Web 批准，`open` 用于本地开发 |
 | `AI_TEAMS_SERVER_PORT` | `3789` | 服务端口 |
 | `SERVER_URL` | `ws://localhost:3789` | Agent 连接地址 |
@@ -727,7 +737,7 @@ export DATABASE_URL="postgresql://user:password@db.example.com:5432/ai_teams?ssl
 
 ```bash
 DATABASE_URL="postgresql://user:password@localhost:5432/ai_teams" \
-AI_TEAMS_AUTH_TOKEN=your-secret \
+AI_TEAMS_AUTH_TOKEN=<server-auth-token> \
 ai-teams-server
 ```
 
@@ -743,10 +753,10 @@ Server 使用 Pino 结构化 JSON 日志，默认输出到 stdout。
 
 ```bash
 # 同时输出到 stdout 和文件
-ai-teams-server --token xxx --log-dir ./logs
+ai-teams-server --token <server-auth-token> --log-dir ./logs
 
 # 环境变量方式
-LOG_DIR=./logs AI_TEAMS_AUTH_TOKEN=xxx ai-teams-server
+LOG_DIR=./logs AI_TEAMS_AUTH_TOKEN=<server-auth-token> ai-teams-server
 ```
 
 日志文件：`$LOG_DIR/server.log`
@@ -754,10 +764,10 @@ LOG_DIR=./logs AI_TEAMS_AUTH_TOKEN=xxx ai-teams-server
 ### 调整日志级别
 
 ```bash
-ai-teams-server --token xxx --log-level debug
+ai-teams-server --token <server-auth-token> --log-level debug
 
 # 或环境变量
-LOG_LEVEL=debug AI_TEAMS_AUTH_TOKEN=xxx ai-teams-server
+LOG_LEVEL=debug AI_TEAMS_AUTH_TOKEN=<server-auth-token> ai-teams-server
 ```
 
 ### 查看日志

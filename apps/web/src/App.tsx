@@ -2372,7 +2372,7 @@ export default function App() {
                       <input
                         value={scheduleForm.workspace}
                         onChange={(e) => setScheduleForm((f) => ({ ...f, workspace: e.target.value }))}
-                        placeholder="/Users/junhang/workspace/project"
+                        placeholder="/path/to/workspace"
                       />
                     </label>
                     <label className="field">
@@ -2774,7 +2774,7 @@ export default function App() {
                         <input
                           value={draft.workspace}
                           onChange={(e) => setDraft((c) => ({ ...c, workspace: e.target.value }))}
-                          placeholder="/Users/junhang/workspace/project"
+                          placeholder="/path/to/workspace"
                           style={{ width: "100%", padding: "4px 8px", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 6, color: "#eef4ff", fontSize: 12 }}
                         />
                       </Sender.Header>

@@ -281,9 +281,10 @@ td code { background: none; padding: 0; }
 cd ai-teams
 pnpm install</code></pre>
 
-    <h3>2. 一键启动（开发模式）</h3>
-    <pre><code class="language-bash">pnpm dev:all</code></pre>
-    <p>这将同时启动 Server（:3789）、Agent Alice 和 Web 控制台（:5173），使用 <code>dev-token</code> 自动认证。</p>
+    <h3>2. 启动 Server 和 Web（开发模式）</h3>
+    <pre><code class="language-bash">pnpm dev:server
+pnpm dev:web</code></pre>
+    <p>Web 控制台使用 <code>dev-token</code> 登录。Agent 需要先在「员工管理」里添加或批准，并复制生成的 Agent Token 后再启动。</p>
     <div class="note tip">
       <p><strong>提示：</strong>开发模式下 Agent 需要 <code>claude</code> CLI 已安装且登录。如无 Claude CLI，可使用 <code>RUNNER_MODE=fake</code> 模拟。</p>
     </div>
@@ -374,19 +375,19 @@ export AI_TEAMS_AUTH_TOKEN="your-secret-token"
 # 启动 Server（守护进程模式）
 ai-teams-server start --token "your-secret-token" --port 3789
 
-# 启动 Agent（守护进程模式）
-ai-teams-agent start --server ws://localhost:3789 --token "your-secret-token" \
+# 启动 Agent（守护进程模式，先在 Web 端复制 Agent Token）
+ai-teams-agent start --server ws://localhost:3789 --agent-token "your-agent-token" \
   --id alice --name "Alice"
 
 # 或使用 pnpm（开发模式）
 pnpm start:server
-pnpm start:agent:alice
+AI_TEAMS_AGENT_TOKEN="your-agent-token" pnpm start:agent:alice
 
 # 启动 Web 控制台
 pnpm start:web</code></pre>
 
-    <h3>一键全部启动</h3>
-    <pre><code class="language-bash">AI_TEAMS_AUTH_TOKEN="your-secret-token" pnpm start:all</code></pre>
+    <h3>全部启动</h3>
+    <pre><code class="language-bash">AI_TEAMS_AUTH_TOKEN="your-secret-token" AI_TEAMS_AGENT_TOKEN="your-agent-token" pnpm start:all</code></pre>
 
     <h3>Agent 交互式配置</h3>
     <p>首次运行 Agent 会自动进入配置向导：</p>
@@ -458,7 +459,8 @@ npx @csdwd/ai-teams-agent start</code></pre>
         <table>
           <tr><th>参数</th><th>说明</th></tr>
           <tr><td><code>--server &lt;url&gt;</code></td><td>Server WebSocket 地址</td></tr>
-          <tr><td><code>--token &lt;token&gt;</code></td><td>认证 Token</td></tr>
+          <tr><td><code>--agent-token &lt;token&gt;</code></td><td>Web 端生成的 Agent Token</td></tr>
+          <tr><td><code>--token &lt;token&gt;</code></td><td>Agent Token（兼容旧参数）</td></tr>
           <tr><td><code>--id &lt;id&gt;</code></td><td>Agent 唯一标识</td></tr>
           <tr><td><code>--name &lt;name&gt;</code></td><td>显示名称</td></tr>
           <tr><td><code>--workspace &lt;dir&gt;</code></td><td>默认工作目录</td></tr>
@@ -471,7 +473,7 @@ npx @csdwd/ai-teams-agent start</code></pre>
     </div>
 
     <div class="note tip">
-      <p><strong>配置持久化：</strong>首次使用 <code>start</code> 时传入的参数（token、server、id 等）会自动保存到配置文件。后续使用 <code>start</code>、<code>restart</code> 无需重复指定。</p>
+      <p><strong>配置持久化：</strong>首次使用 <code>start</code> 时传入的参数（agent-token、server、id 等）会自动保存到配置文件。后续使用 <code>start</code>、<code>restart</code> 无需重复指定。</p>
       <ul>
         <li>Server 配置：<code>~/.ai-teams/server-config.json</code></li>
         <li>Agent 配置：<code>~/.ai-teams/config.json</code></li>
@@ -483,11 +485,11 @@ npx @csdwd/ai-teams-agent start</code></pre>
 ai-teams-server start --token "my-secret"
 
 # 启动 Agent Alice（后台守护进程）
-ai-teams-agent start --server ws://localhost:3789 --token "my-secret" \
+ai-teams-agent start --server ws://localhost:3789 --agent-token "alice-agent-token" \
   --id alice --name "Alice" --workspace ~/projects/project-a
 
 # 启动 Agent Bob
-ai-teams-agent start --server ws://localhost:3789 --token "my-secret" \
+ai-teams-agent start --server ws://localhost:3789 --agent-token "bob-agent-token" \
   --id bob --name "Bob" --workspace ~/projects/project-b \
   --labels "backend,python"
 
@@ -534,7 +536,7 @@ ai-teams-agent restart  # 应用更新</code></pre>
     <h3><code>Agent</code></h3>
     <table>
       <tr><th>变量</th><th>默认值</th><th>说明</th></tr>
-      <tr><td><code>AI_TEAMS_AUTH_TOKEN</code></td><td><em>必填</em></td><td>认证 Token（需与 Server 一致）</td></tr>
+      <tr><td><code>AI_TEAMS_AGENT_TOKEN</code></td><td><em>必填</em></td><td>Web 端生成的 Agent Token</td></tr>
       <tr><td><code>SERVER_URL</code></td><td><code>ws://localhost:3789</code></td><td>Server WebSocket 地址</td></tr>
       <tr><td><code>EMPLOYEE_ID</code></td><td><code>emp_local</code></td><td>Agent 唯一标识</td></tr>
       <tr><td><code>EMPLOYEE_NAME</code></td><td><code>Local Agent</code></td><td>显示名称</td></tr>
@@ -698,7 +700,7 @@ ai-teams-agent restart  # 应用更新</code></pre>
 
     <!-- WebSocket -->
     <h2 id="websocket">WebSocket 协议</h2>
-    <p>两个 WebSocket 通道均需要 Token 认证（Header 或 <code>?token=</code> 参数）。未授权连接将被关闭（code 1008）。</p>
+    <p>Leader 通道使用 Server/Web/API Bearer Token（Header 或 <code>?token=</code> 参数）。Agent 通道在 <code>agent.register</code> 消息中使用 Web 端生成的 Agent Token 认证；未授权连接将被关闭（code 1008）。</p>
 
     <h3>/ws/agent — Agent 通道</h3>
     <p>Agent 连接此通道，双向通信：接收任务、上报状态。</p>
@@ -1074,7 +1076,7 @@ def verify_signature(body: bytes, signature: str, secret: str) -> bool:
     <h3>常用命令</h3>
     <pre><code class="language-bash"># 启动（后台运行）
 ai-teams-server start --token "your-token"
-ai-teams-agent start --server ws://localhost:3789 --token "your-token"
+ai-teams-agent start --server ws://localhost:3789 --agent-token "your-agent-token"
 
 # 查看状态
 ai-teams-server status    # → running (PID 12345)
