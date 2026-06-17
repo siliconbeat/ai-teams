@@ -220,7 +220,9 @@ td code { background: none; padding: 0; }
     <a href="#data-schemas">数据模型</a>
     <div class="nav-section">使用</div>
     <a href="#agent-guide">Agent 使用</a>
+    <a href="#agent-registration">Agent 注册</a>
     <a href="#web-console">Web 控制台</a>
+    <a href="#ai-leader">AI Leader</a>
     <a href="#advanced">高级功能</a>
     <div class="nav-section">运维</div>
     <a href="#daemon">守护进程</a>
@@ -247,7 +249,7 @@ td code { background: none; padding: 0; }
 
   <div class="content">
 
-    <p>AI Teams 是一个三方协作系统：<strong>人类 Leader</strong> 通过 Web 控制台或 REST API 向 <strong>Server</strong> 提交任务，Server 将任务智能调度给多个 <strong>AI Agent</strong>（运行 Claude CLI）执行。支持任务队列、负载均衡、标签路由、优先级调度、端到端加密和实时监控。</p>
+    <p>AI Teams 是一个三方协作系统：<strong>人类 Leader</strong> 通过 Web 控制台或 REST API 向 <strong>Server</strong> 提交任务，Server 将任务智能调度给多个 <strong>AI Agent</strong>（运行 Claude CLI）执行。支持任务队列、双槽位并行、Agent Token 注册、AI Leader Mission、定时任务、端到端加密和实时监控。</p>
 
     <div class="card-grid">
       <div class="card">
@@ -258,7 +260,7 @@ td code { background: none; padding: 0; }
       <div class="card">
         <div class="card-icon">&#x1F4CA;</div>
         <h4>实时监控</h4>
-        <p>Web 控制台实时展示 Agent 状态、任务输出、统计分析，支持移动端。</p>
+        <p>Web 控制台实时展示 Agent 状态、Claude 版本、权限模式、任务输出和异常统计。</p>
       </div>
       <div class="card">
         <div class="card-icon">&#x1F512;</div>
@@ -269,6 +271,11 @@ td code { background: none; padding: 0; }
         <div class="card-icon">&#x1F504;</div>
         <h4>高可用</h4>
         <p>守护进程自动重启、Agent 断线任务恢复（最多重试 3 次）、心跳检测、Webhook 回调。</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">&#x1F9ED;</div>
+        <h4>AI Leader</h4>
+        <p>把总目标拆分为多轮 Agent 子任务，并在风险或失败节点请求人工确认。</p>
       </div>
     </div>
 
@@ -291,6 +298,14 @@ pnpm dev:web</code></pre>
 
     <h3>3. 访问控制台</h3>
     <p>浏览器打开 <code>http://localhost:5173</code>，输入 token <code>dev-token</code> 即可进入。</p>
+
+    <h3>4. 添加并启动 Agent</h3>
+    <p>进入「员工管理」，添加 Agent 并复制生成的 Agent Token。Agent Token 与员工 ID 绑定，只有两者匹配才会注册成功。</p>
+    <pre><code class="language-bash">AI_TEAMS_AGENT_TOKEN="复制的-agent-token" \
+EMPLOYEE_ID=alice \
+EMPLOYEE_NAME=Alice \
+DEFAULT_WORKSPACE=$PWD \
+pnpm dev:agent:alice</code></pre>
 
     <!-- Architecture -->
     <h2 id="architecture">架构概览</h2>
@@ -517,7 +532,7 @@ ai-teams-agent restart  # 应用更新</code></pre>
     <h3><code>Server</code></h3>
     <table>
       <tr><th>变量</th><th>默认值</th><th>说明</th></tr>
-      <tr><td><code>AI_TEAMS_AUTH_TOKEN</code></td><td><em>必填</em></td><td>共享认证 Token</td></tr>
+      <tr><td><code>AI_TEAMS_AUTH_TOKEN</code></td><td><em>必填</em></td><td>Server/Web/API 共享认证 Token，不配置到 Agent</td></tr>
       <tr><td><code>AI_TEAMS_SERVER_PORT</code> / <code>PORT</code></td><td><code>3789</code></td><td>服务端口</td></tr>
       <tr><td><code>HOST</code></td><td><code>0.0.0.0</code></td><td>绑定地址</td></tr>
       <tr><td><code>DATA_DIR</code></td><td><code>./data</code></td><td>数据目录</td></tr>
@@ -526,6 +541,8 @@ ai-teams-agent restart  # 应用更新</code></pre>
       <tr><td><code>DEFAULT_TIMEOUT_SEC</code></td><td><code>1800</code></td><td>默认任务超时（秒）</td></tr>
       <tr><td><code>DISCONNECT_GRACE_MS</code></td><td><code>15000</code></td><td>断线宽限期（ms）</td></tr>
       <tr><td><code>MAX_LOG_CHUNKS_PER_TASK</code></td><td><code>400</code></td><td>每任务最大日志块数</td></tr>
+      <tr><td><code>MAX_HYDRATED_TASKS</code></td><td><code>200</code></td><td>启动时加载的已结束任务上限</td></tr>
+      <tr><td><code>MISSION_POLL_MS</code></td><td><code>500</code></td><td>AI Leader Mission 编排轮询间隔</td></tr>
       <tr><td><code>LOG_LEVEL</code></td><td><code>info</code></td><td>日志级别：trace / debug / info / warn / error</td></tr>
       <tr><td><code>LOG_DIR</code></td><td>-</td><td>日志文件目录（不设则仅 stdout）</td></tr>
       <tr><td><code>AI_TEAMS_ENCRYPTION_KEY</code></td><td>-</td><td>E2E 加密密钥（64 位 hex = 32 字节）</td></tr>
@@ -541,8 +558,10 @@ ai-teams-agent restart  # 应用更新</code></pre>
       <tr><td><code>EMPLOYEE_ID</code></td><td><code>emp_local</code></td><td>Agent 唯一标识</td></tr>
       <tr><td><code>EMPLOYEE_NAME</code></td><td><code>Local Agent</code></td><td>显示名称</td></tr>
       <tr><td><code>EMPLOYEE_LABELS</code></td><td>-</td><td>逗号分隔的标签（如 <code>backend,python</code>）</td></tr>
+      <tr><td><code>EMPLOYEE_WEIGHT</code></td><td><code>1</code></td><td>队列任务加权分配权重</td></tr>
       <tr><td><code>RUNNER_MODE</code></td><td><code>claude</code></td><td>执行模式：<code>claude</code> 或 <code>fake</code></td></tr>
       <tr><td><code>DEFAULT_WORKSPACE</code></td><td>当前目录</td><td>默认工作目录</td></tr>
+      <tr><td><code>CLAUDE_PERMISSION_MODE</code></td><td><code>bypassPermissions</code></td><td>Agent 默认 Claude 权限模式</td></tr>
       <tr><td><code>RECONNECT_MS</code></td><td><code>5000</code></td><td>重连间隔（ms）</td></tr>
       <tr><td><code>AI_TEAMS_ENCRYPTION_KEY</code></td><td>-</td><td>E2E 加密密钥（需与 Server 一致）</td></tr>
     </table>
@@ -664,6 +683,14 @@ ai-teams-agent restart  # 应用更新</code></pre>
 
     <div class="endpoint">
       <div class="endpoint-header">
+        <span class="method post">POST</span>
+        <span class="endpoint-path">/api/tasks/:taskId/prioritize</span>
+      </div>
+      <p class="endpoint-desc">将排队中的共享队列任务提升到队列最前面。仅对 <code>status=queued</code> 且 <code>targetMode=queue</code> 的任务有效。</p>
+    </div>
+
+    <div class="endpoint">
+      <div class="endpoint-header">
         <span class="method delete">DELETE</span>
         <span class="endpoint-path">/api/tasks/:taskId</span>
       </div>
@@ -698,6 +725,29 @@ ai-teams-agent restart  # 应用更新</code></pre>
       <tr><td><span class="method post">POST</span></td><td><code>/api/schedules/:id/trigger</code></td><td>手动触发一次执行</td></tr>
     </table>
 
+    <h3>Agent 注册与管理 API</h3>
+    <table>
+      <tr><th>方法</th><th>路径</th><th>说明</th></tr>
+      <tr><td><span class="method get">GET</span></td><td><code>/api/agent-registry</code></td><td>列出已批准和待审批的 Agent 注册记录</td></tr>
+      <tr><td><span class="method post">POST</span></td><td><code>/api/agent-registry</code></td><td>预注册 Agent 并生成 Agent Token</td></tr>
+      <tr><td><span class="method post">POST</span></td><td><code>/api/agent-registry/:employeeId/approve</code></td><td>批准待审 Agent，并生成或更新 Agent Token</td></tr>
+      <tr><td><span class="method delete">DELETE</span></td><td><code>/api/agent-registry/:employeeId</code></td><td>删除 Agent 注册；有活跃任务时会拒绝</td></tr>
+      <tr><td><span class="method post">POST</span></td><td><code>/api/agents/:employeeId/pause-queue</code></td><td>暂停指定 Agent 接收 queue 槽任务</td></tr>
+      <tr><td><span class="method post">POST</span></td><td><code>/api/agents/:employeeId/resume-queue</code></td><td>恢复指定 Agent 接收 queue 槽任务</td></tr>
+      <tr><td><span class="method post">POST</span></td><td><code>/api/agents/:employeeId/reset-session</code></td><td>重置 Agent main 槽 Claude 会话</td></tr>
+    </table>
+    <p>Agent 端不使用 <code>AI_TEAMS_AUTH_TOKEN</code>。共享认证 Token 只用于 Web/API/Leader 连接；Agent 只使用 Web 端生成的 <code>AI_TEAMS_AGENT_TOKEN</code>。</p>
+
+    <h3>AI Leader Mission API</h3>
+    <table>
+      <tr><th>方法</th><th>路径</th><th>说明</th></tr>
+      <tr><td><span class="method get">GET</span></td><td><code>/api/missions</code></td><td>列出 Mission</td></tr>
+      <tr><td><span class="method post">POST</span></td><td><code>/api/missions</code></td><td>创建 Mission，由 AI Leader 拆分并派发子任务</td></tr>
+      <tr><td><span class="method get">GET</span></td><td><code>/api/missions/:missionId</code></td><td>查看 Mission 详情、事件、子任务和审批</td></tr>
+      <tr><td><span class="method post">POST</span></td><td><code>/api/missions/:missionId/cancel</code></td><td>取消 Mission</td></tr>
+      <tr><td><span class="method post">POST</span></td><td><code>/api/missions/:missionId/approvals/:approvalId/respond</code></td><td>响应人工确认</td></tr>
+    </table>
+
     <!-- WebSocket -->
     <h2 id="websocket">WebSocket 协议</h2>
     <p>Leader 通道使用 Server/Web/API Bearer Token（Header 或 <code>?token=</code> 参数）。Agent 通道在 <code>agent.register</code> 消息中使用 Web 端生成的 Agent Token 认证；未授权连接将被关闭（code 1008）。</p>
@@ -715,7 +765,7 @@ ai-teams-agent restart  # 应用更新</code></pre>
     <h4>Agent → Server 消息</h4>
     <table>
       <tr><th>类型</th><th>字段</th><th>说明</th></tr>
-      <tr><td><code>agent.register</code></td><td>employeeId, name, machineId, hostname, labels, activeMainTaskId?, activeQueueTaskId?, lastOutputSeq?</td><td>注册 Agent（连接后立即发送）</td></tr>
+      <tr><td><code>agent.register</code></td><td>employeeId, agentToken, name, machineId, hostname, labels, version?, claudeVersion?, permissionMode?, activeMainTaskId?, activeQueueTaskId?, lastOutputSeq?, weight?</td><td>注册 Agent（连接后立即发送；employeeId 与 agentToken 必须匹配）</td></tr>
       <tr><td><code>agent.heartbeat</code></td><td>employeeId</td><td>心跳（每 10s）</td></tr>
       <tr><td><code>agent.request_task</code></td><td>employeeId</td><td>请求分配队列任务</td></tr>
       <tr><td><code>task.accepted</code></td><td>taskId</td><td>Agent 接受任务</td></tr>
@@ -790,6 +840,11 @@ ai-teams-agent restart  # 应用更新</code></pre>
       <tr><td>mainTaskId / mainTaskPrompt</td><td>string | null</td><td>主槽任务</td></tr>
       <tr><td>queueTaskId / queueTaskPrompt</td><td>string | null</td><td>队列槽任务</td></tr>
       <tr><td>lastSeenAt</td><td>string</td><td>最后心跳时间</td></tr>
+      <tr><td>consecutiveQueueFailures</td><td>number</td><td>连续队列任务失败次数；达到阈值时 Web 会归入异常统计</td></tr>
+      <tr><td>queuePaused</td><td>boolean?</td><td>是否暂停接收 queue 槽任务</td></tr>
+      <tr><td>permissionMode</td><td>string?</td><td>Agent 当前 Claude 权限模式</td></tr>
+      <tr><td>version / claudeVersion</td><td>string?</td><td>Agent 版本和 Claude Code 本地版本</td></tr>
+      <tr><td>weight</td><td>number?</td><td>队列任务加权分配权重</td></tr>
     </table>
 
     <h3>TaskCliConfig</h3>
@@ -819,13 +874,32 @@ ai-teams-agent restart  # 应用更新</code></pre>
 
 选项:
   --server &lt;url&gt;       Server WebSocket 地址
-  --token &lt;token&gt;      认证 Token
+  --agent-token &lt;token&gt; Web 端生成的 Agent Token
+  --token &lt;token&gt;      Agent Token（兼容旧参数）
   --id &lt;id&gt;            Agent 唯一标识
   --name &lt;name&gt;        显示名称
   --workspace &lt;dir&gt;    默认工作目录
   --runner &lt;mode&gt;      执行模式 (claude | fake)
+  -w, --weight &lt;number&gt; 队列任务分配权重
   --config             重新运行配置向导
   -h, --help           显示帮助</code></pre>
+
+    <h3 id="agent-registration">Agent 注册流程</h3>
+    <ol>
+      <li>Web 端使用 <code>AI_TEAMS_AUTH_TOKEN</code> 登录。</li>
+      <li>进入「员工管理」，添加 Agent，填写员工 ID、名称和标签。</li>
+      <li>Web 端生成 Agent Token，只展示一次，复制后配置到对应 Agent 的 <code>AI_TEAMS_AGENT_TOKEN</code>。</li>
+      <li>Agent 启动后发送 <code>agent.register</code>，Server 校验员工 ID 与 Agent Token 是否匹配。</li>
+      <li>注册成功后 Agent 状态变为在线，并开始接收 main / queue 槽任务。</li>
+    </ol>
+    <pre><code class="language-bash">AI_TEAMS_AGENT_TOKEN="复制的-agent-token" \
+EMPLOYEE_ID=alice \
+EMPLOYEE_NAME=Alice \
+SERVER_URL=ws://localhost:3789 \
+ai-teams-agent start</code></pre>
+    <div class="note warn">
+      <p><strong>注意：</strong>Agent 端不需要、也不应配置 <code>AI_TEAMS_AUTH_TOKEN</code>。该 Token 只用于 Web/API/Leader 侧连接 Server。</p>
+    </div>
 
     <h3>标签系统</h3>
     <p>通过 <code>EMPLOYEE_LABELS</code> 环境变量为 Agent 设置标签（逗号分隔）：</p>
@@ -857,17 +931,17 @@ ai-teams-agent restart  # 应用更新</code></pre>
     <!-- Web Console -->
     <h2 id="web-console">Web 控制台</h2>
 
-    <h3>六个功能页面</h3>
+    <h3>核心功能页面</h3>
     <div class="card-grid">
       <div class="card">
         <div class="card-icon">&#x1F4BB;</div>
         <h4>实时监控</h4>
-        <p>Agent 卡片展示在线状态、活跃任务、终端输出。支持取消运行中任务。</p>
+        <p>Agent 卡片展示在线状态、异常统计、Claude 版本、权限模式、活跃任务和终端输出。页面刷新后日志自动滚动到底部。</p>
       </div>
       <div class="card">
         <div class="card-icon">&#x1F4CB;</div>
         <h4>员工管理</h4>
-        <p>所有已注册 Agent 列表，显示标签、主机名、完成/失败任务统计。</p>
+        <p>添加、批准、删除 Agent，复制 Agent Token，并管理标签、主机名和连接状态。</p>
       </div>
       <div class="card">
         <div class="card-icon">&#x1F4DD;</div>
@@ -889,6 +963,16 @@ ai-teams-agent restart  # 应用更新</code></pre>
         <h4>定时任务</h4>
         <p>创建和管理 cron 定时任务，启用/禁用、手动触发、查看执行历史。</p>
       </div>
+      <div class="card">
+        <div class="card-icon">&#x1F9ED;</div>
+        <h4>AI Leader</h4>
+        <p>创建 Mission，查看子任务、事件流和人工确认，必要时取消 Mission。</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">&#x1F5C2;</div>
+        <h4>会话历史</h4>
+        <p>按 Claude Session 查看历史任务输出，支持从历史消息继续对话。</p>
+      </div>
     </div>
 
     <h3>命令面板</h3>
@@ -898,7 +982,15 @@ ai-teams-agent restart  # 应用更新</code></pre>
       <li><strong>工作目录</strong> — 可选覆盖</li>
       <li><strong>@ 提及</strong> — 输入 <code>@Alice</code> 自动解析为直接调度</li>
       <li><strong>群聊视图</strong> — 历史命令和 Agent 回复按时间线展示</li>
+      <li><strong>会话续聊</strong> — 从历史回复进入指定 Claude Session，继续上下文对话</li>
+      <li><strong>任务清理</strong> — queued 或终态任务可从 Web 端清理显示槽位，运行中任务可取消进程</li>
     </ul>
+
+    <h3>Agent 状态统计</h3>
+    <p>「AI 员工监控」标题右侧显示在线、离线、异常三类数量。异常统计来自队列暂停、连续队列失败、最近任务失败 / 超时 / 取消等状态，用于快速识别需要人工处理的 Agent。</p>
+
+    <h3>任务槽位展示</h3>
+    <p>Web 端只把 <code>dispatched</code>、<code>accepted</code>、<code>running</code> 视为活跃槽位任务。<code>failed</code>、<code>cancelled</code>、<code>timeout</code> 等终态任务保留在日志和异常记录里，但不会继续占用 Agent 卡片槽位。</p>
 
     <h3>移动端适配</h3>
     <p>Web 控制台完全适配移动端：</p>
@@ -910,6 +1002,51 @@ ai-teams-agent restart  # 应用更新</code></pre>
     </ul>
 
     <!-- Advanced -->
+    <h2 id="ai-leader">AI Leader Mission</h2>
+
+    <p>AI Leader Mission 用于把一个总目标交给服务端编排器。编排器会创建普通 AI Teams 子任务，等待 Agent 输出，触发 Review，并在风险或失败节点请求人工确认。</p>
+
+    <h3>状态机</h3>
+    <div class="lifecycle">
+      <span class="state">created</span><span class="arrow">&rarr;</span>
+      <span class="state">planning</span><span class="arrow">&rarr;</span>
+      <span class="state">dispatching</span><span class="arrow">&rarr;</span>
+      <span class="state">waiting_agents</span><span class="arrow">&rarr;</span>
+      <span class="state">reviewing</span>
+      <span class="state">waiting_human</span>
+      <span class="state terminal">completed</span>
+      <span class="state terminal">failed</span>
+      <span class="state terminal">cancelled</span>
+    </div>
+
+    <h3>创建 Mission</h3>
+    <pre><code class="language-json">POST /api/missions
+{
+  "objective": "完成生产稳定性优化，保持旧版接口兼容，并完成测试",
+  "workspace": "/path/to/project",
+  "approvalPolicy": "ask_on_risky_change",
+  "maxIterations": 6,
+  "maxTasks": 20,
+  "timeoutSec": 1800,
+  "autoStart": true
+}</code></pre>
+
+    <h3>确认策略</h3>
+    <table>
+      <tr><th>策略</th><th>说明</th></tr>
+      <tr><td><code>auto</code></td><td>自动推进，不主动请求每轮确认</td></tr>
+      <tr><td><code>ask_on_risky_change</code></td><td>默认；风险目标或失败任务需要人工确认</td></tr>
+      <tr><td><code>manual_each_iteration</code></td><td>每一轮 Leader 计划都先确认再派发</td></tr>
+    </table>
+
+    <h3>Web 端操作</h3>
+    <ul>
+      <li>创建 Mission：填写目标、工作目录、确认策略、最大轮次、最大任务数和超时时间。</li>
+      <li>查看详情：展示 Mission 状态、子任务列表、事件流、结果和错误。</li>
+      <li>人工确认：对待审批节点选择继续或拒绝取消。</li>
+      <li>取消 Mission：非终态 Mission 可直接取消。</li>
+    </ul>
+
     <h2 id="advanced">高级功能</h2>
 
     <h3>任务优先级</h3>
@@ -1049,7 +1186,12 @@ def verify_signature(body: bytes, signature: str, secret: str) -> bool:
       <tr><td>tasks</td><td>任务记录（完整字段）</td></tr>
       <tr><td>task_logs</td><td>任务输出日志（按 task_id + seq）</td></tr>
       <tr><td>task_webhooks</td><td>任务 Webhook URL</td></tr>
+      <tr><td>agent_registrations</td><td>Agent 注册审批记录和 Agent Token 哈希</td></tr>
       <tr><td>schedules</td><td>定时任务配置（cron 表达式、目标、提示词）</td></tr>
+      <tr><td>missions</td><td>AI Leader Mission 主记录</td></tr>
+      <tr><td>mission_events</td><td>Mission 事件流</td></tr>
+      <tr><td>mission_subtasks</td><td>Mission 与普通任务的关联关系</td></tr>
+      <tr><td>mission_approvals</td><td>Mission 人工确认记录</td></tr>
       <tr><td>schema_meta</td><td>Schema 元信息（版本号、游标等）</td></tr>
     </table>
     <p>Server 启动时从数据库恢复状态，标记所有 Agent 为 offline，重新入队未完成任务。</p>

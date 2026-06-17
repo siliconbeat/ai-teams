@@ -32,7 +32,7 @@
     "start:all": "concurrently -n server,alice,web -c blue,green,magenta \"pnpm start:server\" \"pnpm start:agent:alice\" \"pnpm start:web\"",
     "build": "pnpm --filter @ai-teams/shared build && pnpm --filter @csdwd/ai-teams-server build && pnpm --filter @ai-teams/web build && cp -r docs-site apps/server/dist/web/docs-site && pnpm --filter @csdwd/ai-teams-agent build",
     "typecheck": "pnpm --filter @ai-teams/shared build && pnpm --filter @csdwd/ai-teams-server exec tsc --noEmit && pnpm --filter @csdwd/ai-teams-agent exec tsc --noEmit && pnpm --filter @ai-teams/web exec tsc --noEmit",
-    "test": "pnpm --filter @ai-teams/shared build && vitest run"
+    "test": "pnpm --filter @ai-teams/shared build && pnpm --filter @csdwd/ai-teams-server build && vitest run"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
