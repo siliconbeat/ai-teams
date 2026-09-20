@@ -67,6 +67,7 @@ function emitOutput(taskId: string, stream: "stdout" | "stderr", content: string
   send({
     type: "task.output",
     taskId,
+    attempt: task.attempt,
     stream,
     seq: task.seq,
     content,
@@ -85,12 +86,15 @@ function requestTask() {
   send({ type: "agent.request_task", employeeId: EMPLOYEE_ID });
 }
 
-function finishTask(taskId: string, status: "completed" | "failed" | "cancelled", payload?: string | number) {
+type FailurePayload = { error: string; recoverable?: boolean; cooldownMs?: number; retryAfterMs?: number };
+
+function finishTask(taskId: string, status: "completed" | "failed" | "cancelled", payload?: string | number | FailurePayload) {
   const current = findActiveTask(taskId);
   if (!current) return;
   const slot = slotForTargetMode(current.targetMode);
   slot.set(null);
-  recordTaskFinish(current, status, payload);
+  const recordDetail = typeof payload === "object" && payload !== null ? payload.error : payload;
+  recordTaskFinish(current, status, recordDetail);
 
   if (status === "completed") {
     if (current.targetMode === "queue") {
@@ -102,6 +106,7 @@ function finishTask(taskId: string, status: "completed" | "failed" | "cancelled"
     send({
       type: "task.completed",
       taskId,
+      attempt: current.attempt,
       exitCode: typeof payload === "number" ? payload : 0,
       summary: current.summary.join("").trim().slice(0, 8000) || "Claude 已完成任务。",
       ...current.resultMetrics,
@@ -111,21 +116,30 @@ function finishTask(taskId: string, status: "completed" | "failed" | "cancelled"
   }
 
   if (status === "cancelled") {
-    send({ type: "task.cancelled", taskId });
+    send({ type: "task.cancelled", taskId, attempt: current.attempt });
     if (current.targetMode === "queue") requestTask();
     return;
   }
 
+  const failure = typeof payload === "object" && payload !== null
+    ? payload
+    : { error: typeof payload === "string" ? payload : "任务执行失败。" };
   send({
     type: "task.failed",
     taskId,
-    error: typeof payload === "string" ? payload : "任务执行失败。",
+    attempt: current.attempt,
+    error: failure.error,
+    ...(failure.recoverable ? { recoverable: true } : {}),
+    ...(failure.cooldownMs !== undefined ? { cooldownMs: failure.cooldownMs } : {}),
+    ...(failure.retryAfterMs !== undefined ? { retryAfterMs: failure.retryAfterMs } : {}),
   });
   if (current.targetMode === "queue") {
-    consecutiveQueueFailures += 1;
-    if (consecutiveQueueFailures >= MAX_CONSECUTIVE_QUEUE_FAILURES) {
-      console.log(`[agent:${EMPLOYEE_ID}] 连续 ${consecutiveQueueFailures} 次队列任务失败，暂停接受新的队列任务。等待手动恢复。`);
-      return;
+    if (!failure.recoverable) {
+      consecutiveQueueFailures += 1;
+      if (consecutiveQueueFailures >= MAX_CONSECUTIVE_QUEUE_FAILURES) {
+        console.log(`[agent:${EMPLOYEE_ID}] 连续 ${consecutiveQueueFailures} 次队列任务失败，暂停接单；保持心跳，等待服务器恢复探测或手动恢复。`);
+        return;
+      }
     }
     requestTask();
   }
@@ -146,6 +160,7 @@ function startTask(message: Extract<ServerToEmployeeMessage, { type: "task.dispa
     send({
       type: "task.failed",
       taskId: message.taskId,
+      attempt: message.attempt,
       error: `Agent 连续 ${consecutiveQueueFailures} 次队列任务失败，暂停接受新队列任务，等待手动恢复。`,
     });
     return;
@@ -156,6 +171,7 @@ function startTask(message: Extract<ServerToEmployeeMessage, { type: "task.dispa
     send({
       type: "task.failed",
       taskId: message.taskId,
+      attempt: message.attempt,
       error: `员工当前忙碌，${message.targetMode === "queue" ? "队列" : "主"}任务槽正在执行任务 ${slot.get()!.taskId}。`,
     });
     return;
@@ -163,6 +179,7 @@ function startTask(message: Extract<ServerToEmployeeMessage, { type: "task.dispa
 
   const task: ActiveTask = {
     taskId: message.taskId,
+    attempt: message.attempt ?? 0,
     seq: 0,
     child: null,
     summary: [],
@@ -180,7 +197,7 @@ function startTask(message: Extract<ServerToEmployeeMessage, { type: "task.dispa
   };
   slot.set(task);
 
-  send({ type: "task.accepted", taskId: message.taskId });
+  send({ type: "task.accepted", taskId: message.taskId, attempt: task.attempt });
   recordTaskStart(task, message.prompt, message.workspace);
 
   if (RUNNER_MODE === "fake") {
@@ -193,7 +210,11 @@ function startTask(message: Extract<ServerToEmployeeMessage, { type: "task.dispa
 
 function cancelTask(taskId: string) {
   const task = findActiveTask(taskId);
-  if (!task) return;
+  if (!task) {
+    // Idempotent acknowledgement also releases the server's cleanup barrier.
+    send({ type: "task.cancelled", taskId });
+    return;
+  }
   task.cancelRequested = true;
   if (task.child) {
     const gen = task.generation;
@@ -258,7 +279,7 @@ function gracefulShutdown(signal: string) {
     task.cancelRequested = true;
     if (task.child) children.push(task.child);
     task.child?.kill("SIGTERM");
-    send({ type: "task.cancelled", taskId: task.taskId });
+    send({ type: "task.cancelled", taskId: task.taskId, attempt: task.attempt });
   }
   mainTask = null;
   queueTask = null;

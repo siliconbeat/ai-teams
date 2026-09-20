@@ -83,11 +83,13 @@ export type AiTeamsServerOptions = {
   dbPath?: string;
   defaultTimeoutSec?: number;
   disconnectGraceMs?: number;
+  runningDisconnectGraceMs?: number;
   logger?: boolean;
   logLevel?: string;
   logDir?: string;
   maxLogChunksPerTask?: number;
   maxHydratedTasks?: number;
+  maxRuntimeTasks?: number;
   agentRegistrationMode?: "open" | "approval";
   missionPollMs?: number;
 };
@@ -129,8 +131,10 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
 
   const defaultTimeoutSec = options.defaultTimeoutSec ?? 1800;
   const disconnectGraceMs = options.disconnectGraceMs ?? 15000;
+  const runningDisconnectGraceMs = options.runningDisconnectGraceMs ?? Math.max(disconnectGraceMs, 120_000);
   const maxLogChunksPerTask = options.maxLogChunksPerTask ?? 400;
   const maxHydratedTasks = options.maxHydratedTasks ?? 200;
+  const maxRuntimeTasks = options.maxRuntimeTasks ?? 500;
   const dataDir = options.dataDir ?? path.join(process.cwd(), "data");
   const dbPath = options.dbPath ?? path.join(dataDir, "ai-teams.db");
   let closing = false;
@@ -144,6 +148,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
   });
   await initDb(db);
   await hydrateState(db, state, defaultTimeoutSec, maxLogChunksPerTask, maxHydratedTasks);
+  let taskDataGeneration = (await db.get<{ value: string }>("SELECT value FROM schema_meta WHERE key = 'task_data_generation'"))?.value ?? "";
 
   const logLevel = options.logLevel || process.env.LOG_LEVEL || "info";
   const logDir = options.logDir || process.env.LOG_DIR;
@@ -209,11 +214,13 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     authToken: options.authToken,
     defaultTimeoutSec,
     disconnectGraceMs,
+    runningDisconnectGraceMs,
     encryptor,
     maxLogChunksPerTask,
+    maxRuntimeTasks,
     hashAgentToken: (token) => hashAgentToken(options.authToken, token),
   };
-  const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage, cancelTaskById, patchTaskById, prioritizeTask, startDisconnectRecovery, resumeAgentQueue, pauseAgentQueue, resetAgentSession, cleanup: dispatchCleanup } = createDispatch(dispatchCtx);
+  const { dispatchLeaderCommand, handleAgentMessage, handleLeaderMessage, cancelTaskById, patchTaskById, prioritizeTask, startDisconnectRecovery, resumeAgentQueue, pauseAgentQueue, resetAgentSession, drainTaskWrites, finishTaskCleanup, resumeAfterTaskCleanup, cleanup: dispatchCleanup } = createDispatch(dispatchCtx);
   const missionOrchestrator = createLeaderOrchestrator({
     db,
     state,
@@ -257,6 +264,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
       employees: [...state.employees.values()],
       tasks: [...state.tasks.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
       logs: {},
+      taskDataGeneration,
       serverVersion: typeof PKG_VERSION !== "undefined" ? PKG_VERSION : undefined,
     };
   }
@@ -395,6 +403,8 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
   }
 
   const staticExts = new Set([".html", ".js", ".css", ".ico", ".png", ".jpg", ".svg", ".woff", ".woff2", ".ttf", ".map"]);
+  const activeMutations = new Set<string>();
+  app.addHook("onResponse", async (request) => { activeMutations.delete(request.id); });
 
   app.addHook("preHandler", async (request, reply) => {
     if (request.url.startsWith("/ws/") || request.url.startsWith("/docs")) {
@@ -406,7 +416,11 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
     }
     if (!isAuthorized(options.authToken, request.url, request.headers)) {
       app.log.warn({ url: request.url, ip: request.ip }, "Unauthorized request");
-      await reply.code(401).send({ error: "unauthorized" });
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+    if (request.url.startsWith("/api/") && !["GET", "HEAD", "OPTIONS"].includes(request.method)) {
+      if (state.clearingTasks) return reply.code(503).send({ error: "正在清空任务，请稍后重试。" });
+      activeMutations.add(request.id);
     }
   });
 
@@ -588,6 +602,45 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
         offset: request.query.offset,
       });
       return { tasks: rows.map((row) => dbRowToTask(row, defaultTimeoutSec)) };
+    },
+  );
+
+  app.delete<{ Body: { confirm: "clear-all-tasks" } }>(
+    "/api/tasks",
+    {
+      schema: {
+        tags: ["tasks"],
+        summary: "Clear all tasks, output, webhooks and Mission history",
+        body: {
+          type: "object", required: ["confirm"], additionalProperties: false,
+          properties: { confirm: { type: "string", enum: ["clear-all-tasks"] } },
+        },
+      },
+    },
+    async (request, reply) => {
+      // Acquire before the first await, including when two requests passed preHandler together.
+      if (state.clearingTasks) return reply.code(503).send({ error: "正在清空任务，请稍后重试。" });
+      state.clearingTasks = true;
+      try {
+        while ([...activeMutations].some((id) => id !== request.id)) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        await missionOrchestrator.drain();
+        await drainTaskWrites();
+        const enabledSchedules = (await getAllSchedules(db)).filter((schedule) => schedule.enabled).length;
+        const deleted = await db.clearTaskData();
+        taskDataGeneration = deleted.generation;
+        const cancellation = finishTaskCleanup();
+        const snapshot = buildSnapshot();
+        for (const socket of state.leaderSockets) {
+          sendJson<ServerToLeaderMessage>(socket, { type: "tasks.cleared", snapshot }, dispatchCtx.encryptor);
+        }
+        app.log.info({ deleted, ...cancellation }, "All task data cleared");
+        return { deleted: { tasks: deleted.tasks, missions: deleted.missions }, ...cancellation, enabledSchedules };
+      } finally {
+        state.clearingTasks = false;
+        await resumeAfterTaskCleanup();
+      }
     },
   );
 
@@ -1354,6 +1407,7 @@ export async function createAiTeamsServer(options: AiTeamsServerOptions): Promis
       missionOrchestrator.stop();
       dispatchCleanup();
       await app.close();
+      await drainTaskWrites();
       await db.close();
     },
   };
@@ -1368,10 +1422,12 @@ export function readOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): AiTeam
     dbPath: env.DB_PATH,
     defaultTimeoutSec: Number(env.DEFAULT_TIMEOUT_SEC) || 1800,
     disconnectGraceMs: Number(env.DISCONNECT_GRACE_MS) || 15000,
+    runningDisconnectGraceMs: Number(env.RUNNING_DISCONNECT_GRACE_MS) || undefined,
     logLevel: env.LOG_LEVEL,
     logDir: env.LOG_DIR,
     maxLogChunksPerTask: Number(env.MAX_LOG_CHUNKS_PER_TASK) || 400,
     maxHydratedTasks: Number(env.MAX_HYDRATED_TASKS) || 200,
+    maxRuntimeTasks: Number(env.MAX_RUNTIME_TASKS) || 500,
     agentRegistrationMode: env.AGENT_REGISTRATION_MODE === "open" ? "open" : "approval",
     missionPollMs: Number(env.MISSION_POLL_MS) || undefined,
   };

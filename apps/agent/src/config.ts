@@ -25,6 +25,7 @@ export let MAX_BUFFERED_MESSAGES = Number(process.env.AGENT_BUFFER_LIMIT) || 400
 export const MAX_ERROR_TAIL = 16000;
 export const CLAUDE_MISSING_CONVERSATION_PATTERN = /No conversation found with session ID/i;
 export const CLAUDE_SESSION_BUSY_PATTERN = /Session ID .+ is already in use/i;
+export const MODEL_TRANSIENT_ERROR_PATTERN = /(?:\b(?:429|502|503|504|529)\b|rate limit|too many requests|overloaded|temporarily unavailable|service unavailable|upstream (?:error|timeout|unavailable)|gateway timeout|ECONNRESET|ETIMEDOUT|EAI_AGAIN|fetch failed)/i;
 export let AGENT_RECORDS_DIR =
   process.env.AGENT_RECORDS_DIR || path.join(DEFAULT_WORKSPACE, ".ai-teams", "agents", EMPLOYEE_ID);
 export let STATE_FILE = process.env.AGENT_STATE_FILE || path.join(AGENT_RECORDS_DIR, "session-state.json");
@@ -73,6 +74,7 @@ export type AgentState = {
 
 export type ActiveTask = {
   taskId: string;
+  attempt: number;
   seq: number;
   child: ChildProcess | null;
   summary: string[];
@@ -80,6 +82,7 @@ export type ActiveTask = {
   sawStreamText: boolean;
   lastToolBlock: boolean;
   stderrTail: string;
+  cliResultError?: boolean;
   retriedWithFreshSession: boolean;
   resumingSession: boolean;
   generation: number;

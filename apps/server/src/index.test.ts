@@ -4,7 +4,9 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { AddressInfo } from "node:net";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DatabaseSync } from "node:sqlite";
+import { SqliteDatabase } from "./db";
 import WebSocket from "ws";
 import { createAiTeamsServer, type AiTeamsServer } from "./index";
 import type { ServerToEmployeeMessage, ServerToLeaderMessage } from "@ai-teams/shared";
@@ -25,6 +27,7 @@ beforeEach(async () => {
     dbPath: path.join(tmpDir, "ai-teams.db"),
     defaultTimeoutSec: 0.08,
     disconnectGraceMs: 80,
+    runningDisconnectGraceMs: 80,
     agentRegistrationMode: "open",
     logger: false,
   });
@@ -35,6 +38,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(sockets.map((socket) => closeSocket(socket)));
   await server.close();
   fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -110,6 +114,7 @@ describe("Agent 注册审批", () => {
       dbPath: path.join(tmpDir, "approval.db"),
       defaultTimeoutSec: 0.08,
       disconnectGraceMs: 80,
+      runningDisconnectGraceMs: 80,
       agentRegistrationMode: "approval",
       logger: false,
     });
@@ -173,6 +178,7 @@ describe("GET /health", () => {
       dataDir,
       defaultTimeoutSec: 0.08,
       disconnectGraceMs: 80,
+      runningDisconnectGraceMs: 80,
       agentRegistrationMode: "open",
       logger: false,
     });
@@ -657,6 +663,171 @@ describe("PATCH /api/tasks/:taskId — 更新任务", () => {
   });
 });
 
+describe("DELETE /api/tasks — 清空所有任务", () => {
+  const headers = { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" };
+  const clear = () => fetch(`${httpBaseUrl}/api/tasks`, {
+    method: "DELETE", headers, body: JSON.stringify({ confirm: "clear-all-tasks" }),
+  });
+  const submit = async (prompt = "queued", atAgents: string | string[] = "queue") => {
+    const res = await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST", headers, body: JSON.stringify({ prompt, atAgents, timeoutSec: 300 }),
+    });
+    expect(res.status).toBe(202);
+    return (await res.json()).tasks[0].id as string;
+  };
+
+  it("要求认证和明确确认，不影响已有任务", async () => {
+    await submit();
+    const unauthorized = await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirm: "clear-all-tasks" }),
+    });
+    expect(unauthorized.status).toBe(401);
+    expect((await fetch(`${httpBaseUrl}/api/tasks`, { method: "DELETE", headers, body: "{}" })).status).toBe(400);
+    expect(server.buildSnapshot().tasks).toHaveLength(1);
+  });
+
+  it("删除数据库中全部历史和关联记录，保留配置，重启后不恢复", async () => {
+    const taskId = await submit();
+    await createAgentRegistrationToken("preserved-agent");
+    const schedule = await fetch(`${httpBaseUrl}/api/schedules`, {
+      method: "POST", headers,
+      body: JSON.stringify({ name: "preserved schedule", cron: "0 0 1 1 *", prompt: "future", enabled: true }),
+    });
+    expect(schedule.status).toBe(201);
+    const mission = await fetch(`${httpBaseUrl}/api/missions`, {
+      method: "POST", headers, body: JSON.stringify({ objective: "old mission", autoStart: false }),
+    });
+    expect(mission.status).toBe(201);
+    const missionId = (await mission.json()).mission.id;
+    const database = new DatabaseSync(path.join(tmpDir, "ai-teams.db"));
+    database.prepare("INSERT INTO tasks (id, leader_command_id, prompt, status, created_at) VALUES (?, ?, ?, ?, ?)")
+      .run("not-in-memory", "old", "old history", "completed", "2020-01-01");
+    database.prepare("INSERT INTO task_logs VALUES (?, ?, ?)").run(taskId, 1, "{}");
+    database.prepare("INSERT INTO task_webhooks VALUES (?, ?)").run(taskId, "http://unused.invalid");
+    database.prepare("INSERT INTO mission_subtasks VALUES (?, ?, ?, ?, ?)").run(missionId, taskId, 1, "analyst", "2020-01-01");
+    database.prepare("INSERT INTO mission_approvals (id, mission_id, status, question, options_json, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run("approval", missionId, "pending", "confirm", "[]", "2020-01-01");
+    const leader = await connectLeader();
+    const cleared = waitForLeaderMessage(leader, (message) => message.type === "tasks.cleared");
+    const response = await clear();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ deleted: { tasks: 2, missions: 1 }, enabledSchedules: 1 });
+    expect((await cleared).type).toBe("tasks.cleared");
+    for (const table of ["tasks", "task_logs", "task_webhooks", "missions", "mission_subtasks", "mission_events", "mission_approvals"]) {
+      expect(database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()).toEqual({ count: 0 });
+    }
+    expect(database.prepare("SELECT COUNT(*) AS count FROM agent_registrations").get()).toEqual({ count: 1 });
+    expect(database.prepare("SELECT enabled FROM schedules").get()).toEqual({ enabled: 1 });
+    database.close();
+    await closeSocket(leader);
+    await server.close();
+    server = await createAiTeamsServer({ authToken: TOKEN, dbPath: path.join(tmpDir, "ai-teams.db"), logger: false });
+    expect(server.buildSnapshot().tasks).toEqual([]);
+    expect(server.buildSnapshot().logs).toEqual({});
+  });
+
+  it("终止运行任务，忽略旧输出，收到回执后才派发新任务", async () => {
+    const agent = await connectAgent("alice");
+    const dispatch = waitForAgentDispatch(agent);
+    const oldId = await submit("running", ["alice"]);
+    await dispatch;
+    agent.send(JSON.stringify({ type: "task.started", taskId: oldId, pid: 123 }));
+    await waitUntil(() => server.buildSnapshot().tasks.some((task) => task.id === oldId && task.status === "running"));
+    await submit("waiting direct", ["alice"]);
+    const cancelled = waitForWsMessage(agent, (message: ServerToEmployeeMessage) => message.type === "task.cancel");
+    expect((await clear()).status).toBe(200);
+    expect((await cancelled).type).toBe("task.cancel");
+    expect(server.buildSnapshot().tasks).toHaveLength(0);
+    expect(server.buildSnapshot().employees[0]).toMatchObject({ mainTaskId: null, queueTaskId: null });
+    const newId = await submit("new task", ["alice"]);
+    expect(server.buildSnapshot().tasks[0]).toMatchObject({ id: newId, status: "queued" });
+    agent.send(JSON.stringify({ type: "task.output", taskId: oldId, seq: 1, stream: "stdout", content: "late old output" }));
+    const nextDispatch = waitForAgentDispatch(agent);
+    agent.send(JSON.stringify({ type: "task.cancelled", taskId: oldId }));
+    expect((await nextDispatch).taskId).toBe(newId);
+    expect(agent.readyState).toBe(WebSocket.OPEN);
+    expect((await fetch(`${httpBaseUrl}/api/tasks/${oldId}`, { headers })).status).toBe(404);
+    expect(server.buildSnapshot().logs[oldId]).toBeUndefined();
+  });
+
+  it("清空离线任务后，重连请求终止旧进程", async () => {
+    const agentToken = "cleanup-reconnect-agent-token";
+    const agent = await connectAgent("alice", undefined, { agentToken });
+    const dispatch = waitForAgentDispatch(agent);
+    const oldId = await submit("offline", ["alice"]);
+    await dispatch;
+    await closeSocket(agent);
+    const result = await (await clear()).json();
+    expect(result.offlineTasks).toBe(1);
+    const reconnect = await connectWs(`${baseUrl}/ws/agent`);
+    const cancelled = waitForWsMessage(reconnect, (message: ServerToEmployeeMessage) => message.type === "task.cancel");
+    sendAgentRegister(reconnect, "alice", oldId, { agentToken });
+    expect(await cancelled).toMatchObject({ type: "task.cancel", taskId: oldId });
+    expect(server.buildSnapshot().tasks).toEqual([]);
+  });
+
+  it("清空期间拒绝新写入和重复清空，随后可正常创建任务", async () => {
+    await submit();
+    const original = SqliteDatabase.prototype.clearTaskData;
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => { release = resolve; });
+    const spy = vi.spyOn(SqliteDatabase.prototype, "clearTaskData").mockImplementation(async function () {
+      await barrier;
+      return original.call(this);
+    });
+    const clearing = clear();
+    await waitUntil(() => spy.mock.calls.length === 1);
+    try {
+      expect((await clear()).status).toBe(503);
+      const response = await fetch(`${httpBaseUrl}/api/tasks`, { method: "POST", headers, body: JSON.stringify({ prompt: "race" }) });
+      expect(response.status).toBe(503);
+    } finally { release(); }
+    expect((await clearing).status).toBe(200);
+    await submit("after clear");
+    expect(server.buildSnapshot().tasks).toHaveLength(1);
+  });
+
+  it("数据库删除失败会回滚，保留内存任务并恢复接收", async () => {
+    const id = await submit();
+    const database = new DatabaseSync(path.join(tmpDir, "ai-teams.db"));
+    database.prepare("INSERT INTO task_logs VALUES (?, ?, ?)").run(id, 1, "{}");
+    database.exec("CREATE TRIGGER prevent_task_delete BEFORE DELETE ON tasks BEGIN SELECT RAISE(ABORT, 'test deletion failure'); END;");
+    expect((await clear()).status).toBe(500);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM task_logs").get()).toEqual({ count: 1 });
+    expect(server.buildSnapshot().tasks).toHaveLength(1);
+    database.exec("DROP TRIGGER prevent_task_delete");
+    database.close();
+    await submit("after failed clear");
+    expect(server.buildSnapshot().tasks).toHaveLength(2);
+    expect((await clear()).status).toBe(200);
+    expect((await clear()).status).toBe(200);
+  });
+
+  it("清理活跃 Mission 和重试中的任务后不再生成旧任务", async () => {
+    const agent = await connectAgent("alice");
+    const dispatch = waitForAgentDispatch(agent);
+    const retryId = await submit("recoverable queue task");
+    await dispatch;
+    agent.send(JSON.stringify({ type: "task.started", taskId: retryId, pid: 123 }));
+    agent.send(JSON.stringify({ type: "task.failed", taskId: retryId, error: "rate limit", recoverable: true, cooldownMs: 1000 }));
+    await waitUntil(() => server.buildSnapshot().tasks.some((task) => task.id === retryId && task.status === "queued"));
+    const mission = await fetch(`${httpBaseUrl}/api/missions`, {
+      method: "POST", headers, body: JSON.stringify({ objective: "分析项目并测试", approvalPolicy: "auto" }),
+    });
+    expect(mission.status).toBe(201);
+    const missionId = (await mission.json()).mission.id;
+    await waitUntil(async () => (await getMission(missionId)).subtasks.length >= 2, 1000);
+    expect((await clear()).status).toBe(200);
+    await delay(1100);
+    expect(server.buildSnapshot().tasks).toEqual([]);
+    const database = new DatabaseSync(path.join(tmpDir, "ai-teams.db"));
+    for (const table of ["tasks", "missions", "mission_events", "mission_subtasks"]) {
+      expect(database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()).toEqual({ count: 0 });
+    }
+    database.close();
+  });
+});
+
 describe("DELETE /api/tasks/:taskId — 删除任务", () => {
   it("删除终态任务", async () => {
     const agent = await connectAgent("alice");
@@ -907,31 +1078,28 @@ describe("WebSocket 任务调度", () => {
   });
 
   it("queue 加权随机分配", async () => {
-    // Run multiple rounds to verify weighted distribution statistically
+    const alice = await connectAgent("weighted-alice", undefined, { weight: 3 });
+    const bob = await connectAgent("weighted-bob", undefined, { weight: 1 });
+    const leader = await connectLeader();
+    const random = vi.spyOn(Math, "random");
     let aliceCount = 0;
     const rounds = 20;
 
+    // Fixed quantiles cover both sides of the 3:1 selection boundary without
+    // statistical flakes. Complete each task before the next round: closing an
+    // agent would requeue old tasks after the disconnect grace period.
     for (let r = 0; r < rounds; r++) {
-      const alice = await connectAgent(`alice-r${r}`, undefined, { weight: 3 });
-      const bob = await connectAgent(`bob-r${r}`, undefined, { weight: 1 });
-      const leader = await connectLeader();
-
+      random.mockReturnValue((r + 0.5) / rounds);
       leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: `weighted ${r}` }));
-      await delay(30);
-
-      const snap = server.buildSnapshot();
-      const task = snap.tasks.find(t => t.prompt === `weighted ${r}`);
-      if (task?.employeeId?.startsWith("alice")) aliceCount++;
-
-      // cleanup
-      alice.close();
-      bob.close();
-      leader.close();
-      await delay(20);
+      await waitUntil(() => server.buildSnapshot().tasks.some(task => task.prompt === `weighted ${r}` && task.status === "dispatched"));
+      const task = server.buildSnapshot().tasks.find(task => task.prompt === `weighted ${r}`)!;
+      const selected = task.employeeId === "weighted-alice" ? alice : bob;
+      if (selected === alice) aliceCount++;
+      selected.send(JSON.stringify({ type: "task.completed", taskId: task.id, attempt: task.attempt, exitCode: 0 }));
+      await waitUntil(() => server.buildSnapshot().tasks.find(item => item.id === task.id)?.status === "completed");
     }
 
-    // With weight 3:1, alice should get the majority (> 10/20)
-    expect(aliceCount).toBeGreaterThan(rounds / 2);
+    expect(aliceCount).toBe(15);
   });
 
   it("优先执行不会让 priority 超过协议上限，并把同优先级任务放到队列前面", async () => {
@@ -1012,6 +1180,7 @@ describe("WebSocket 任务调度", () => {
       dbPath,
       defaultTimeoutSec: 2,
       disconnectGraceMs: 80,
+      runningDisconnectGraceMs: 80,
       agentRegistrationMode: "open",
       logger: false,
     });
@@ -1038,6 +1207,7 @@ describe("WebSocket 任务调度", () => {
       dbPath,
       defaultTimeoutSec: 2,
       disconnectGraceMs: 80,
+      runningDisconnectGraceMs: 80,
       agentRegistrationMode: "open",
       logger: false,
     });
@@ -1065,6 +1235,7 @@ describe("WebSocket 任务调度", () => {
       dbPath,
       defaultTimeoutSec: 2,
       disconnectGraceMs: 80,
+      runningDisconnectGraceMs: 80,
       agentRegistrationMode: "open",
       logger: false,
     });
@@ -1089,6 +1260,7 @@ describe("WebSocket 任务调度", () => {
       dbPath,
       defaultTimeoutSec: 2,
       disconnectGraceMs: 80,
+      runningDisconnectGraceMs: 80,
       agentRegistrationMode: "open",
       logger: false,
     });
@@ -1239,6 +1411,54 @@ describe("任务生命周期", () => {
       const alice = snapshot.employees.find((e) => e.id === "alice");
       return task?.status === "failed" && alice?.queueTaskId === null;
     }, 800);
+  });
+
+  it("recoverable 模型错误触发冷却，任务不会立刻故障切换到其他 Agent", async () => {
+    const alice = await connectAgent("alice");
+    const bob = await connectAgent("bob");
+    const leader = await connectLeader();
+
+    const dispatchPromise = Promise.race([waitForAgentDispatch(alice), waitForAgentDispatch(bob)]);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "rate limited", timeoutSec: 2 }));
+    const dispatch = await dispatchPromise;
+    const firstAgent = dispatch.employeeId === "alice" ? alice : bob;
+
+    firstAgent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, attempt: dispatch.attempt, pid: 1 }));
+    firstAgent.send(JSON.stringify({
+      type: "task.failed",
+      taskId: dispatch.taskId,
+      attempt: dispatch.attempt,
+      error: "429 rate limit",
+      recoverable: true,
+      cooldownMs: 10,
+    }));
+
+    await delay(120);
+    const snapshot = server.buildSnapshot();
+    const task = snapshot.tasks.find((t) => t.id === dispatch.taskId);
+    expect(task).toMatchObject({ status: "queued", employeeId: null, retryCount: 1 });
+    expect(snapshot.employees.every((employee) => employee.queueTaskId !== dispatch.taskId)).toBe(true);
+  });
+
+  it("忽略旧 attempt 的迟到任务事件", async () => {
+    const agent = await connectAgent("alice");
+    const leader = await connectLeader();
+
+    const dispatchPromise = waitForAgentDispatch(agent);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "attempt guard" }));
+    const dispatch = await dispatchPromise;
+
+    agent.send(JSON.stringify({ type: "task.failed", taskId: dispatch.taskId, attempt: dispatch.attempt! - 1, error: "late failure" }));
+    await delay(30);
+    expect(server.buildSnapshot().tasks.find((task) => task.id === dispatch.taskId)?.status).toBe("dispatched");
+
+    agent.send(JSON.stringify({ type: "task.cancelled", taskId: dispatch.taskId, attempt: dispatch.attempt! - 1 }));
+    await delay(30);
+    expect(server.buildSnapshot().employees.find((employee) => employee.id === "alice")?.mainTaskId).toBe(dispatch.taskId);
+    expect(server.buildSnapshot().tasks.find((task) => task.id === dispatch.taskId)?.status).toBe("dispatched");
+
+    agent.send(JSON.stringify({ type: "task.accepted", taskId: dispatch.taskId, attempt: dispatch.attempt }));
+    await waitUntil(() => server.buildSnapshot().tasks.some((task) => task.id === dispatch.taskId && task.status === "accepted"));
   });
 
   it("超时后标记 timeout 且忽略迟到完成事件", async () => {

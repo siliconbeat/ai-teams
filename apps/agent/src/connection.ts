@@ -86,7 +86,9 @@ export function send(state: ConnectionState, payload: EmployeeToServerMessage) {
   if (isTaskMessage(payload)) {
     state.bufferedMessages.push(payload);
     if (state.bufferedMessages.length > MAX_BUFFERED_MESSAGES) {
-      state.bufferedMessages = state.bufferedMessages.slice(-MAX_BUFFERED_MESSAGES);
+      // Preserve completion/failure acknowledgements over lossy output history.
+      const output = state.bufferedMessages.findIndex(m => m.type === "task.output");
+      state.bufferedMessages.splice(output >= 0 ? output : 0, 1);
     }
   }
 }
@@ -149,6 +151,7 @@ export function registerAgent(
     permissionMode: CLAUDE_PERMISSION_MODE,
     activeMainTaskId: mainTask?.taskId ?? null,
     activeQueueTaskId: queueTask?.taskId ?? null,
+    pendingTaskIds: state.bufferedMessages.flatMap(m => m.type === "task.completed" || m.type === "task.failed" || m.type === "task.cancelled" ? [m.taskId] : []),
     lastOutputSeq: Math.max(mainTask?.seq ?? 0, queueTask?.seq ?? 0),
     weight: EMPLOYEE_WEIGHT,
   });
@@ -173,7 +176,6 @@ export function connect(
 
   state.socket.on("open", () => {
     console.log(`[agent:${EMPLOYEE_ID}] connected to ${SERVER_URL}`);
-    resetReconnectAttempt();
     registerAgent(state, getMainTask(), getQueueTask());
   });
 
@@ -182,6 +184,7 @@ export function connect(
       const decrypted = decrypt(raw.toString());
       const message = parseServerToEmployeeMessage(parseJsonMessage(decrypted));
       if (message.type === "agent.registered") {
+        resetReconnectAttempt();
         flushBufferedMessages(state);
         requestTask(state);
         startHeartbeat(state);
@@ -193,6 +196,8 @@ export function connect(
   });
 
   state.socket.on("close", (code, reason) => {
+    if (state.heartbeatTimer) clearInterval(state.heartbeatTimer);
+    state.heartbeatTimer = null;
     if (code === 1008) {
       console.error(`[agent:${EMPLOYEE_ID}] 认证失败：Token 无效或服务器拒绝连接。${reason ? ` (${reason})` : ""}`);
       console.error(`[agent:${EMPLOYEE_ID}] 请检查 Agent Token 与员工 ID 是否和 Web 端注册记录一致。`);

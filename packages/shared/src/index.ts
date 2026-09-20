@@ -38,6 +38,10 @@ export interface TaskCliConfig {
   extraArgs?: string[];
 }
 
+export function isPermanentModelFailure(error: string) {
+  return /(?:\b(?:401|403)\b.*(?:unauthorized|forbidden|authentication|api)|(?:api|http|status|authentication).*\b(?:401|403)\b|invalid[ _-]?(?:api[ _-]?)?key|authentication[_ ]error|insufficient[_ ](?:quota|credits)|billing[_ ](?:error|disabled))/i.test(error);
+}
+
 export interface EmployeeSnapshot {
   id: string;
   name: string;
@@ -52,6 +56,13 @@ export interface EmployeeSnapshot {
   lastSeenAt: string;
   consecutiveQueueFailures: number;
   queuePaused?: boolean;
+  queueRecovery?: {
+    phase: "cooldown" | "probe" | "blocked";
+    until: number;
+    failures: number;
+    reason: string;
+    taskId?: string;
+  };
   version?: string;
   claudeVersion?: string;
   permissionMode?: string;
@@ -87,6 +98,7 @@ export interface TaskRecord {
   requiredLabels: string[] | null;
   status: TaskStatus;
   retryCount: number;
+  attempt: number;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
@@ -108,6 +120,8 @@ export interface TaskOutputChunk {
   employeeId: string;
   stream: "stdout" | "stderr";
   seq: number;
+  attempt?: number;
+  sourceSeq?: number;
   content: string;
   createdAt: string;
   delta?: boolean;
@@ -158,6 +172,7 @@ export interface MissionApprovalRecord {
 }
 
 export interface StateSnapshot {
+  taskDataGeneration?: string;
   employees: EmployeeSnapshot[];
   tasks: TaskRecord[];
   logs: Record<string, TaskOutputChunk[]>;
@@ -175,6 +190,7 @@ export type ServerToEmployeeMessage =
       workspace: string | null;
       timeoutSec: number;
       cliConfig: TaskCliConfig | null;
+      attempt?: number;
       sessionId?: string;
     }
   | { type: "task.cancel"; taskId: string }
@@ -197,19 +213,21 @@ export type EmployeeToServerMessage =
       permissionMode?: string;
       activeMainTaskId?: string | null;
       activeQueueTaskId?: string | null;
+      pendingTaskIds?: string[];
       lastOutputSeq?: number;
       weight?: number;
     }
   | { type: "agent.heartbeat"; employeeId: string }
   | { type: "agent.request_task"; employeeId: string }
-  | { type: "task.accepted"; taskId: string }
-  | { type: "task.started"; taskId: string; pid: number; sessionId?: string | null; claudeVersion?: string }
-  | { type: "task.output"; taskId: string; stream: "stdout" | "stderr"; seq: number; content: string; delta?: boolean }
+  | { type: "task.accepted"; taskId: string; attempt?: number }
+  | { type: "task.started"; taskId: string; pid: number; sessionId?: string | null; claudeVersion?: string; attempt?: number }
+  | { type: "task.output"; taskId: string; stream: "stdout" | "stderr"; seq: number; content: string; delta?: boolean; attempt?: number }
   | {
       type: "task.completed";
       taskId: string;
       exitCode: number;
       summary?: string;
+      attempt?: number;
       durationMs?: number | null;
       durationApiMs?: number | null;
       numTurns?: number | null;
@@ -219,8 +237,8 @@ export type EmployeeToServerMessage =
       usageCacheReadTokens?: number | null;
       usageCacheCreationTokens?: number | null;
     }
-  | { type: "task.failed"; taskId: string; error: string }
-  | { type: "task.cancelled"; taskId: string }
+  | { type: "task.failed"; taskId: string; error: string; recoverable?: boolean; cooldownMs?: number; retryAfterMs?: number; attempt?: number }
+  | { type: "task.cancelled"; taskId: string; attempt?: number }
   | { type: "session.reset.ack"; employeeId: string };
 
 export type LeaderToServerMessage =
@@ -251,6 +269,7 @@ export type LeaderToServerMessage =
 
 export type ServerToLeaderMessage =
   | { type: "snapshot"; snapshot: StateSnapshot }
+  | { type: "tasks.cleared"; snapshot: StateSnapshot }
   | { type: "employee.upsert"; employee: EmployeeSnapshot }
   | { type: "employee.delete"; employeeId: string }
   | { type: "task.upsert"; task: TaskRecord }
@@ -344,6 +363,7 @@ export function parseEmployeeToServerMessage(value: unknown): EmployeeToServerMe
       permissionMode: optionalStringField(message, "permissionMode"),
       activeMainTaskId: optionalNullableStringField(message, "activeMainTaskId"),
       activeQueueTaskId: optionalNullableStringField(message, "activeQueueTaskId"),
+      pendingTaskIds: message.pendingTaskIds === undefined ? undefined : stringArrayField(message, "pendingTaskIds").slice(0, 400),
       lastOutputSeq: optionalNonNegativeNumberField(message, "lastOutputSeq"),
       weight: optionalNonNegativeNumberField(message, "weight"),
     };
@@ -358,7 +378,11 @@ export function parseEmployeeToServerMessage(value: unknown): EmployeeToServerMe
   }
 
   if (type === "task.accepted" || type === "task.cancelled") {
-    return { type, taskId: nonEmptyStringField(message, "taskId") };
+    return {
+      type,
+      taskId: nonEmptyStringField(message, "taskId"),
+      attempt: optionalNonNegativeNumberField(message, "attempt"),
+    };
   }
 
   if (type === "task.started") {
@@ -368,6 +392,7 @@ export function parseEmployeeToServerMessage(value: unknown): EmployeeToServerMe
       pid: nonNegativeNumberField(message, "pid"),
       sessionId: optionalNullableStringField(message, "sessionId"),
       claudeVersion: optionalStringField(message, "claudeVersion"),
+      attempt: optionalNonNegativeNumberField(message, "attempt"),
     };
   }
 
@@ -383,6 +408,7 @@ export function parseEmployeeToServerMessage(value: unknown): EmployeeToServerMe
       stream,
       seq: positiveIntegerField(message, "seq"),
       content: stringField(message, "content"),
+      attempt: optionalNonNegativeNumberField(message, "attempt"),
       ...(delta ? { delta: true } : {}),
     };
   }
@@ -393,6 +419,7 @@ export function parseEmployeeToServerMessage(value: unknown): EmployeeToServerMe
       taskId: nonEmptyStringField(message, "taskId"),
       exitCode: nonNegativeNumberField(message, "exitCode"),
       summary: optionalStringField(message, "summary"),
+      attempt: optionalNonNegativeNumberField(message, "attempt"),
       durationMs: optionalNonNegativeNumberField(message, "durationMs"),
       durationApiMs: optionalNonNegativeNumberField(message, "durationApiMs"),
       numTurns: optionalNonNegativeNumberField(message, "numTurns"),
@@ -405,7 +432,15 @@ export function parseEmployeeToServerMessage(value: unknown): EmployeeToServerMe
   }
 
   if (type === "task.failed") {
-    return { type, taskId: nonEmptyStringField(message, "taskId"), error: nonEmptyStringField(message, "error") };
+    return {
+      type,
+      taskId: nonEmptyStringField(message, "taskId"),
+      error: nonEmptyStringField(message, "error"),
+      recoverable: message.recoverable === true ? true : undefined,
+      cooldownMs: optionalNonNegativeNumberField(message, "cooldownMs"),
+      retryAfterMs: optionalNonNegativeNumberField(message, "retryAfterMs"),
+      attempt: optionalNonNegativeNumberField(message, "attempt"),
+    };
   }
 
   if (type === "session.reset.ack") {
@@ -431,6 +466,7 @@ export function parseServerToEmployeeMessage(value: unknown): ServerToEmployeeMe
       workspace: nullableStringField(message, "workspace"),
       timeoutSec: positiveNumberField(message, "timeoutSec"),
       cliConfig: optionalCliConfigField(message, "cliConfig"),
+      attempt: optionalNonNegativeNumberField(message, "attempt"),
       ...(sessionId !== undefined ? { sessionId } : {}),
     };
   }
@@ -468,6 +504,7 @@ export function parseServerToLeaderMessage(value: unknown): ServerToLeaderMessag
 
   if (
     type === "snapshot" ||
+    type === "tasks.cleared" ||
     type === "employee.upsert" ||
     type === "employee.delete" ||
     type === "task.upsert" ||

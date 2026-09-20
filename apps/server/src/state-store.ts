@@ -5,6 +5,7 @@ export type CronNextDateLike = Date | { toISO(): string | null };
 export type CronJobLike = { stop(): void; nextDate(): CronNextDateLike | null };
 
 export interface StateStore {
+  clearingTasks: boolean;
   agentSockets: Map<string, WebSocket>;
   leaderSockets: Set<WebSocket>;
   employees: Map<string, EmployeeSnapshot>;
@@ -26,6 +27,7 @@ export interface StateStore {
 
 export function createInMemoryStateStore(): StateStore {
   return {
+    clearingTasks: false,
     agentSockets: new Map(),
     leaderSockets: new Set(),
     employees: new Map(),

@@ -167,6 +167,7 @@ export const snapshotSchema = {
   type: "object",
   required: ["employees", "tasks", "logs"],
   properties: {
+    taskDataGeneration: { type: "string" },
     employees: { type: "array", items: employeeSnapshotSchema },
     tasks: { type: "array", items: taskRecordSchema },
     logs: {

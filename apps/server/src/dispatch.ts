@@ -16,6 +16,7 @@ import {
 } from "@ai-teams/shared";
 import type { Database } from "./db.js";
 import type { StateStore } from "./state-store.js";
+import { nextQueueRecovery, isPermanentModelFailure } from "./queue-recovery.js";
 import { deleteTaskLogsThroughSeq, getAgentRegistration, persistEmployee, persistTask, persistTaskLog, persistTaskWebhook, upsertAgentRegistration } from "./db.js";
 import type { WebhookEventType } from "./schemas.js";
 import type { MaybeEncryptor } from "./crypto.js";
@@ -41,16 +42,81 @@ export type DispatchContext = {
   authToken: string;
   defaultTimeoutSec: number;
   disconnectGraceMs: number;
+  runningDisconnectGraceMs: number;
   db: Database;
   log: FastifyInstance["log"];
   encryptor?: MaybeEncryptor;
   maxLogChunksPerTask: number;
+  maxRuntimeTasks: number;
   hashAgentToken?: (token: string) => string;
 };
 
 export function createDispatch(ctx: DispatchContext) {
   const { state, db, log } = ctx;
   const retryDelays = new Map<string, NodeJS.Timeout>();
+  const pendingWrites = new Set<Promise<void>>();
+  const employeeWrites = new Map<string, Promise<void>>();
+  let deferredWrites: Array<() => Promise<void>> = [];
+  const deferredMessages: Array<{ message: EmployeeToServerMessage; socket: WebSocket }> = [];
+  const pendingCancellations = new Map<string, Set<string>>();
+  let webhookController = new AbortController();
+
+  function writeTaskData(write: () => Promise<void>) {
+    if (state.clearingTasks) { deferredWrites.push(write); return; }
+    const pending = write().catch((error) => log.error({ error }, "Failed to persist task data"));
+    pendingWrites.add(pending);
+    void pending.then(() => pendingWrites.delete(pending));
+  }
+
+  function requestOrphanCancellation(employeeId: string, taskId: string, socket: WebSocket) {
+    const pending = pendingCancellations.get(employeeId) ?? new Set<string>();
+    pending.add(taskId);
+    pendingCancellations.set(employeeId, pending);
+    sendJson<ServerToEmployeeMessage>(socket, { type: "task.cancel", taskId }, ctx.encryptor);
+  }
+  const recoveryTimers = new Map<string, NodeJS.Timeout>();
+  let closed = false;
+
+  function armRecovery(employee: EmployeeSnapshot) {
+    const existing = recoveryTimers.get(employee.id);
+    if (existing) clearTimeout(existing);
+    recoveryTimers.delete(employee.id);
+    const recovery = employee.queueRecovery;
+    if (closed || state.clearingTasks || employee.queuePaused || recovery?.phase !== "cooldown") return;
+    const timer = setTimeout(() => {
+      recoveryTimers.delete(employee.id);
+      if (closed || state.clearingTasks || employee.queuePaused || employee.queueRecovery !== recovery) return;
+      recovery.phase = "probe";
+      if (recovery.taskId) {
+        const retry = retryDelays.get(recovery.taskId);
+        if (retry) clearTimeout(retry);
+        retryDelays.delete(recovery.taskId);
+      }
+      upsertEmployee(employee);
+      dispatchSharedQueuedTasks();
+    }, Math.max(0, recovery.until - Date.now()));
+    timer.unref();
+    recoveryTimers.set(employee.id, timer);
+  }
+
+  function coolDownEmployee(employeeId: string, reason: string, requestedMs?: number, permanent = false) {
+    const employee = state.employees.get(employeeId);
+    if (!employee) return;
+    const recovery = nextQueueRecovery(employee.queueRecovery, reason, Date.now(), requestedMs);
+    employee.queueRecovery = permanent ? { ...recovery, phase: "blocked", until: 0 } : recovery;
+    upsertEmployee(employee);
+    armRecovery(employee);
+  }
+
+  function hasProbeInFlight() {
+    return [...state.employees.values()].some(e => e.queueRecovery?.phase === "probe" && !!e.queueTaskId);
+  }
+
+  function hasAutomaticRecovery(requiredLabels?: string[] | null) {
+    return [...state.employees.values()].some(e => !e.queuePaused && e.status === "online" &&
+      (!requiredLabels?.length || requiredLabels.every(label => e.labels.includes(label))) &&
+      e.queueRecovery && e.queueRecovery.phase !== "blocked");
+  }
 
   function broadcastToLeaders(payload: ServerToLeaderMessage) {
     for (const socket of state.leaderSockets) {
@@ -60,7 +126,18 @@ export function createDispatch(ctx: DispatchContext) {
 
   function upsertEmployee(employee: EmployeeSnapshot) {
     state.employees.set(employee.id, employee);
-    persistEmployee(db, employee).catch((error) => log.error({ error, employeeId: employee.id }, "Failed to persist employee"));
+    // PostgreSQL pool writes may otherwise complete out of order, overwriting a
+    // new cooldown with an older heartbeat snapshot.
+    const snapshot = structuredClone(employee);
+    const pending = (employeeWrites.get(employee.id) ?? Promise.resolve())
+      .then(() => persistEmployee(db, snapshot))
+      .catch((error) => log.error({ error, employeeId: employee.id }, "Failed to persist employee"));
+    employeeWrites.set(employee.id, pending);
+    pendingWrites.add(pending);
+    void pending.then(() => {
+      pendingWrites.delete(pending);
+      if (employeeWrites.get(employee.id) === pending) employeeWrites.delete(employee.id);
+    });
     broadcastToLeaders({ type: "employee.upsert", employee });
   }
 
@@ -70,32 +147,39 @@ export function createDispatch(ctx: DispatchContext) {
     state.heartbeatTimers.set(employeeId, setTimeout(() => {
       state.heartbeatTimers.delete(employeeId);
       const employee = state.employees.get(employeeId);
-      if (!employee || employee.status === "offline") return;
+      if (closed || !employee || employee.status === "offline") return;
       log.warn({ employeeId }, "Agent heartbeat timeout, marking offline");
       employee.status = "offline";
       upsertEmployee(employee);
-      // Reclaim queue-slot tasks that haven't started running yet
-      const queueTaskId = employee.queueTaskId;
-      if (queueTaskId) {
-        const task = state.tasks.get(queueTaskId);
-        if (task && (task.status === "queued" || task.status === "dispatched")) {
-          task.status = "queued";
-          task.employeeId = null;
-          task.startedAt = null;
-          upsertTask(task);
-          state.sharedTaskQueue.push(task.id);
-          log.info({ taskId: task.id }, "Reclaimed queue task from unresponsive agent");
-        }
-      }
-      setQueueTask(employeeId, null, null);
-      dispatchSharedQueuedTasks();
+      // Do not free an occupied slot while its process may still be running.
+      // Closing the half-open socket enters the normal disconnect grace path.
+      state.agentSockets.get(employeeId)?.terminate();
     }, 30000));
   }
 
   function upsertTask(task: TaskRecord) {
     state.tasks.set(task.id, task);
-    persistTask(db, task).catch((error) => log.error({ error, taskId: task.id }, "Failed to persist task"));
+    writeTaskData(() => persistTask(db, task));
     broadcastToLeaders({ type: "task.upsert", task });
+    pruneRuntimeState();
+  }
+
+  function pruneRuntimeState() {
+    if (state.tasks.size <= ctx.maxRuntimeTasks) {
+      return;
+    }
+    const terminalTasks = [...state.tasks.values()]
+      .filter((task) => TERMINAL_STATUSES.has(task.status))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const removeCount = Math.min(terminalTasks.length, state.tasks.size - ctx.maxRuntimeTasks);
+    for (let i = 0; i < removeCount; i += 1) {
+      const taskId = terminalTasks[i]!.id;
+      state.tasks.delete(taskId);
+      state.taskLogs.delete(taskId);
+      const timer = retryDelays.get(taskId);
+      if (timer) clearTimeout(timer);
+      retryDelays.delete(taskId);
+    }
   }
 
   function signWebhookPayload(body: string): string {
@@ -110,7 +194,9 @@ export function createDispatch(ctx: DispatchContext) {
     signature: string,
     taskId: string,
     attempt = 1,
+    signal = webhookController.signal,
   ) {
+    if (signal.aborted) return;
     try {
       const response = await fetch(webhookUrl, {
         method: "POST",
@@ -119,11 +205,11 @@ export function createDispatch(ctx: DispatchContext) {
           "x-ai-teams-signature": signature,
         },
         body,
-        signal: AbortSignal.timeout(10_000),
+        signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
       });
       if (!response.ok && attempt < 3) {
         await new Promise((resolve) => setTimeout(resolve, 1000));
-        return deliverWebhook(webhookUrl, body, signature, taskId, attempt + 1);
+        return deliverWebhook(webhookUrl, body, signature, taskId, attempt + 1, signal);
       }
       if (!response.ok) {
         log.warn({ taskId, webhookUrl, status: response.status, attempt }, "Task webhook returned non-2xx after retries");
@@ -131,15 +217,17 @@ export function createDispatch(ctx: DispatchContext) {
         log.info({ taskId, webhookUrl, attempt }, "Task webhook succeeded on retry");
       }
     } catch (error) {
+      if (signal.aborted) return;
       if (attempt < 3) {
         await new Promise((resolve) => setTimeout(resolve, 1000));
-        return deliverWebhook(webhookUrl, body, signature, taskId, attempt + 1);
+        return deliverWebhook(webhookUrl, body, signature, taskId, attempt + 1, signal);
       }
       log.warn({ taskId, webhookUrl, error, attempt }, "Task webhook delivery failed after retries");
     }
   }
 
   function postTaskWebhook(task: TaskRecord, event: WebhookEventType, extra: Record<string, unknown> = {}) {
+    if (state.clearingTasks) return;
     const webhookUrl = state.taskWebhooks.get(task.id);
     if (!webhookUrl) {
       return;
@@ -235,10 +323,38 @@ export function createDispatch(ctx: DispatchContext) {
   }
 
   const MAX_QUEUE_RETRY = 3;
+  const MAX_RECOVERABLE_QUEUE_RETRY = 8;
   const MAX_CONSECUTIVE_QUEUE_FAILURES = 5;
-  const AUTO_RESUME_MS = 10 * 60 * 1000; // 10 minutes
+  const MAX_MODEL_COOLDOWN_MS = 10 * 60 * 1000;
 
-  function trackQueueFailure(employeeId: string) {
+  function clampDelayMs(value: number, fallback: number) {
+    if (!Number.isFinite(value) || value <= 0) {
+      return fallback;
+    }
+    return Math.max(1_000, Math.min(value, MAX_MODEL_COOLDOWN_MS));
+  }
+
+  function computeRecoverableRetryDelayMs(task: TaskRecord, requestedDelayMs?: number) {
+    const base = requestedDelayMs !== undefined ? clampDelayMs(requestedDelayMs, 30_000) : 30_000;
+    const exponential = Math.min(5_000 * Math.pow(2, Math.max(0, task.retryCount - 1)), MAX_MODEL_COOLDOWN_MS);
+    const jitter = Math.floor(Math.random() * 2_000);
+    return clampDelayMs(Math.max(base, exponential) + jitter, 30_000);
+  }
+
+  function scheduleTaskRetry(taskId: string, delayMs: number) {
+    const existing = retryDelays.get(taskId);
+    if (existing) {
+      clearTimeout(existing);
+    }
+    const timer = setTimeout(() => {
+      retryDelays.delete(taskId);
+      dispatchSharedQueuedTasks();
+    }, delayMs);
+    timer.unref();
+    retryDelays.set(taskId, timer);
+  }
+
+  function trackQueueFailure(employeeId: string, reason: string) {
     const prev = state.consecutiveQueueFailures.get(employeeId) ?? 0;
     const next = prev + 1;
     state.consecutiveQueueFailures.set(employeeId, next);
@@ -248,13 +364,14 @@ export function createDispatch(ctx: DispatchContext) {
       upsertEmployee(emp);
     }
     if (next >= MAX_CONSECUTIVE_QUEUE_FAILURES) {
-      state.failureTimestamps.set(employeeId, Date.now());
+      coolDownEmployee(employeeId, reason);
       log.warn({ employeeId, consecutiveFailures: next }, "Agent paused for queue tasks due to consecutive failures");
     }
   }
 
-  function reEnqueueOrTerminalFail(task: TaskRecord, employeeId: string | null, error: string, options?: { clearSlot?: boolean; incrementRetry?: boolean }): true | false {
-    if (task.retryCount < MAX_QUEUE_RETRY) {
+  function reEnqueueOrTerminalFail(task: TaskRecord, employeeId: string | null, error: string, options?: { clearSlot?: boolean; incrementRetry?: boolean; recoverable?: boolean; retryDelayMs?: number }): true | false {
+    const maxRetry = options?.recoverable ? MAX_RECOVERABLE_QUEUE_RETRY : MAX_QUEUE_RETRY;
+    if (task.retryCount < maxRetry) {
       if (options?.incrementRetry !== false) {
         task.retryCount += 1;
       }
@@ -264,19 +381,22 @@ export function createDispatch(ctx: DispatchContext) {
       task.finishedAt = null;
       task.error = error;
       task.summary = task.summary ?? error;
-      log.info({ taskId: task.id, retryCount: task.retryCount, error, previousEmployeeId: employeeId }, "Queue task re-enqueued after failure");
+      log.info({ taskId: task.id, retryCount: task.retryCount, error, previousEmployeeId: employeeId, retryDelayMs: options?.retryDelayMs, recoverable: options?.recoverable }, "Queue task re-enqueued after failure");
       upsertTask(task);
       if (employeeId && options?.clearSlot !== false) {
         setQueueTask(employeeId, null, null);
       }
       enqueueSharedTask(task.id);
+      if (options?.retryDelayMs && options.retryDelayMs > 0) {
+        scheduleTaskRetry(task.id, options.retryDelayMs);
+      }
       dispatchSharedQueuedTasks();
       return true;
     }
     return false;
   }
 
-  function markTaskFailed(taskId: string, error: string) {
+  function markTaskFailed(taskId: string, error: string, options?: { recoverable?: boolean; cooldownMs?: number; retryAfterMs?: number }) {
     const task = state.tasks.get(taskId);
     if (!task || TERMINAL_STATUSES.has(task.status)) {
       return;
@@ -287,13 +407,31 @@ export function createDispatch(ctx: DispatchContext) {
     const wasRunning = task.status === "accepted" || task.status === "running";
 
     // Only count as consecutive failure if the task was actually running (not a dispatch rejection)
-    if (isQueueTask && employeeId && wasRunning) {
-      trackQueueFailure(employeeId);
+    if (isQueueTask && employeeId && wasRunning && !options?.recoverable) {
+      trackQueueFailure(employeeId, error);
     }
 
-    if (isQueueTask && reEnqueueOrTerminalFail(task, employeeId, error, {
-      clearSlot: wasRunning,
-      incrementRetry: wasRunning,
+    const requestedCooldownMs = options?.retryAfterMs ?? options?.cooldownMs;
+    const retryDelayMs = options?.recoverable
+      ? computeRecoverableRetryDelayMs(task, requestedCooldownMs)
+      : undefined;
+    const permanent = isPermanentModelFailure(error);
+    if (isQueueTask && employeeId) {
+      const employee = state.employees.get(employeeId);
+      if (permanent || options?.recoverable || employee?.queueRecovery?.phase === "probe") {
+        coolDownEmployee(employeeId, error, requestedCooldownMs, permanent);
+      }
+      if (employee?.queueRecovery) {
+        employee.queueRecovery.taskId = task.id;
+        upsertEmployee(employee);
+      }
+    }
+
+    if (isQueueTask && !permanent && reEnqueueOrTerminalFail(task, employeeId, error, {
+      clearSlot: true,
+      incrementRetry: true,
+      recoverable: options?.recoverable,
+      retryDelayMs,
     })) {
       return;
     }
@@ -324,17 +462,20 @@ export function createDispatch(ctx: DispatchContext) {
       upsertTask(task);
     }
     const history = state.taskLogs.get(chunk.taskId) ?? [];
+    // Agent sequence restarts on every attempt. Keep the storage key monotonic
+    // and use (attempt, sourceSeq) to suppress reconnect replay duplicates.
+    if (history.some(item => item.attempt === chunk.attempt && item.sourceSeq === chunk.sourceSeq)) return;
+    chunk.seq = (history.at(-1)?.seq ?? 0) + 1;
     history.push(chunk);
     if (history.length > ctx.maxLogChunksPerTask) {
       const removed = history.splice(0, history.length - ctx.maxLogChunksPerTask);
       const cutoffSeq = removed[removed.length - 1]?.seq;
       if (cutoffSeq !== undefined) {
-        deleteTaskLogsThroughSeq(db, chunk.taskId, cutoffSeq)
-          .catch((error) => log.error({ error, taskId: chunk.taskId, cutoffSeq }, "Failed to prune task logs"));
+        writeTaskData(() => deleteTaskLogsThroughSeq(db, chunk.taskId, cutoffSeq));
       }
     }
     state.taskLogs.set(chunk.taskId, history);
-    persistTaskLog(db, chunk).catch((error) => log.error({ error, taskId: chunk.taskId, seq: chunk.seq }, "Failed to persist task log"));
+    writeTaskData(() => persistTaskLog(db, chunk));
     broadcastToLeaders({ type: "task.output", chunk });
     if (!chunk.delta) {
       postTaskWebhook(task, "task.output", { chunk });
@@ -355,6 +496,9 @@ export function createDispatch(ctx: DispatchContext) {
     const employeeId = task.employeeId;
     const isQueueTask = task.targetMode === "queue";
     const error = `任务超过 ${task.timeoutSec} 秒未完成，已超时。`;
+    if (employeeId && state.employees.get(employeeId)?.queueRecovery?.phase === "probe") {
+      coolDownEmployee(employeeId, error);
+    }
 
     // Timeout doesn't count as consecutive failure — the agent isn't broken, just slow
     // Don't clear slot — agent hasn't processed cancel yet
@@ -403,6 +547,7 @@ export function createDispatch(ctx: DispatchContext) {
   }
 
   function isEmployeeAvailableForQueue(employee: EmployeeSnapshot, requiredLabels?: string[] | null) {
+    if (pendingCancellations.has(employee.id)) return false;
     const socket = state.agentSockets.get(employee.id);
     if (employee.status !== "online" || employee.queueTaskId || socket?.readyState !== WebSocket.OPEN) {
       return false;
@@ -411,22 +556,10 @@ export function createDispatch(ctx: DispatchContext) {
       return false;
     }
 
-    const failures = state.consecutiveQueueFailures.get(employee.id) ?? 0;
-    if (failures >= MAX_CONSECUTIVE_QUEUE_FAILURES) {
-      const failureTs = state.failureTimestamps.get(employee.id);
-      if (failureTs && (Date.now() - failureTs) > AUTO_RESUME_MS) {
-        state.consecutiveQueueFailures.set(employee.id, 0);
-        state.failureTimestamps.delete(employee.id);
-        const emp = state.employees.get(employee.id);
-        if (emp) {
-          emp.consecutiveQueueFailures = 0;
-          upsertEmployee(emp);
-        }
-        log.info({ employeeId: employee.id }, "Agent auto-resumed after timeout, failure count reset");
-      } else {
-        return false;
-      }
-    }
+    if (employee.queueRecovery?.phase === "blocked" || employee.queueRecovery?.phase === "cooldown") return false;
+    // Shared model capacity: only one queue-slot recovery probe globally.
+    if (hasProbeInFlight()) return false;
+    if (hasAutomaticRecovery(requiredLabels) && employee.queueRecovery?.phase !== "probe") return false;
 
     if (requiredLabels && requiredLabels.length > 0) {
       return requiredLabels.every((label) => employee.labels.includes(label));
@@ -483,10 +616,10 @@ export function createDispatch(ctx: DispatchContext) {
   }
 
   function dispatchSharedQueuedTask(preferredEmployeeId?: string): boolean {
+    if (closed || state.clearingTasks) return false;
     if (state.sharedTaskQueue.length === 0) {
       return false;
     }
-
     for (let i = 0; i < state.sharedTaskQueue.length; i++) {
       const taskId = state.sharedTaskQueue[i]!;
       const task = state.tasks.get(taskId);
@@ -542,7 +675,7 @@ export function createDispatch(ctx: DispatchContext) {
     }
 
     const currentSlotTaskId = isQueueSlot ? employee.queueTaskId : employee.mainTaskId;
-    if (currentSlotTaskId && currentSlotTaskId !== task.id) {
+    if (pendingCancellations.has(assignedEmployeeId) || (currentSlotTaskId && currentSlotTaskId !== task.id)) {
       const queueMap = isQueueSlot ? state.taskQueues : state.mainTaskQueues;
       const queue = queueMap.get(assignedEmployeeId) ?? [];
       queue.push(task.id);
@@ -550,9 +683,14 @@ export function createDispatch(ctx: DispatchContext) {
       return;
     }
 
+    if (isQueueSlot && employee.queueRecovery?.phase === "probe") {
+      // Release the Agent's independent failure latch before dispatching the probe.
+      sendJson<ServerToEmployeeMessage>(socket, { type: "queue.resume" }, ctx.encryptor);
+    }
     task.employeeId = assignedEmployeeId;
+    task.attempt += 1;
     task.status = "dispatched";
-    log.info({ taskId: task.id, employeeId: assignedEmployeeId, targetMode: task.targetMode, prompt: task.prompt.slice(0, 80) }, "Task dispatched");
+    log.info({ taskId: task.id, employeeId: assignedEmployeeId, attempt: task.attempt, targetMode: task.targetMode, prompt: task.prompt.slice(0, 80) }, "Task dispatched");
     upsertTask(task);
     if (isQueueSlot) {
       setQueueTask(assignedEmployeeId, task.id, task.prompt);
@@ -572,13 +710,15 @@ export function createDispatch(ctx: DispatchContext) {
       workspace: task.workspace,
       timeoutSec: task.timeoutSec,
       cliConfig: task.cliConfig,
+      attempt: task.attempt,
       ...(task.sessionId ? { sessionId: task.sessionId } : {}),
     }, ctx.encryptor);
   }
 
   function dispatchNextQueuedTask(employeeId: string) {
+    if (state.clearingTasks || pendingCancellations.has(employeeId)) return;
     const employee = state.employees.get(employeeId);
-    if (!employee || employee.queueTaskId || employee.status !== "online") {
+    if (!employee || !isEmployeeAvailableForQueue(employee)) {
       return;
     }
     const queue = state.taskQueues.get(employeeId);
@@ -601,6 +741,7 @@ export function createDispatch(ctx: DispatchContext) {
   }
 
   function dispatchNextMainQueuedTask(employeeId: string) {
+    if (state.clearingTasks || pendingCancellations.has(employeeId)) return;
     const employee = state.employees.get(employeeId);
     if (!employee || employee.mainTaskId || employee.status !== "online") {
       return;
@@ -649,6 +790,7 @@ export function createDispatch(ctx: DispatchContext) {
       requiredLabels: requiredLabels ?? null,
       status: "queued",
       retryCount: 0,
+      attempt: 0,
       createdAt: nowIso(),
       startedAt: null,
       finishedAt: null,
@@ -667,7 +809,7 @@ export function createDispatch(ctx: DispatchContext) {
 
     if (webhookUrl) {
       state.taskWebhooks.set(task.id, webhookUrl);
-      persistTaskWebhook(db, task.id, webhookUrl).catch((error) => log.error({ error, taskId: task.id }, "Failed to persist task webhook"));
+      writeTaskData(() => persistTaskWebhook(db, task.id, webhookUrl));
     }
     upsertTask(task);
     log.info({ taskId: task.id, targetMode, employeeId, prompt: prompt.slice(0, 80) }, "Task created");
@@ -699,6 +841,7 @@ export function createDispatch(ctx: DispatchContext) {
     priority?: number,
     requiredLabels?: string[] | null,
   ) {
+    if (state.clearingTasks) return { ok: false as const, code: "tasks_clearing", message: "正在清空任务，请稍后重试。" };
     const leaderCommandId = randomUUID();
     const resolvedPriority = message.priority ?? priority;
     const resolvedRequiredLabels = message.requiredLabels ?? requiredLabels;
@@ -731,54 +874,17 @@ export function createDispatch(ctx: DispatchContext) {
 
   function recoverOrFail(taskId: string, employeeId: string, isQueueSlot: boolean) {
     const task = state.tasks.get(taskId);
-    if (!task || TERMINAL_STATUSES.has(task.status)) return;
-
-    const socket = state.agentSockets.get(employeeId);
-    if (!socket) {
-      markTaskFailed(taskId, "员工重连时未恢复任务，且 socket 不可用。");
+    if (!task || TERMINAL_STATUSES.has(task.status) || task.employeeId !== employeeId) return;
+    clearTaskTimeout(task.id);
+    // Reconnection recovery consumes the same finite task budget, and uses the
+    // normal tracked timeout rather than an unfenced 120-second closure.
+    if (task.retryCount >= (isQueueSlot ? MAX_RECOVERABLE_QUEUE_RETRY : MAX_QUEUE_RETRY)) {
+      task.retryCount = MAX_RECOVERABLE_QUEUE_RETRY;
+      markTaskFailed(task.id, "重连恢复次数已用尽，请检查 Agent 后重新提交任务。");
       return;
     }
-
-    // Re-dispatch the task with sessionId for --resume
-    task.status = "dispatched";
-    log.info({ taskId: task.id, employeeId, sessionId: task.sessionId, prompt: task.prompt.slice(0, 80) }, "Re-dispatching task for session recovery");
-    upsertTask(task);
-
-    sendJson<ServerToEmployeeMessage>(socket, {
-      type: "task.dispatch",
-      taskId: task.id,
-      leaderCommandId: task.leaderCommandId,
-      employeeId,
-      targetMode: task.targetMode,
-      prompt: task.prompt,
-      workspace: task.workspace,
-      timeoutSec: task.timeoutSec,
-      cliConfig: task.cliConfig,
-      ...(task.sessionId ? { sessionId: task.sessionId } : {}),
-    }, ctx.encryptor);
-
-    // If agent doesn't recover within 120s, re-queue or fail
-    const recoveryTimer = setTimeout(() => {
-      const t = state.tasks.get(taskId);
-      if (!t || TERMINAL_STATUSES.has(t.status) || t.status === "running" || t.status === "accepted") return;
-      log.warn({ taskId, employeeId }, "Task recovery timed out after 120s, re-queuing");
-      if (isQueueSlot) {
-        t.status = "queued";
-        t.employeeId = null;
-        t.startedAt = null;
-        upsertTask(t);
-        if (isQueueSlot) {
-          setQueueTask(employeeId, null, null);
-        } else {
-          setMainTask(employeeId, null, null);
-        }
-        enqueueSharedTask(t.id);
-        dispatchSharedQueuedTasks();
-      } else {
-        markTaskFailed(taskId, "员工重连后 120s 未恢复任务，自动标记失败。");
-      }
-    }, 120_000);
-    recoveryTimer.unref();
+    task.retryCount += 1;
+    dispatchTask(task, employeeId);
   }
 
   async function validateAgentRegistration(message: Extract<EmployeeToServerMessage, { type: "agent.register" }>, socket: WebSocket) {
@@ -828,12 +934,19 @@ export function createDispatch(ctx: DispatchContext) {
     if (!(await validateAgentRegistration(message, socket))) {
       return;
     }
+    if (socket.readyState !== WebSocket.OPEN || closed) return;
+    if (state.clearingTasks) {
+      deferredMessages.push({ message, socket });
+      return;
+    }
 
     const previous = state.employees.get(message.employeeId);
     const previousMainTaskId = previous?.mainTaskId ?? null;
     const previousQueueTaskId = previous?.queueTaskId ?? null;
-    const activeMainTaskId = message.activeMainTaskId ?? null;
-    const activeQueueTaskId = message.activeQueueTaskId ?? null;
+    // A task may have finished while disconnected. Let buffered terminal events
+    // settle that attempt before deciding to restart its process.
+    const activeMainTaskId = message.activeMainTaskId ?? (previousMainTaskId && message.pendingTaskIds?.includes(previousMainTaskId) ? previousMainTaskId : null);
+    const activeQueueTaskId = message.activeQueueTaskId ?? (previousQueueTaskId && message.pendingTaskIds?.includes(previousQueueTaskId) ? previousQueueTaskId : null);
 
     const disconnectTimer = state.disconnectTimers.get(message.employeeId);
     if (disconnectTimer) {
@@ -852,8 +965,21 @@ export function createDispatch(ctx: DispatchContext) {
       }
     }
 
+    const replacedSocket = state.agentSockets.get(message.employeeId);
+    if (replacedSocket && replacedSocket !== socket) {
+      state.socketToEmployeeId.delete(replacedSocket);
+      replacedSocket.close(1008, "agent_connection_replaced");
+    }
     state.agentSockets.set(message.employeeId, socket);
     state.socketToEmployeeId.set(socket, message.employeeId);
+    pendingCancellations.delete(message.employeeId);
+    // A reconnect after cleanup (including a server restart) must stop old work.
+    for (const taskId of [activeMainTaskId, activeQueueTaskId]) {
+      const task = taskId ? state.tasks.get(taskId) : undefined;
+      if (taskId && (!task || TERMINAL_STATUSES.has(task.status) || task.employeeId !== message.employeeId)) {
+        requestOrphanCancellation(message.employeeId, taskId, socket);
+      }
+    }
 
     let mainTaskId: string | null = null;
     let mainTaskPrompt: string | null = null;
@@ -862,7 +988,11 @@ export function createDispatch(ctx: DispatchContext) {
 
     // Resolve main slot
     if (previousMainTaskId && activeMainTaskId !== previousMainTaskId) {
-      recoverOrFail(previousMainTaskId, message.employeeId, false);
+      const task = state.tasks.get(previousMainTaskId);
+      if (task && !TERMINAL_STATUSES.has(task.status) && task.employeeId === message.employeeId) {
+        mainTaskId = task.id;
+        mainTaskPrompt = task.prompt;
+      }
     } else if (activeMainTaskId) {
       const activeTask = state.tasks.get(activeMainTaskId);
       if (activeTask && activeTask.employeeId === message.employeeId && !TERMINAL_STATUSES.has(activeTask.status)) {
@@ -873,7 +1003,11 @@ export function createDispatch(ctx: DispatchContext) {
 
     // Resolve queue slot
     if (previousQueueTaskId && activeQueueTaskId !== previousQueueTaskId) {
-      recoverOrFail(previousQueueTaskId, message.employeeId, true);
+      const task = state.tasks.get(previousQueueTaskId);
+      if (task && !TERMINAL_STATUSES.has(task.status) && task.employeeId === message.employeeId) {
+        queueTaskId = task.id;
+        queueTaskPrompt = task.prompt;
+      }
     } else if (activeQueueTaskId) {
       const activeTask = state.tasks.get(activeQueueTaskId);
       if (activeTask && activeTask.employeeId === message.employeeId && !TERMINAL_STATUSES.has(activeTask.status)) {
@@ -896,6 +1030,7 @@ export function createDispatch(ctx: DispatchContext) {
       lastSeenAt: nowIso(),
       consecutiveQueueFailures: state.consecutiveQueueFailures.get(message.employeeId) ?? 0,
       queuePaused: state.queuePausedSet.has(message.employeeId) || undefined,
+      queueRecovery: previous?.queueRecovery,
       version: message.version,
       claudeVersion: message.claudeVersion,
       permissionMode: message.permissionMode,
@@ -907,6 +1042,12 @@ export function createDispatch(ctx: DispatchContext) {
       consecutiveQueueFailures: state.consecutiveQueueFailures.get(message.employeeId) ?? 0,
     }, ctx.encryptor);
 
+    const registeredEmployee = state.employees.get(message.employeeId)!;
+    if (!registeredEmployee.queueRecovery && registeredEmployee.consecutiveQueueFailures >= MAX_CONSECUTIVE_QUEUE_FAILURES) {
+      coolDownEmployee(message.employeeId, "连续失败达到阈值，等待恢复探测");
+    } else armRecovery(registeredEmployee);
+    if (mainTaskId && activeMainTaskId !== mainTaskId) recoverOrFail(mainTaskId, message.employeeId, false);
+    if (queueTaskId && activeQueueTaskId !== queueTaskId) recoverOrFail(queueTaskId, message.employeeId, true);
     if (!mainTaskId) {
       dispatchNextMainQueuedTask(message.employeeId);
     }
@@ -926,7 +1067,33 @@ export function createDispatch(ctx: DispatchContext) {
     return Boolean(task && task.employeeId === socketEmployeeId);
   }
 
+  function messageAttempt(message: EmployeeToServerMessage) {
+    return "attempt" in message && typeof message.attempt === "number" ? message.attempt : undefined;
+  }
+
+  function clearStaleSlotForSocket(taskId: string, employeeId: string) {
+    const employee = state.employees.get(employeeId);
+    if (!employee) return false;
+    let cleared = false;
+    if (employee.mainTaskId === taskId) {
+      setMainTask(employeeId, null, null);
+      dispatchNextMainQueuedTask(employeeId);
+      cleared = true;
+    }
+    if (employee.queueTaskId === taskId) {
+      setQueueTask(employeeId, null, null);
+      dispatchNextQueuedTask(employeeId);
+      cleared = true;
+    }
+    return cleared;
+  }
+
   async function handleAgentMessage(message: EmployeeToServerMessage, socket: WebSocket) {
+    if (closed) return;
+    if (state.clearingTasks) {
+      deferredMessages.push({ message, socket });
+      return;
+    }
     if (message.type === "agent.register") {
       await handleRegister(message, socket);
       return;
@@ -942,6 +1109,8 @@ export function createDispatch(ctx: DispatchContext) {
       socket.close(1008, "agent_not_registered");
       return;
     }
+
+    if (state.agentSockets.get(socketEmployeeId) !== socket) return;
 
     if (message.type === "agent.heartbeat") {
       if (message.employeeId !== socketEmployeeId) {
@@ -973,6 +1142,32 @@ export function createDispatch(ctx: DispatchContext) {
     }
 
     const task = state.tasks.get(message.taskId);
+    const pending = pendingCancellations.get(socketEmployeeId);
+    if (pending?.has(message.taskId) && ["task.cancelled", "task.completed", "task.failed"].includes(message.type)) {
+      pending.delete(message.taskId);
+      if (pending.size === 0) pendingCancellations.delete(socketEmployeeId);
+      dispatchNextMainQueuedTask(socketEmployeeId);
+      dispatchNextQueuedTask(socketEmployeeId);
+      return;
+    }
+    if (!task) {
+      // Late output/results must neither recreate purged tasks nor disconnect a valid agent.
+      if ("employeeId" in message && message.employeeId !== socketEmployeeId) {
+        socket.close(1008, "employee_mismatch");
+        return;
+      }
+      if (["task.cancelled", "task.completed", "task.failed"].includes(message.type)) {
+        const pending = pendingCancellations.get(socketEmployeeId);
+        pending?.delete(message.taskId);
+        if (pending?.size === 0) pendingCancellations.delete(socketEmployeeId);
+        dispatchNextMainQueuedTask(socketEmployeeId);
+        dispatchNextQueuedTask(socketEmployeeId);
+      } else {
+        requestOrphanCancellation(socketEmployeeId, message.taskId, socket);
+      }
+      return;
+    }
+    const attempt = messageAttempt(message);
     if (
       message.type === "task.cancelled" &&
       task &&
@@ -987,6 +1182,15 @@ export function createDispatch(ctx: DispatchContext) {
       return;
     }
 
+    if (task && attempt !== undefined && attempt !== task.attempt) {
+      log.warn({ taskId: task.id, employeeId: socketEmployeeId, messageType: message.type, messageAttempt: attempt, currentAttempt: task.attempt }, "Ignoring stale task event from previous attempt");
+      if (message.type === "task.cancelled" && task.employeeId !== socketEmployeeId) {
+        // An old acknowledgement must not release this employee's newer attempt.
+        clearStaleSlotForSocket(task.id, socketEmployeeId);
+      }
+      return;
+    }
+
     if (!taskBelongsToSocket(message.taskId, socketEmployeeId, socket)) {
       socket.close(1008, "task_owner_mismatch");
       return;
@@ -998,6 +1202,7 @@ export function createDispatch(ctx: DispatchContext) {
 
     switch (message.type) {
       case "task.accepted":
+        if (task.status !== "dispatched") return;
         task.status = "accepted";
         upsertTask(task);
         log.info({ taskId: task.id, employeeId: socketEmployeeId }, "Task accepted");
@@ -1026,6 +1231,8 @@ export function createDispatch(ctx: DispatchContext) {
           employeeId: task.employeeId,
           stream: message.stream,
           seq: message.seq,
+          sourceSeq: message.seq,
+          attempt: task.attempt,
           content: message.content,
           createdAt: nowIso(),
           ...(message.delta ? { delta: true } : {}),
@@ -1051,11 +1258,13 @@ export function createDispatch(ctx: DispatchContext) {
         log.info({ taskId: task.id, employeeId: task.employeeId, exitCode: task.exitCode, durationMs: task.durationMs, numTurns: task.numTurns, totalCostUsd: task.totalCostUsd }, "Task completed");
         if (task.employeeId && task.targetMode === "queue") {
           const prev = state.consecutiveQueueFailures.get(task.employeeId) ?? 0;
-          if (prev > 0) {
+          if (prev > 0 || state.employees.get(task.employeeId)?.queueRecovery) {
             state.consecutiveQueueFailures.set(task.employeeId, 0);
             const emp = state.employees.get(task.employeeId);
             if (emp) {
               emp.consecutiveQueueFailures = 0;
+              delete emp.queueRecovery;
+              armRecovery(emp);
               upsertEmployee(emp);
             }
             log.info({ employeeId: task.employeeId }, "Consecutive queue failure count reset after successful task");
@@ -1064,7 +1273,11 @@ export function createDispatch(ctx: DispatchContext) {
         releaseTaskSlots(task.id);
         break;
       case "task.failed":
-        markTaskFailed(message.taskId, message.error);
+        markTaskFailed(message.taskId, message.error, {
+          recoverable: message.recoverable,
+          cooldownMs: message.cooldownMs,
+          retryAfterMs: message.retryAfterMs,
+        });
         break;
       case "task.cancelled":
         if (task.status === "queued") {
@@ -1171,6 +1384,10 @@ export function createDispatch(ctx: DispatchContext) {
   }
 
   function handleLeaderMessage(message: LeaderToServerMessage, socket: WebSocket) {
+    if (state.clearingTasks) {
+      sendJson<ServerToLeaderMessage>(socket, { type: "command.error", code: "tasks_clearing", message: "正在清空任务，请稍后重试。" }, ctx.encryptor);
+      return;
+    }
     switch (message.type) {
       case "command.dispatch": {
         const result = dispatchLeaderCommand(message);
@@ -1221,6 +1438,11 @@ export function createDispatch(ctx: DispatchContext) {
     if (employee.mainTaskId) taskIds.push(employee.mainTaskId);
     if (employee.queueTaskId) taskIds.push(employee.queueTaskId);
     if (taskIds.length === 0) return;
+    const hasRunningTask = taskIds.some((taskId) => {
+      const task = state.tasks.get(taskId);
+      return task?.status === "accepted" || task?.status === "running";
+    });
+    const graceMs = hasRunningTask ? ctx.runningDisconnectGraceMs : ctx.disconnectGraceMs;
 
     const timer = setTimeout(() => {
       state.disconnectTimers.delete(employeeId);
@@ -1279,7 +1501,7 @@ export function createDispatch(ctx: DispatchContext) {
         if (task) broadcastToLeaders({ type: "task.upsert", task });
       }
       dispatchSharedQueuedTasks();
-    }, ctx.disconnectGraceMs);
+    }, graceMs);
 
     state.disconnectTimers.set(employeeId, timer);
   }
@@ -1292,8 +1514,14 @@ export function createDispatch(ctx: DispatchContext) {
     state.consecutiveQueueFailures.set(employeeId, 0);
     state.failureTimestamps.delete(employeeId);
     state.queuePausedSet.delete(employeeId);
+    const recovery = employee.queueRecovery;
+    const retryTimer = recovery?.taskId ? retryDelays.get(recovery.taskId) : undefined;
+    if (retryTimer) clearTimeout(retryTimer);
+    if (recovery?.taskId) retryDelays.delete(recovery.taskId);
     employee.consecutiveQueueFailures = 0;
     employee.queuePaused = false;
+    if (recovery) employee.queueRecovery = { ...recovery, phase: "probe", until: Date.now() };
+    armRecovery(employee);
     upsertEmployee(employee);
     log.info({ employeeId }, "Agent queue resumed, failure count and pause state reset");
     const socket = state.agentSockets.get(employeeId);
@@ -1311,6 +1539,7 @@ export function createDispatch(ctx: DispatchContext) {
     }
     state.queuePausedSet.add(employeeId);
     employee.queuePaused = true;
+    armRecovery(employee);
     upsertEmployee(employee);
     log.info({ employeeId }, "Agent queue paused");
     return { ok: true };
@@ -1366,6 +1595,61 @@ export function createDispatch(ctx: DispatchContext) {
   }
 
   return {
+    async drainTaskWrites() {
+      await Promise.all([...pendingWrites]);
+    },
+    finishTaskCleanup() {
+      let cancellationRequests = 0;
+      let offlineTasks = 0;
+      webhookController.abort();
+      webhookController = new AbortController();
+      for (const employee of state.employees.values()) {
+        const ids = new Set([employee.mainTaskId, employee.queueTaskId]);
+        for (const task of state.tasks.values()) {
+          if (task.employeeId === employee.id && !TERMINAL_STATUSES.has(task.status) && task.status !== "queued") ids.add(task.id);
+        }
+        for (const taskId of ids) {
+          if (!taskId) continue;
+          const socket = state.agentSockets.get(employee.id);
+          if (socket?.readyState === WebSocket.OPEN) {
+            requestOrphanCancellation(employee.id, taskId, socket);
+            cancellationRequests++;
+          } else offlineTasks++;
+        }
+        employee.mainTaskId = null;
+        employee.mainTaskPrompt = null;
+        employee.queueTaskId = null;
+        employee.queueTaskPrompt = null;
+        upsertEmployee(employee);
+      }
+      for (const timer of state.taskTimeouts.values()) clearTimeout(timer);
+      state.taskTimeouts.clear();
+      for (const timer of retryDelays.values()) clearTimeout(timer);
+      retryDelays.clear();
+      for (const timer of state.disconnectTimers.values()) clearTimeout(timer);
+      state.disconnectTimers.clear();
+      for (const timer of recoveryTimers.values()) clearTimeout(timer);
+      recoveryTimers.clear();
+      state.tasks.clear();
+      state.taskLogs.clear();
+      state.taskWebhooks.clear();
+      state.sharedTaskQueue.length = 0;
+      state.taskQueues.clear();
+      state.mainTaskQueues.clear();
+      deferredWrites = [];
+      return { cancellationRequests, offlineTasks };
+    },
+    async resumeAfterTaskCleanup() {
+      for (const employee of state.employees.values()) armRecovery(employee);
+      const writes = deferredWrites;
+      deferredWrites = [];
+      for (const write of writes) writeTaskData(write);
+      for (const { message, socket } of deferredMessages.splice(0)) {
+        if (socket.readyState === WebSocket.OPEN) await handleAgentMessage(message, socket);
+      }
+      dispatchSharedQueuedTasks();
+      for (const employee of state.employees.values()) dispatchNextMainQueuedTask(employee.id);
+    },
     dispatchLeaderCommand,
     handleAgentMessage,
     handleLeaderMessage,
@@ -1377,6 +1661,10 @@ export function createDispatch(ctx: DispatchContext) {
     pauseAgentQueue,
     resetAgentSession,
     cleanup() {
+      closed = true;
+      for (const timer of recoveryTimers.values()) clearTimeout(timer);
+      recoveryTimers.clear();
+      webhookController.abort();
       for (const timer of retryDelays.values()) {
         clearTimeout(timer);
       }

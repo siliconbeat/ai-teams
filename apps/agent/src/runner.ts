@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import type { EmployeeToServerMessage } from "@ai-teams/shared";
+import { isPermanentModelFailure } from "@ai-teams/shared";
 import {
   EMPLOYEE_ID,
   EMPLOYEE_NAME,
@@ -14,6 +15,7 @@ import {
   CLAUDE_HOOK_SETTINGS,
   CLAUDE_MISSING_CONVERSATION_PATTERN,
   CLAUDE_SESSION_BUSY_PATTERN,
+  MODEL_TRANSIENT_ERROR_PATTERN,
   MAX_ERROR_TAIL,
   type ActiveTask,
   type AgentState,
@@ -46,7 +48,11 @@ export interface RunnerDeps {
   findActiveTask: (taskId: string) => ActiveTask | null;
   emitOutput: (taskId: string, stream: "stdout" | "stderr", content: string, delta?: boolean) => void;
   emitStderr: (taskId: string, content: string) => void;
-  finishTask: (taskId: string, status: "completed" | "failed" | "cancelled", payload?: string | number) => void;
+  finishTask: (
+    taskId: string,
+    status: "completed" | "failed" | "cancelled",
+    payload?: string | number | { error: string; recoverable?: boolean; cooldownMs?: number; retryAfterMs?: number },
+  ) => void;
   send: (payload: EmployeeToServerMessage) => void;
   getAgentState: () => AgentState;
   setAgentState: (state: AgentState) => void;
@@ -125,6 +131,13 @@ export function handleClaudeJsonLine(
     return;
   }
 
+  if (parsed.type === "result" && parsed.is_error === true) {
+    const task = findActiveTask(taskId);
+    if (task) {
+      task.cliResultError = true;
+      task.stderrTail = `${task.stderrTail}\n${typeof parsed.result === "string" ? parsed.result : ""}\n${Array.isArray(parsed.errors) ? parsed.errors.join("\n") : ""}`.slice(-MAX_ERROR_TAIL);
+    }
+  }
   if (parsed.type === "result" && typeof parsed.result === "string") {
     const task = findActiveTask(taskId);
     if (task?.sawStreamText && !task.resumingSession) {
@@ -273,10 +286,51 @@ export function shouldRetryWithFreshClaudeSession(
   );
 }
 
+export function classifyModelTransientFailure(
+  taskId: string,
+  exitCode: number | null,
+  findActiveTask: RunnerDeps["findActiveTask"],
+): { error: string; recoverable: true; cooldownMs: number; retryAfterMs?: number } | null {
+  const task = findActiveTask(taskId);
+  if (!task || task.cancelRequested || exitCode === 0) {
+    return null;
+  }
+  const tail = task.stderrTail.slice(-MAX_ERROR_TAIL);
+  if (isPermanentModelFailure(tail) || !MODEL_TRANSIENT_ERROR_PATTERN.test(tail)) {
+    return null;
+  }
+
+  const retryAfterMatch = tail.match(/retry(?:-|\s*)after[:\s]+(\d+)\s*(ms|s|sec|seconds|m|min|minutes)?/i);
+  let retryAfterMs: number | undefined;
+  if (retryAfterMatch) {
+    const value = Number(retryAfterMatch[1]);
+    const unit = retryAfterMatch[2]?.toLowerCase();
+    if (Number.isFinite(value) && value > 0) {
+      retryAfterMs = unit === "ms"
+        ? value
+        : unit?.startsWith("m")
+        ? value * 60_000
+        : value * 1000;
+    }
+  }
+
+  const defaultCooldownMs = 60_000;
+  const cooldownMs = Math.max(5_000, Math.min(retryAfterMs ?? defaultCooldownMs, 10 * 60_000));
+  const lastLine = tail.trim().split("\n").slice(-1)[0]?.trim();
+  return {
+    error: lastLine
+      ? `模型接口暂时不可用，稍后重试：${lastLine}`
+      : `模型接口暂时不可用，Claude CLI 退出码 ${exitCode ?? "unknown"}。`,
+    recoverable: true,
+    cooldownMs,
+    ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+  };
+}
+
 export function runFakeTask(taskId: string, prompt: string, deps: RunnerDeps) {
   const { findActiveTask, send, emitOutput, finishTask } = deps;
   const task = findActiveTask(taskId);
-  send({ type: "task.started", taskId, pid: process.pid, sessionId: task?.claudeSessionId ?? null, claudeVersion: getClaudeVersion({ refresh: true }) });
+  send({ type: "task.started", taskId, attempt: task?.attempt, pid: process.pid, sessionId: task?.claudeSessionId ?? null, claudeVersion: getClaudeVersion({ refresh: true }) });
   const steps = [
     `收到任务：${prompt}\n`,
     "分析任务上下文...\n",
@@ -354,7 +408,7 @@ export function runClaudeTask(taskId: string, prompt: string, workspace: string 
   currentTask.generation += 1;
   const generation = currentTask.generation;
   currentTask.child = child;
-  send({ type: "task.started", taskId, pid: child.pid ?? 0, sessionId: currentTask.claudeSessionId, claudeVersion: getClaudeVersion({ refresh: true }) });
+  send({ type: "task.started", taskId, attempt: currentTask.attempt, pid: child.pid ?? 0, sessionId: currentTask.claudeSessionId, claudeVersion: getClaudeVersion({ refresh: true }) });
   emitOutput(taskId, "stdout", `[agent] permission_mode: ${permissionMode}\n`);
 
   const stdoutReader = readline.createInterface({ input: child.stdout });
@@ -382,7 +436,7 @@ export function runClaudeTask(taskId: string, prompt: string, workspace: string 
       finishTask(taskId, "cancelled");
       return;
     }
-    if (code === 0) {
+    if (code === 0 && !task?.cliResultError) {
       finishTask(taskId, "completed", 0);
       return;
     }
@@ -395,6 +449,7 @@ export function runClaudeTask(taskId: string, prompt: string, workspace: string 
       }
       fresh.retriedWithFreshSession = true;
       fresh.stderrTail = "";
+      fresh.cliResultError = false;
       fresh.sawStreamText = false;
       fresh.child = null;
       const newState = resetClaudeSession();
@@ -404,6 +459,6 @@ export function runClaudeTask(taskId: string, prompt: string, workspace: string 
       runClaudeTask(taskId, prompt, workspace, deps);
       return;
     }
-    finishTask(taskId, "failed", `Claude CLI 退出码 ${code ?? "unknown"}`);
+    finishTask(taskId, "failed", classifyModelTransientFailure(taskId, task?.cliResultError ? 1 : code, findActiveTask) ?? `Claude CLI 退出码 ${code ?? "unknown"}：${findActiveTask(taskId)?.stderrTail.slice(-1000) ?? ""}`);
   });
 }

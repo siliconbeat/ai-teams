@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type ComponentProps } from "react";
 import {
   isEncryptedEnvelope,
   parseJsonMessage,
@@ -15,7 +15,6 @@ import {
   type MissionRecord,
   type MissionSubtaskRecord,
   ServerToLeaderMessage,
-  TaskOutputChunk,
   TaskRecord,
   TaskStatus,
 } from "@ai-teams/shared";
@@ -23,9 +22,9 @@ import { XProvider } from "@ant-design/x";
 import { CopyOutlined } from "@ant-design/icons";
 import { App as AntApp, Avatar, ConfigProvider, theme } from "antd";
 import { Bubble, ThoughtChain, Sender, Suggestion } from "@ant-design/x";
-import type { BubbleProps } from "@ant-design/x";
 import { XMarkdown } from "@ant-design/x-markdown";
-import { BorderBeam } from "border-beam";
+import { TerminalStore } from "./terminal-store";
+import { LiveTerminal } from "./LiveTerminal";
 
 // ---------------------------------------------------------------------------
 // Web Crypto E2E decryption (AES-256-GCM)
@@ -106,10 +105,15 @@ function CollapsibleContent({ children }: { children: ReactNode }) {
   const [overflow, setOverflow] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (ref.current && ref.current.scrollHeight > COLLAPSED_MAX_HEIGHT + 20) {
-      setOverflow(true);
-    }
-  }, [children]);
+    const el = ref.current;
+    if (!el) return;
+    const measure = () => setOverflow(el.scrollHeight > COLLAPSED_MAX_HEIGHT + 20);
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    if (el.firstElementChild) observer.observe(el.firstElementChild);
+    measure();
+    return () => observer.disconnect();
+  }, []);
   return (
     <div className="bubble-collapsible">
       <div
@@ -172,6 +176,7 @@ type EmployeeTerminalLog = {
   seenTaskIds: string[];
   seenOutputIds: string[];
   seenFinishedTaskIds: string[];
+  attempts?: Record<string, number>;
 };
 
 type ActivePage = "monitor" | "tasks" | "employees" | "errors" | "stats" | "schedules" | "missions";
@@ -229,26 +234,19 @@ type MissionFormData = {
   timeoutSec: string;
 };
 
-const TASK_FILTERS: Array<TaskStatus | "all"> = ["all", "running", "failed", "completed", "cancelled"];
+const TASK_FILTERS: Array<TaskStatus | "all"> = ["all", "queued", "running", "failed", "completed", "cancelled"];
+const TASK_FILTER_LABELS: Partial<Record<TaskStatus | "all", string>> = {
+  all: "全部", queued: "等待中", running: "运行中", failed: "失败", completed: "已完成", cancelled: "已取消",
+};
 const TOKEN_STORAGE_KEY = "ai-teams.auth-token";
 const TERMINAL_LOG_STORAGE_KEY = "ai-teams.employee-terminal-logs";
-const MAX_TERMINAL_LOG_CHARS_PER_EMPLOYEE = 200_000;
-const MAX_TERMINAL_LOG_MARKERS_PER_EMPLOYEE = 5000;
+const TASK_GENERATION_STORAGE_KEY = "ai-teams.task-data-generation";
 const MAX_TASKS = 300;
 const CHAT_FEED_LIMIT = 200;
 
 function getInitialToken() {
   const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
   return env?.VITE_AI_TEAMS_AUTH_TOKEN || localStorage.getItem(TOKEN_STORAGE_KEY) || "";
-}
-
-function createTerminalLog(): EmployeeTerminalLog {
-  return {
-    content: "",
-    seenTaskIds: [],
-    seenOutputIds: [],
-    seenFinishedTaskIds: [],
-  };
 }
 
 function loadTerminalLogs() {
@@ -265,6 +263,7 @@ function loadTerminalLogs() {
           seenTaskIds: Array.isArray(log.seenTaskIds) ? log.seenTaskIds.filter(isString) : [],
           seenOutputIds: Array.isArray(log.seenOutputIds) ? log.seenOutputIds.filter(isString) : [],
           seenFinishedTaskIds: Array.isArray(log.seenFinishedTaskIds) ? log.seenFinishedTaskIds.filter(isString) : [],
+          attempts: log.attempts && typeof log.attempts === "object" ? Object.fromEntries(Object.entries(log.attempts).filter(([, value]) => typeof value === "number")) : {},
         },
       ]),
     );
@@ -275,16 +274,6 @@ function loadTerminalLogs() {
 
 function isString(value: unknown): value is string {
   return typeof value === "string";
-}
-
-function trimTerminalLog(content: string) {
-  return content.length > MAX_TERMINAL_LOG_CHARS_PER_EMPLOYEE
-    ? content.slice(-MAX_TERMINAL_LOG_CHARS_PER_EMPLOYEE)
-    : content;
-}
-
-function trimMarkers(markers: string[]) {
-  return markers.slice(-MAX_TERMINAL_LOG_MARKERS_PER_EMPLOYEE);
 }
 
 function isTerminalStatus(status: TaskStatus) {
@@ -346,6 +335,9 @@ function getAgentPresence(employee: EmployeeSnapshot, activeTask?: TaskRecord) {
   }
   if (employee.queuePaused) {
     return { label: "已暂停", className: "paused" };
+  }
+  if (employee.queueRecovery) {
+    return { label: employee.queueRecovery.phase === "blocked" ? "需处理" : employee.queueRecovery.phase === "probe" ? "恢复探测" : "冷却中", className: "paused" };
   }
   if (employee.consecutiveQueueFailures >= 5) {
     return { label: "队列暂停", className: "paused" };
@@ -411,7 +403,7 @@ const EmployeeCard = memo(function EmployeeCard({
   mainTask,
   queueTask,
   displayTask,
-  terminalText,
+  terminalStore,
   cancelTask,
   onResetSession,
   onResumeQueue,
@@ -421,29 +413,17 @@ const EmployeeCard = memo(function EmployeeCard({
   mainTask: TaskRecord | undefined;
   queueTask: TaskRecord | undefined;
   displayTask: TaskRecord | undefined;
-  terminalText: string;
+  terminalStore: TerminalStore;
   cancelTask: (taskId: string) => void;
   onResetSession: (employeeId: string) => void;
   onResumeQueue: (employeeId: string) => void;
   onPauseQueue: (employeeId: string) => void;
 }) {
-  const logRef = useRef<HTMLPreElement | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
 
   const activeTask = mainTask ?? queueTask;
   const taskStatus = activeTask?.status ?? displayTask?.status ?? "idle";
   const presence = getAgentPresence(employee, activeTask);
-  const terminalWindow = (
-    <pre className="log-window" ref={logRef} dangerouslySetInnerHTML={{ __html: renderTerminalHtml(terminalText) }} />
-  );
-
-  useEffect(() => {
-    const frame = requestAnimationFrame(() => {
-      const el = logRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [terminalText]);
 
   return (
     <article className={`employee-card${presence.className === "busy" ? " card-busy" : ""}`}>
@@ -451,7 +431,7 @@ const EmployeeCard = memo(function EmployeeCard({
         <div>
           <div className="employee-card__title">
             <h2>{employee.name}</h2>
-            <span className={`task-state-badge task-${taskStatus}`}>{taskStatus}</span>
+            <span className={`task-state-badge task-${taskStatus}`}>{TASK_FILTER_LABELS[taskStatus as TaskStatus] ?? (taskStatus === "idle" ? "空闲" : taskStatus)}</span>
           </div>
         </div>
         <div className={`status-pill agent-presence ${presence.className}`}>
@@ -466,14 +446,14 @@ const EmployeeCard = memo(function EmployeeCard({
                 <button className="card-menu-item" onClick={() => { setMenuOpen(false); onResetSession(employee.id); }}>
                   重置会话
                 </button>
-                {!employee.queuePaused && employee.consecutiveQueueFailures < 5 && employee.status !== "offline" && (
+                {!employee.queuePaused && employee.status !== "offline" && (
                   <button className="card-menu-item" onClick={() => { setMenuOpen(false); onPauseQueue(employee.id); }}>
                     暂停队列
                   </button>
                 )}
-                {(employee.queuePaused || employee.consecutiveQueueFailures >= 5) && (
+                {(employee.queuePaused || employee.queueRecovery || employee.consecutiveQueueFailures >= 5) && (
                   <button className="card-menu-item" onClick={() => { setMenuOpen(false); onResumeQueue(employee.id); }}>
-                    恢复队列
+                    {employee.queuePaused ? "恢复接单" : "立即重试（单任务探测）"}
                   </button>
                 )}
               </div>
@@ -491,6 +471,13 @@ const EmployeeCard = memo(function EmployeeCard({
         {!employee.queuePaused && employee.consecutiveQueueFailures >= 5 && (
           <span className="meta-warning">连续失败: {employee.consecutiveQueueFailures} 次</span>
         )}
+        {employee.queueRecovery && (
+          <span className="meta-warning" title={employee.queueRecovery.reason}>
+            {employee.queueRecovery.phase === "blocked" ? "请修复认证/额度配置后手动恢复" : employee.queueRecovery.phase === "probe" ? "仅放行一个队列任务验证恢复" : `下次探测：${new Date(employee.queueRecovery.until).toLocaleTimeString()}`}
+            {employee.queuePaused ? "（手动暂停期间不自动探测）" : ""}
+            <br />原因：{employee.queueRecovery.reason.slice(0, 180)}
+          </span>
+        )}
         {employee.weight > 1 && (
           <span>权重: {employee.weight}</span>
         )}
@@ -500,20 +487,117 @@ const EmployeeCard = memo(function EmployeeCard({
       </div>
       <SlotStrip label="主任务" task={mainTask} onCancel={cancelTask} />
       <SlotStrip label="队列" task={queueTask} onCancel={cancelTask} />
-      {presence.className === "busy" ? (
-        <BorderBeam className="log-window-beam" size="md" colorVariant="sunset" theme="dark" borderRadius={10}>
-          {terminalWindow}
-        </BorderBeam>
-      ) : terminalWindow}
+      <LiveTerminal store={terminalStore} employeeId={employee.id} />
     </article>
   );
-}, (prev, next) => {
-  if (prev.terminalText !== next.terminalText) return false;
-  if (prev.mainTask?.id !== next.mainTask?.id || prev.queueTask?.id !== next.queueTask?.id || prev.displayTask?.id !== next.displayTask?.id) return false;
-  const pe = prev.employee, ne = next.employee;
-  if (pe.status !== ne.status || pe.mainTaskId !== ne.mainTaskId || pe.queueTaskId !== ne.queueTaskId || pe.name !== ne.name || pe.consecutiveQueueFailures !== ne.consecutiveQueueFailures || pe.queuePaused !== ne.queuePaused || pe.version !== ne.version || pe.claudeVersion !== ne.claudeVersion || pe.permissionMode !== ne.permissionMode || pe.weight !== ne.weight) return false;
-  if (pe.labels.length !== ne.labels.length || pe.labels.some((l, i) => l !== ne.labels[i])) return false;
-  return true;
+});
+
+
+  function thoughtChainStatus(status: TaskStatus): "success" | "error" | "loading" | undefined {
+    if (status === "completed") return "success";
+    if (status === "failed" || status === "timeout") return "error";
+    if (status === "running") return "loading";
+    return undefined;
+  }
+
+const ChatMessages = memo(function ChatMessages({ items, onReply }: { items: ComponentProps<typeof Bubble.List>["items"]; onReply: (session: string, employee: string, name: string, quote: string) => void }) {
+  return (<Bubble.List
+                style={{ height: "100%" }}
+                autoScroll
+                items={items}
+                role={{
+                  user: {
+                    placement: "end",
+                    avatar: <Avatar style={{ background: "#52c41a", fontSize: 12 }}>L</Avatar>,
+                    header: (_content: any, info: any) => {
+                      const item = info.extraInfo;
+                      return (
+                        <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, fontSize: 12, color: "#90a1be" }}>
+                          {item.target && <span>{item.target} · </span>}
+                          <span>{item.createdAt}</span>
+                        </div>
+                      );
+                    },
+                    contentRender: (_content: any, info: any) => {
+                      const item = info.extraInfo;
+                      return (
+                        <div className="bubble-copy-wrap">
+                          {item.replyQuote && <div className="bubble-quote">{item.replyQuoteAuthor ? `${item.replyQuoteAuthor}: ` : ""}{item.replyQuote.length > 60 ? item.replyQuote.slice(0, 60) + "..." : item.replyQuote}</div>}
+                          <div style={{ whiteSpace: "pre-wrap" }}>{String(_content)}</div>
+                          {item.executingBy?.length > 0 && (
+                            <ThoughtChain
+                              style={{ marginTop: 8 }}
+                              items={item.executingBy.map((agent: ExecutingAgent) => ({
+                                key: agent.name,
+                                title: agent.name,
+                                status: thoughtChainStatus(agent.status),
+                                collapsible: item.executingBy.length > 2,
+                              }))}
+                            />
+                          )}
+                          <button className="bubble-copy-btn" onClick={() => navigator.clipboard.writeText(String(_content))}>
+                            <CopyOutlined />
+                          </button>
+                        </div>
+                      );
+                    },
+                    styles: { content: { background: "linear-gradient(135deg, rgba(104, 182, 255, 0.28), rgba(121, 255, 209, 0.12))" } },
+                  },
+                  ai: {
+                    placement: "start",
+                    avatar: (_content: any, info: any) => {
+                      const item = info.extraInfo;
+                      const initial = item.author?.[0] ?? "?";
+                      return <Avatar style={{ background: "#1677ff", fontSize: 12 }}>{initial}</Avatar>;
+                    },
+                    header: (_content: any, info: any) => {
+                      const item = info.extraInfo;
+                      return (
+                        <div style={{ fontSize: 12, color: "#90a1be", display: "flex", gap: 6 }}>
+                          <strong style={{ color: "#c9d6f2" }}>{item.author}</strong>
+                          <span>{item.createdAt}</span>
+                        </div>
+                      );
+                    },
+                    contentRender: (_content: any, info: any) => {
+                      const item = info.extraInfo;
+                      const isError = item.taskStatus === "failed" || item.taskStatus === "timeout";
+                      return (
+                        <div className="bubble-copy-wrap">
+                          {item.quotedPrompt && <div className="bubble-quote">{item.quotedPrompt.length > 60 ? item.quotedPrompt.slice(0, 60) + "..." : item.quotedPrompt}</div>}
+                          <CollapsibleContent>
+                            <div style={isError ? { color: "#ff4d4f" } : undefined}>
+                              <XMarkdown content={String(_content)} />
+                            </div>
+                          </CollapsibleContent>
+                          <button className="bubble-copy-btn" onClick={() => navigator.clipboard.writeText(String(_content))}>
+                            <CopyOutlined />
+                          </button>
+                          {item.sessionId && item.employeeId && (
+                            <button
+                              className="bubble-reply-btn"
+                              onClick={() => {
+                                onReply(item.sessionId, item.employeeId, item.author || "", String(_content).slice(0, 200));
+                              }}
+                              title="回复"
+                            >
+                              ↩
+                            </button>
+                          )}
+                        </div>
+                      );
+                    },
+                    styles: {
+                      root: { width: "100%" },
+                      body: { width: "100%" },
+                      content: {
+                        background: "rgba(255, 255, 255, 0.06)",
+                        border: "1px solid rgba(255, 255, 255, 0.08)",
+                      },
+                    },
+                  },
+                }}
+              />);
 });
 
 export default function App() {
@@ -526,16 +610,29 @@ export default function App() {
   const [employees, setEmployees] = useState<Record<string, EmployeeSnapshot>>({});
   const [serverVersion, setServerVersion] = useState<string>("");
   const [tasks, setTasks] = useState<Record<string, TaskRecord>>({});
-  const [logs, setLogs] = useState<Record<string, TaskOutputChunk[]>>({});
-  const [terminalLogs, setTerminalLogs] = useState<Record<string, EmployeeTerminalLog>>(loadTerminalLogs);
+  const [terminalStore] = useState(() => new TerminalStore(loadTerminalLogs()));
+  const [isMobile, setIsMobile] = useState(() => window.matchMedia("(max-width: 640px)").matches);
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 640px)");
+    const update = () => setIsMobile(query.matches);
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
   const [history, setHistory] = useState<CommandHistoryItem[]>([]);
   const [activePage, setActivePage] = useState<ActivePage>("monitor");
   const activePageRef = useRef<ActivePage>(activePage);
   activePageRef.current = activePage;
   const [taskFilter, setTaskFilter] = useState<TaskStatus | "all">("all");
   const [taskDisplayLimit, setTaskDisplayLimit] = useState(30);
+  const taskQueryRef = useRef({ taskFilter, taskDisplayLimit });
+  taskQueryRef.current = { taskFilter, taskDisplayLimit };
   const [taskLogList, setTaskLogList] = useState<TaskRecord[]>([]);
   const [taskLogLoading, setTaskLogLoading] = useState(false);
+  const [clearingTasks, setClearingTasks] = useState(false);
+  const [taskCleanupNotice, setTaskCleanupNotice] = useState<string | null>(null);
+  const taskDataGeneration = useRef(0);
+  const serverTaskGeneration = useRef<string | undefined>(undefined);
+  const taskListRequest = useRef(0);
   const [selectedTarget, setSelectedTarget] = useState<AgentTarget>("queue");
   const [resumeSession, setResumeSession] = useState<{ sessionId: string; agentName: string; quote: string } | null>(null);
   const replyQuotesRef = useRef<Record<string, { agentName: string; quote: string }>>({});
@@ -571,10 +668,7 @@ export default function App() {
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [taskOutputCache, setTaskOutputCache] = useState<Record<string, string>>({});
   const [taskOutputLoading, setTaskOutputLoading] = useState<string | null>(null);
-  const terminalLogsRef = useRef(terminalLogs);
-  terminalLogsRef.current = terminalLogs;
   const wsRef = useRef<WebSocket | null>(null);
-  const mobileTerminalRef = useRef<HTMLPreElement | null>(null);
 
   useEffect(() => {
     if (!authToken) {
@@ -582,6 +676,7 @@ export default function App() {
     }
 
     let disposed = false;
+    let incoming = Promise.resolve();
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let showReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -594,7 +689,7 @@ export default function App() {
       wsRef.current = ws;
 
       ws.onopen = () => {
-        if (disposed) { ws.close(); return; }
+        if (disposed || wsRef.current !== ws) { ws.close(); return; }
         setConnected(true);
         setConnectionError(null);
         setShowReconnect(false);
@@ -602,7 +697,7 @@ export default function App() {
       };
 
       ws.onclose = (event) => {
-        if (disposed) return;
+        if (disposed || wsRef.current !== ws) return;
         wsRef.current = null;
         setConnected(false);
         if (event.code === 1008) {
@@ -621,16 +716,22 @@ export default function App() {
         setShowReconnect(true);
       };
 
-      ws.onmessage = async (event) => {
+      ws.onmessage = (event) => {
+        if (disposed || wsRef.current !== ws) return;
+        // Async decryption must not reorder output, completion, snapshot or clear events.
+        // Events accepted before disconnect finish before the next connection's snapshot.
+        incoming = incoming.then(async () => {
         if (disposed) return;
         try {
           const raw = typeof event.data === "string" ? event.data : await (event.data as Blob).text();
           const decrypted = await webCryptoDecrypt(raw);
+          if (disposed) return;
           const message = parseServerToLeaderMessage(parseJsonMessage(decrypted));
           handleLeaderEvent(message);
         } catch (error) {
           setConnectionError(error instanceof Error ? error.message : "服务端消息格式错误。");
         }
+        });
       };
     }
 
@@ -666,10 +767,29 @@ export default function App() {
 
   function handleLeaderEvent(message: ServerToLeaderMessage) {
     switch (message.type) {
+      case "tasks.cleared": {
+        resetTaskViews();
+        rememberTaskGeneration(message.snapshot.taskDataGeneration);
+        setEmployees(Object.fromEntries(message.snapshot.employees.map((item) => [item.id, item])));
+        setTaskCleanupNotice("所有任务及 Mission 历史已清空。已启用的定时任务仍会按计划生成新任务。");
+        break;
+      }
       case "snapshot": {
+        if (message.snapshot.taskDataGeneration !== undefined) {
+          try {
+            const previous = serverTaskGeneration.current ?? localStorage.getItem(TASK_GENERATION_STORAGE_KEY) ?? "";
+            if (previous !== message.snapshot.taskDataGeneration) resetTaskViews();
+          } catch { /* unavailable storage */ }
+          rememberTaskGeneration(message.snapshot.taskDataGeneration);
+        }
         setEmployees(Object.fromEntries(message.snapshot.employees.map((item) => [item.id, item])));
         setTasks(capTasks(Object.fromEntries(message.snapshot.tasks.map((item) => [item.id, item])), MAX_TASKS));
-        setLogs(message.snapshot.logs);
+        for (const task of [...message.snapshot.tasks].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+          terminalStore.task({ ...task, status: "running" }, buildTaskHeader(task), "");
+          for (const chunk of message.snapshot.logs[task.id] ?? []) terminalStore.output(chunk);
+          terminalStore.task(task, buildTaskHeader(task), buildTaskFinishedLine(task));
+        }
+        if (activePageRef.current === "tasks") fetchTaskLogList();
         if (message.snapshot.serverVersion) setServerVersion(message.snapshot.serverVersion);
         break;
       }
@@ -678,6 +798,7 @@ export default function App() {
         break;
       }
       case "employee.delete": {
+        terminalStore.remove(message.employeeId);
         setEmployees((current) => {
           const { [message.employeeId]: _removed, ...rest } = current;
           return rest;
@@ -685,25 +806,15 @@ export default function App() {
         break;
       }
       case "task.upsert": {
-        setTasks((current) => ({ ...current, [message.task.id]: message.task }));
-        if (isTerminalStatus(message.task.status)) {
-          setLogs((current) => {
-            if (!(message.task.id in current)) return current;
-            const { [message.task.id]: _, ...rest } = current;
-            return rest;
-          });
-        }
+        terminalStore.task(message.task, buildTaskHeader(message.task), buildTaskFinishedLine(message.task));
+        setTasks((current) => capTasks({ ...current, [message.task.id]: message.task }, MAX_TASKS));
         if (activePageRef.current === "tasks") {
           fetchTaskLogList();
         }
         break;
       }
       case "task.output": {
-        setLogs((current) => {
-          const history = current[message.chunk.taskId] ?? [];
-          const next = [...history, message.chunk].slice(-400);
-          return { ...current, [message.chunk.taskId]: next };
-        });
+        terminalStore.output(message.chunk);
         break;
       }
       case "server.error":
@@ -763,6 +874,7 @@ export default function App() {
       const displayTask = displayTasksByEmployee[employee.id];
       const isAbnormal =
         employee.queuePaused ||
+        !!employee.queueRecovery ||
         employee.consecutiveQueueFailures >= 5 ||
         displayTask?.status === "failed" ||
         displayTask?.status === "timeout" ||
@@ -912,6 +1024,11 @@ export default function App() {
     })
   , [chatFeed]);
 
+  const replyToMessage = useCallback((sessionId: string, employeeId: string, agentName: string, quote: string) => {
+    setResumeSession({ sessionId, agentName, quote });
+    setSelectedTarget([employeeId]);
+  }, []);
+
   const getSuggestionItems = useCallback((keyword?: string) => {
     if (!keyword) return [];
     if (keyword.startsWith("/")) {
@@ -983,12 +1100,6 @@ export default function App() {
   }
 
 
-  function thoughtChainStatus(status: TaskStatus): "success" | "error" | "loading" | undefined {
-    if (status === "completed") return "success";
-    if (status === "failed" || status === "timeout") return "error";
-    if (status === "running") return "loading";
-    return undefined;
-  }
 
   function buildTaskHeader(task: TaskRecord) {
     const receivedAt = new Date(task.createdAt).toLocaleTimeString();
@@ -1008,6 +1119,7 @@ export default function App() {
   }
 
   async function fetchTaskOutput(taskId: string) {
+    const generation = taskDataGeneration.current;
     if (taskOutputCache[taskId]) return;
     setTaskOutputLoading(taskId);
     try {
@@ -1016,6 +1128,7 @@ export default function App() {
       });
       if (res.ok) {
         const data = await res.json() as { taskId: string; output: string };
+        if (generation !== taskDataGeneration.current) return;
         setTaskOutputCache((prev) => {
           const entries = Object.entries({ ...prev, [taskId]: data.output });
           if (entries.length > 50) {
@@ -1034,28 +1147,86 @@ export default function App() {
       setExpandedTaskId(null);
     } else {
       setExpandedTaskId(taskId);
-      if (!logs[taskId] || logs[taskId].length === 0) {
-        fetchTaskOutput(taskId);
-      }
+      fetchTaskOutput(taskId);
     }
   }
 
   async function fetchTaskLogList() {
+    const generation = taskDataGeneration.current;
+    const requestId = ++taskListRequest.current;
     setTaskLogLoading(true);
     try {
       const params = new URLSearchParams();
-      if (taskFilter !== "all") params.set("status", taskFilter);
-      params.set("limit", String(taskDisplayLimit));
+      const query = taskQueryRef.current;
+      if (query.taskFilter !== "all") params.set("status", query.taskFilter);
+      params.set("limit", String(query.taskDisplayLimit));
       params.set("offset", "0");
       const res = await fetch(`/api/tasks?${params}`, {
         headers: { Authorization: `Bearer ${authToken}` },
       });
       if (res.ok) {
         const data = await res.json() as { tasks: TaskRecord[] };
+        if (generation !== taskDataGeneration.current || requestId !== taskListRequest.current) return;
         setTaskLogList(data.tasks);
       }
     } catch { /* ignore */ }
+    if (requestId === taskListRequest.current) setTaskLogLoading(false);
+  }
+
+  function resetTaskViews() {
+    taskDataGeneration.current++;
+    taskListRequest.current++;
+    setTasks({});
+    setTaskLogList([]);
     setTaskLogLoading(false);
+    setTaskOutputCache({});
+    setTaskOutputLoading(null);
+    setExpandedTaskId(null);
+    setHistory([]);
+    terminalStore.clear();
+    setResumeSession(null);
+    replyQuotesRef.current = {};
+    setMissions([]);
+    setSelectedMission(null);
+    try { localStorage.removeItem(TERMINAL_LOG_STORAGE_KEY); } catch { /* unavailable storage */ }
+  }
+
+  function rememberTaskGeneration(generation?: string) {
+    if (generation === undefined) return;
+    serverTaskGeneration.current = generation;
+    try { localStorage.setItem(TASK_GENERATION_STORAGE_KEY, generation); } catch { /* unavailable storage */ }
+  }
+
+  async function clearAllTasks() {
+    setClearingTasks(true);
+    setTaskCleanupNotice(null);
+    const generation = taskDataGeneration.current;
+    try {
+      const res = await fetch("/api/tasks", {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${authToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: "clear-all-tasks" }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "清空失败，请重试。");
+      // The WebSocket event usually arrives first; avoid erasing newly created tasks twice.
+      if (generation === taskDataGeneration.current) resetTaskViews();
+      setTaskCleanupNotice(`已清空 ${data.deleted.tasks} 个任务和 ${data.deleted.missions} 个 Mission。已向在线 Agent 发送 ${data.cancellationRequests} 个终止请求。${data.offlineTasks ? ` ${data.offlineTasks} 个离线任务无法立即确认停止，请检查对应 Agent。` : ""} ${data.enabledSchedules} 个定时任务仍启用，后续可能产生新任务。`);
+      await fetchTaskLogList();
+    } catch (error) {
+      setTaskCleanupNotice(error instanceof Error ? error.message : "清空失败，请重试。");
+    } finally {
+      setClearingTasks(false);
+    }
+  }
+
+  function confirmClearAllTasks() {
+    modalRef.current?.confirm({
+      title: "清空所有任务？",
+      content: "将删除所有等待中、运行中及已结束的任务、输出日志和 Mission 历史，并向在线 Agent 请求终止执行。此操作不可撤销，且不受当前筛选条件限制。员工、Agent 和定时任务配置会保留；启用中的定时任务仍会继续生成新任务。离线 Agent 上的进程无法立即确认停止，重连后会请求终止。",
+      okText: "确认清空所有任务", cancelText: "取消", okButtonProps: { danger: true },
+      onOk: clearAllTasks,
+    });
   }
 
   function saveToken() {
@@ -1079,11 +1250,13 @@ export default function App() {
   // ── Mission API helpers ──
 
   async function fetchMissions(selectId?: string) {
+    const generation = taskDataGeneration.current;
     setMissionLoading(true);
     try {
       const res = await fetch("/api/missions", { headers: { Authorization: `Bearer ${authToken}` } });
       if (res.ok) {
         const data = await res.json() as { missions: MissionRecord[] };
+        if (generation !== taskDataGeneration.current) return;
         setMissions(data.missions);
         const nextId = selectId ?? selectedMission?.mission.id ?? data.missions[0]?.id;
         if (nextId) {
@@ -1097,10 +1270,12 @@ export default function App() {
   }
 
   async function fetchMissionDetail(missionId: string) {
+    const generation = taskDataGeneration.current;
     try {
       const res = await fetch(`/api/missions/${missionId}`, { headers: { Authorization: `Bearer ${authToken}` } });
       if (res.ok) {
         const data = await res.json() as MissionDetail;
+        if (generation !== taskDataGeneration.current) return;
         setSelectedMission(data);
       }
     } catch { /* ignore */ }
@@ -1524,98 +1699,13 @@ export default function App() {
   }, [authToken]);
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      localStorage.setItem(TERMINAL_LOG_STORAGE_KEY, JSON.stringify(terminalLogs));
-    }, 500);
-    return () => clearTimeout(timer);
-  }, [terminalLogs]);
-
-  useEffect(() => {
-    const handler = () => {
-      if (document.visibilityState === "hidden") {
-        localStorage.setItem(TERMINAL_LOG_STORAGE_KEY, JSON.stringify(terminalLogsRef.current));
-      }
-    };
-    document.addEventListener("visibilitychange", handler);
-    return () => document.removeEventListener("visibilitychange", handler);
-  }, []);
-
-  useEffect(() => {
-    const taskEntries = Object.values(tasks).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-    if (taskEntries.length === 0) {
-      return;
-    }
-
-    setTerminalLogs((current) => {
-      let changed = false;
-      const next: Record<string, EmployeeTerminalLog> = { ...current };
-
-      for (const task of taskEntries) {
-        if (!task.employeeId) {
-          continue;
-        }
-        const employeeId = task.employeeId;
-        const currentLog = next[employeeId] ?? createTerminalLog();
-        const seenTaskIds = new Set(currentLog.seenTaskIds);
-        const seenOutputIds = new Set(currentLog.seenOutputIds);
-        const seenFinishedTaskIds = new Set(currentLog.seenFinishedTaskIds);
-
-        if (isTerminalStatus(task.status) && seenTaskIds.has(task.id) && seenFinishedTaskIds.has(task.id)) {
-          continue;
-        }
-
-        let content = currentLog.content;
-        let entryChanged = false;
-
-        if (!seenTaskIds.has(task.id)) {
-          content = `${content}${content ? "\n" : ""}${buildTaskHeader(task)}`;
-          seenTaskIds.add(task.id);
-          entryChanged = true;
-        }
-
-        const taskLogs = logs[task.id] ?? [];
-        for (const chunk of taskLogs) {
-          const outputId = `${task.id}:${chunk.seq}`;
-          if (seenOutputIds.has(outputId)) {
-            continue;
-          }
-          content = `${content}${chunk.content}`;
-          seenOutputIds.add(outputId);
-          entryChanged = true;
-        }
-
-        if (isTerminalStatus(task.status) && !seenFinishedTaskIds.has(task.id)) {
-          content = `${content}${buildTaskFinishedLine(task)}`;
-          seenFinishedTaskIds.add(task.id);
-          entryChanged = true;
-        }
-
-        if (entryChanged) {
-          changed = true;
-          next[employeeId] = {
-            content: trimTerminalLog(content),
-            seenTaskIds: trimMarkers([...seenTaskIds]),
-            seenOutputIds: trimMarkers([...seenOutputIds]),
-            seenFinishedTaskIds: trimMarkers([...seenFinishedTaskIds]),
-          };
-        } else if (!next[employeeId]) {
-          next[employeeId] = currentLog;
-        }
-      }
-
-      return changed ? next : current;
-    });
-  }, [logs, tasks]);
-
-  useEffect(() => {
-    if (mobileTerminalEmployeeId && mobileTerminalRef.current) {
-      requestAnimationFrame(() => {
-        if (mobileTerminalRef.current) {
-          mobileTerminalRef.current.scrollTop = mobileTerminalRef.current.scrollHeight;
-        }
-      });
-    }
-  }, [mobileTerminalEmployeeId, terminalLogs]);
+    const persist = () => terminalStore.persist(localStorage);
+    const timer = setInterval(persist, 5000);
+    const onHide = () => { if (document.visibilityState === "hidden") persist(); };
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", persist);
+    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", onHide); window.removeEventListener("pagehide", persist); terminalStore.stop(); persist(); };
+  }, [terminalStore]);
 
   useEffect(() => {
     if (activePage === "tasks" && authToken) {
@@ -1674,7 +1764,7 @@ export default function App() {
       <AntApp>
         <XProvider>
         <ModalBridge modalRef={modalRef} />
-        <div className="app-shell">
+        <div className={`app-shell${activePage === "tasks" ? " mobile-tasks-mode" : ""}`}>
           {showReconnect && !connected && (
             <div className="reconnect-overlay" onClick={() => window.location.reload()}>
               刷新
@@ -1685,7 +1775,7 @@ export default function App() {
           <span className="brand-badge">AI</span>
           <div>
             <strong>AI Teams{serverVersion ? ` v${serverVersion}` : ""}</strong>
-            <p>员工协作控制台</p>
+            <p>AGENT OPERATIONS</p>
           </div>
         </div>
         <nav className="nav-list">
@@ -1740,6 +1830,9 @@ export default function App() {
             文档
           </a>
         </nav>
+        <button className="secondary-button mobile-task-nav" onClick={() => setActivePage(activePage === "tasks" ? "monitor" : "tasks")}>
+          {activePage === "tasks" ? "返回对话" : "任务列表"}
+        </button>
         <button className="secondary-button mobile-logout" onClick={() => { modalRef.current?.confirm({ title: "确认退出", content: "确认退出当前连接？", okText: "退出", cancelText: "取消", onOk: clearToken }); }}>
           ⏻
         </button>
@@ -1768,9 +1861,8 @@ export default function App() {
       </div>
 
       {/* Mobile: terminal overlay */}
-      {mobileTerminalEmployeeId && (() => {
+      {isMobile && mobileTerminalEmployeeId && (() => {
         const emp = employees[mobileTerminalEmployeeId];
-        const text = terminalLogs[mobileTerminalEmployeeId]?.content || "等待输出...";
         return (
           <div className="mobile-terminal-overlay" onClick={() => setMobileTerminalEmployeeId(null)}>
             <div className="mobile-terminal-card" onClick={(e) => e.stopPropagation()}>
@@ -1778,111 +1870,23 @@ export default function App() {
                 <span>{emp?.name ?? mobileTerminalEmployeeId}</span>
                 <button onClick={() => setMobileTerminalEmployeeId(null)}>✕</button>
               </div>
-              <pre className="mobile-terminal-content" ref={mobileTerminalRef} dangerouslySetInnerHTML={{ __html: renderTerminalHtml(text) }} />
+              <LiveTerminal store={terminalStore} employeeId={mobileTerminalEmployeeId} />
             </div>
           </div>
         );
       })()}
 
       {/* Mobile: chat feed */}
-      <div className="mobile-chat-feed">
+      {isMobile && activePage !== "tasks" && <div className="mobile-chat-feed">
         {chatFeed.length === 0 ? (
           <div className="mobile-chat-empty">还没有发送过指令。</div>
         ) : (
-          <Bubble.List
-            style={{ height: "100%" }}
-            autoScroll
-            items={bubbleItems}
-            role={{
-              user: {
-                placement: "end",
-                avatar: <Avatar style={{ background: "#52c41a", fontSize: 11 }}>L</Avatar>,
-                header: (_content: any, info: any) => {
-                  const item = info.extraInfo;
-                  return (
-                    <div style={{ display: "flex", justifyContent: "flex-end", gap: 4, fontSize: 11, color: "#90a1be" }}>
-                      {item.target && <span>{item.target} · </span>}
-                      <span>{item.createdAt}</span>
-                    </div>
-                  );
-                },
-                contentRender: (_content: any, info: any) => {
-                  const item = info.extraInfo;
-                  return (
-                    <div className="bubble-copy-wrap">
-                      {item.replyQuote && <div className="bubble-quote">{item.replyQuoteAuthor ? `${item.replyQuoteAuthor}: ` : ""}{item.replyQuote.length > 60 ? item.replyQuote.slice(0, 60) + "..." : item.replyQuote}</div>}
-                      <div style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>{String(_content)}</div>
-                      {item.executingBy?.length > 0 && (
-                        <ThoughtChain
-                          style={{ marginTop: 6 }}
-                          items={item.executingBy.map((agent: ExecutingAgent) => ({
-                            key: agent.name,
-                            title: agent.name,
-                            status: thoughtChainStatus(agent.status),
-                          }))}
-                        />
-                      )}
-                      <button className="bubble-copy-btn" onClick={() => navigator.clipboard.writeText(String(_content))}>
-                        <CopyOutlined />
-                      </button>
-                    </div>
-                  );
-                },
-                styles: { content: { background: "linear-gradient(135deg, rgba(104, 182, 255, 0.28), rgba(121, 255, 209, 0.12))" } },
-              },
-              ai: {
-                placement: "start",
-                avatar: (_content: any, info: any) => {
-                  const item = info.extraInfo;
-                  const initial = item.author?.[0] ?? "?";
-                  return <Avatar style={{ background: "#1677ff", fontSize: 11 }}>{initial}</Avatar>;
-                },
-                header: (_content: any, info: any) => {
-                  const item = info.extraInfo;
-                  return (
-                    <div style={{ fontSize: 11, color: "#90a1be", display: "flex", gap: 4 }}>
-                      <strong style={{ color: "#c9d6f2" }}>{item.author}</strong>
-                      <span>{item.createdAt}</span>
-                    </div>
-                  );
-                },
-                contentRender: (_content: any, info: any) => {
-                  const item = info.extraInfo;
-                  const isError = item.taskStatus === "failed" || item.taskStatus === "timeout";
-                  return (
-                    <div className="bubble-copy-wrap">
-                      {item.quotedPrompt && <div className="bubble-quote">{item.quotedPrompt.length > 60 ? item.quotedPrompt.slice(0, 60) + "..." : item.quotedPrompt}</div>}
-                      <CollapsibleContent>
-                        <div style={isError ? { color: "#ff4d4f", fontSize: 12 } : { fontSize: 12 }}><XMarkdown content={String(_content)} /></div>
-                      </CollapsibleContent>
-                      <button className="bubble-copy-btn" onClick={() => navigator.clipboard.writeText(String(_content))}>
-                        <CopyOutlined />
-                      </button>
-                      {item.sessionId && item.employeeId && (
-                        <button
-                          className="bubble-reply-btn"
-                          onClick={() => {
-                            setResumeSession({ sessionId: item.sessionId, agentName: item.author || "", quote: String(_content).slice(0, 200) });
-                            setSelectedTarget([item.employeeId]);
-                          }}
-                          title="回复"
-                        >
-                          ↩
-                        </button>
-                      )}
-                    </div>
-                  );
-                },
-                styles: { root: { width: "100%" },
-                      body: { width: "100%" }, content: { background: "rgba(255, 255, 255, 0.06)", border: "1px solid rgba(255, 255, 255, 0.08)" } },
-              },
-            }}
-          />
+          <ChatMessages items={bubbleItems} onReply={replyToMessage} />
         )}
-      </div>
+      </div>}
 
       {/* Mobile: command input */}
-      <div className="mobile-input-bar">
+      {isMobile && activePage !== "tasks" && <div className="mobile-input-bar">
         <Suggestion
           items={getSuggestionItems}
           onSelect={handleSuggestionSelect}
@@ -1920,14 +1924,14 @@ export default function App() {
             />
           )}
         </Suggestion>
-      </div>
+      </div>}
 
       <div className="workspace-panel">
-        {activePage === "monitor" && (
+        {activePage === "monitor" && !isMobile && (
           <main className="board">
             <header className="board-header">
               <div>
-                <h1>AI 员工监控</h1>
+                <h1>运行工作台</h1>
                 <p>{connectionError ?? (connected ? "已连接服务端" : "正在等待服务端连接")}</p>
               </div>
               <div className="board-header-indicators">
@@ -1949,7 +1953,6 @@ export default function App() {
               ) : (
                 employeeList.map((employee) => {
                   const slots = activeTasksByEmployee[employee.id];
-                  const terminalText = terminalLogs[employee.id]?.content || "等待输出...";
                   return (
                     <EmployeeCard
                       key={employee.id}
@@ -1957,7 +1960,7 @@ export default function App() {
                       mainTask={slots?.main}
                       queueTask={slots?.queue}
                       displayTask={displayTasksByEmployee[employee.id]}
-                      terminalText={terminalText}
+                      terminalStore={terminalStore}
                       cancelTask={cancelTask}
                       onResetSession={resetSession}
                       onResumeQueue={resumeQueue}
@@ -1975,7 +1978,7 @@ export default function App() {
               <div className="section-title-row">
                 <div>
                   <h1>任务日志</h1>
-                  <p>任务记录永久保存，通过接口分页加载。</p>
+                  <p>查看任务记录，或清空服务端全部任务及关联历史。</p>
                 </div>
                 <div className="filter-row">
                   {TASK_FILTERS.map((filter) => (
@@ -1984,11 +1987,15 @@ export default function App() {
                       key={filter}
                       onClick={() => { setTaskFilter(filter); setTaskDisplayLimit(30); }}
                     >
-                      {filter}
+                      {TASK_FILTER_LABELS[filter] ?? filter}
                     </button>
                   ))}
+                  <button className="secondary-button schedule-delete-btn" disabled={clearingTasks || !connected} onClick={confirmClearAllTasks}>
+                    {clearingTasks ? "正在清空…" : "清空所有任务"}
+                  </button>
                 </div>
               </div>
+              {taskCleanupNotice && <p role="status" aria-live="polite">{taskCleanupNotice}</p>}
               <div className="task-table">
                 {taskLogLoading && taskLogList.length === 0 ? (
                   <div className="task-output-loading">加载中...</div>
@@ -2001,14 +2008,16 @@ export default function App() {
                     const isLoading = taskOutputLoading === task.id;
                     return (
                       <div className={`task-row task-${task.status}`} key={task.id}>
-                        <div className="task-row__summary" onClick={() => toggleTaskExpansion(task.id)}>
+                        <div className="task-row__summary" role="button" tabIndex={0} aria-expanded={isExpanded} onKeyDown={(event) => {
+                          if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); toggleTaskExpansion(task.id); }
+                        }} onClick={() => toggleTaskExpansion(task.id)}>
                           <div className="task-row__main">
                             <strong><span style={{ marginRight: 6 }}>{isExpanded ? "▾" : "▸"}</span>{task.employeeId ? employees[task.employeeId]?.name ?? task.employeeId : "任务队列"}</strong>
                             <p>{task.prompt}</p>
                             {task.error ? <span className="error-text">{task.error}</span> : null}
                           </div>
                           <div className="task-row__side">
-                            <span className={`status-pill ${task.status}`}>{task.status}</span>
+                            <span className={`status-pill ${task.status}`}>{TASK_FILTER_LABELS[task.status] ?? task.status}</span>
                             <small>{new Date(task.createdAt).toLocaleTimeString()}</small>
                             {task.status === "failed" && (
                               <button className="retry-btn" onClick={(e) => { e.stopPropagation(); retryTask(task); }}>重试</button>
@@ -2048,14 +2057,14 @@ export default function App() {
                   })
                 )}
               </div>
-              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+              {taskLogList.length > 0 && <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
                 <button
                   className="primary-button"
                   onClick={() => setTaskDisplayLimit((n) => n + 30)}
                 >
                   加载更多
                 </button>
-              </div>
+              </div>}
             </section>
           </main>
         )}
@@ -2613,11 +2622,11 @@ export default function App() {
         )}
       </div>
 
-      <aside className="command-panel">
+      {!isMobile && <aside className="command-panel">
         <div className="panel-card chat-panel">
           <div className="chat-header">
             <div>
-              <h2>Leader 群聊指挥中心</h2>
+              <h2>任务指挥台</h2>
               <p>输入 <code>@</code> 选择目标，或直接发送到任务队列。</p>
             </div>
             <button className="secondary-button" onClick={() => { modalRef.current?.confirm({ title: "确认退出", content: "确认退出当前连接？", okText: "退出", cancelText: "取消", onOk: clearToken }); }}>
@@ -2628,104 +2637,7 @@ export default function App() {
             {chatFeed.length === 0 ? (
               <div className="chat-empty">还没有发送过指令。</div>
             ) : (
-              <Bubble.List
-                style={{ height: "100%" }}
-                autoScroll
-                items={bubbleItems}
-                role={{
-                  user: {
-                    placement: "end",
-                    avatar: <Avatar style={{ background: "#52c41a", fontSize: 12 }}>L</Avatar>,
-                    header: (_content: any, info: any) => {
-                      const item = info.extraInfo;
-                      return (
-                        <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, fontSize: 12, color: "#90a1be" }}>
-                          {item.target && <span>{item.target} · </span>}
-                          <span>{item.createdAt}</span>
-                        </div>
-                      );
-                    },
-                    contentRender: (_content: any, info: any) => {
-                      const item = info.extraInfo;
-                      return (
-                        <div className="bubble-copy-wrap">
-                          {item.replyQuote && <div className="bubble-quote">{item.replyQuoteAuthor ? `${item.replyQuoteAuthor}: ` : ""}{item.replyQuote.length > 60 ? item.replyQuote.slice(0, 60) + "..." : item.replyQuote}</div>}
-                          <div style={{ whiteSpace: "pre-wrap" }}>{String(_content)}</div>
-                          {item.executingBy?.length > 0 && (
-                            <ThoughtChain
-                              style={{ marginTop: 8 }}
-                              items={item.executingBy.map((agent: ExecutingAgent) => ({
-                                key: agent.name,
-                                title: agent.name,
-                                status: thoughtChainStatus(agent.status),
-                                collapsible: item.executingBy.length > 2,
-                              }))}
-                            />
-                          )}
-                          <button className="bubble-copy-btn" onClick={() => navigator.clipboard.writeText(String(_content))}>
-                            <CopyOutlined />
-                          </button>
-                        </div>
-                      );
-                    },
-                    styles: { content: { background: "linear-gradient(135deg, rgba(104, 182, 255, 0.28), rgba(121, 255, 209, 0.12))" } },
-                  },
-                  ai: {
-                    placement: "start",
-                    avatar: (_content: any, info: any) => {
-                      const item = info.extraInfo;
-                      const initial = item.author?.[0] ?? "?";
-                      return <Avatar style={{ background: "#1677ff", fontSize: 12 }}>{initial}</Avatar>;
-                    },
-                    header: (_content: any, info: any) => {
-                      const item = info.extraInfo;
-                      return (
-                        <div style={{ fontSize: 12, color: "#90a1be", display: "flex", gap: 6 }}>
-                          <strong style={{ color: "#c9d6f2" }}>{item.author}</strong>
-                          <span>{item.createdAt}</span>
-                        </div>
-                      );
-                    },
-                    contentRender: (_content: any, info: any) => {
-                      const item = info.extraInfo;
-                      const isError = item.taskStatus === "failed" || item.taskStatus === "timeout";
-                      return (
-                        <div className="bubble-copy-wrap">
-                          {item.quotedPrompt && <div className="bubble-quote">{item.quotedPrompt.length > 60 ? item.quotedPrompt.slice(0, 60) + "..." : item.quotedPrompt}</div>}
-                          <CollapsibleContent>
-                            <div style={isError ? { color: "#ff4d4f" } : undefined}>
-                              <XMarkdown content={String(_content)} />
-                            </div>
-                          </CollapsibleContent>
-                          <button className="bubble-copy-btn" onClick={() => navigator.clipboard.writeText(String(_content))}>
-                            <CopyOutlined />
-                          </button>
-                          {item.sessionId && item.employeeId && (
-                            <button
-                              className="bubble-reply-btn"
-                              onClick={() => {
-                                setResumeSession({ sessionId: item.sessionId, agentName: item.author || "", quote: String(_content).slice(0, 200) });
-                                setSelectedTarget([item.employeeId]);
-                              }}
-                              title="回复"
-                            >
-                              ↩
-                            </button>
-                          )}
-                        </div>
-                      );
-                    },
-                    styles: {
-                      root: { width: "100%" },
-                      body: { width: "100%" },
-                      content: {
-                        background: "rgba(255, 255, 255, 0.06)",
-                        border: "1px solid rgba(255, 255, 255, 0.08)",
-                      },
-                    },
-                  },
-                }}
-              />
+              <ChatMessages items={bubbleItems} onReply={replyToMessage} />
             )}
           </div>
           <div className="chat-composer">
@@ -2786,7 +2698,7 @@ export default function App() {
             </Suggestion>
           </div>
         </div>
-      </aside>
+      </aside>}
         </div>
       </XProvider>
       </AntApp>

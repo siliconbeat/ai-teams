@@ -1,5 +1,6 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import pg from "pg";
+import { randomUUID } from "node:crypto";
 import type {
   AgentRegistrationRecord,
   AgentRegistrationStatus,
@@ -27,7 +28,11 @@ export interface Database {
   get<T>(sql: string, params?: unknown[]): Promise<T | undefined>;
   all<T>(sql: string, params?: unknown[]): Promise<T[]>;
   close(): Promise<void>;
+  clearTaskData(): Promise<TaskCleanupResult>;
 }
+
+export type TaskCleanupResult = { tasks: number; missions: number; generation: string };
+const TASK_DATA_TABLES = ["mission_approvals", "mission_subtasks", "mission_events", "missions", "task_logs", "task_webhooks", "tasks"];
 
 // ---------------------------------------------------------------------------
 // SQLite implementation (wraps synchronous node:sqlite)
@@ -63,6 +68,22 @@ export class SqliteDatabase implements Database {
   async close(): Promise<void> {
     this.db.close();
   }
+
+  async clearTaskData(): Promise<TaskCleanupResult> {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const tasks = (this.db.prepare("SELECT COUNT(*) AS count FROM tasks").get() as { count: number }).count;
+      const missions = (this.db.prepare("SELECT COUNT(*) AS count FROM missions").get() as { count: number }).count;
+      for (const table of TASK_DATA_TABLES) this.db.exec(`DELETE FROM ${table}`);
+      const generation = randomUUID();
+      this.db.prepare("INSERT INTO schema_meta (key, value) VALUES ('task_data_generation', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(generation);
+      this.db.exec("COMMIT");
+      return { tasks, missions, generation };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -87,6 +108,26 @@ export class PostgresDatabase implements Database {
   }
   async close(): Promise<void> {
     await this.pool.end();
+  }
+
+  async clearTaskData(): Promise<TaskCleanupResult> {
+    // A transaction must use one checked-out connection, never pool.query.
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const tasks = Number((await client.query("SELECT COUNT(*) AS count FROM tasks")).rows[0].count);
+      const missions = Number((await client.query("SELECT COUNT(*) AS count FROM missions")).rows[0].count);
+      for (const table of TASK_DATA_TABLES) await client.query(`DELETE FROM ${table}`);
+      const generation = randomUUID();
+      await client.query("INSERT INTO schema_meta (key, value) VALUES ('task_data_generation', $1) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [generation]);
+      await client.query("COMMIT");
+      return { tasks, missions, generation };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }
 
@@ -162,7 +203,8 @@ export async function initDb(db: Database) {
       usage_output_tokens         INTEGER,
       usage_cache_read_tokens     INTEGER,
       usage_cache_creation_tokens INTEGER,
-      retry_count                 INTEGER NOT NULL DEFAULT 0
+      retry_count                 INTEGER NOT NULL DEFAULT 0,
+      attempt                     INTEGER NOT NULL DEFAULT 0
     )
   `);
   await db.run(`
@@ -297,6 +339,14 @@ export async function initDb(db: Database) {
     const msg = err instanceof Error ? err.message : String(err ?? "");
     if (!msg.includes("duplicate column") && !msg.includes("already exists")) {
       console.warn("Migration retry_count failed:", msg);
+    }
+  }
+  try {
+    await db.run("ALTER TABLE tasks ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err ?? "");
+    if (!msg.includes("duplicate column") && !msg.includes("already exists")) {
+      console.warn("Migration attempt failed:", msg);
     }
   }
 }
@@ -437,7 +487,7 @@ export async function deleteEmployee(db: Database, employeeId: string) {
 const TASK_COLUMNS = [
   "id", "leader_command_id", "employee_id", "session_id", "target_mode",
   "prompt", "workspace", "status", "timeout_sec", "cli_config", "priority", "required_labels",
-  "retry_count",
+  "retry_count", "attempt",
   "created_at", "started_at", "finished_at", "exit_code", "summary", "error",
   "duration_ms", "duration_api_ms", "num_turns", "total_cost_usd",
   "usage_input_tokens", "usage_output_tokens", "usage_cache_read_tokens", "usage_cache_creation_tokens",
@@ -687,6 +737,7 @@ export type DbTaskRow = {
   usage_cache_read_tokens: number | null;
   usage_cache_creation_tokens: number | null;
   retry_count: number;
+  attempt: number;
 };
 
 export function dbRowToTask(row: DbTaskRow, defaultTimeoutSec: number): TaskRecord {
@@ -704,6 +755,7 @@ export function dbRowToTask(row: DbTaskRow, defaultTimeoutSec: number): TaskReco
     requiredLabels: row.required_labels ? JSON.parse(row.required_labels) : null,
     status: (row.status || "queued") as TaskRecord["status"],
     retryCount: row.retry_count ?? 0,
+    attempt: row.attempt ?? 0,
     createdAt: row.created_at,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
@@ -736,6 +788,7 @@ function taskToDbValues(task: TaskRecord): unknown[] {
     task.priority,
     task.requiredLabels ? JSON.stringify(task.requiredLabels) : null,
     task.retryCount,
+    task.attempt,
     task.createdAt,
     task.startedAt,
     task.finishedAt,

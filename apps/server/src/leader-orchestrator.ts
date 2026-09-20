@@ -234,7 +234,7 @@ export function createLeaderOrchestrator(options: {
   }
 
   async function run(missionId: string) {
-    if (running.has(missionId)) return;
+    if (state.clearingTasks || running.has(missionId)) return;
     running.add(missionId);
     try {
       let mission = await getMissionById(db, missionId);
@@ -311,6 +311,7 @@ export function createLeaderOrchestrator(options: {
   }
 
   function kick(missionId: string) {
+    if (state.clearingTasks) return;
     setTimeout(() => void run(missionId), 0).unref();
   }
 
@@ -443,6 +444,10 @@ export function createLeaderOrchestrator(options: {
   }
 
   return {
+    async drain() {
+      // Existing iterations may still be writing events after dispatch is paused.
+      while (running.size > 0) await new Promise((resolve) => setTimeout(resolve, 10));
+    },
     create,
     list,
     detail,
