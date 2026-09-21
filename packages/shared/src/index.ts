@@ -38,6 +38,10 @@ export interface TaskCliConfig {
   extraArgs?: string[];
 }
 
+export function isClaudeSessionFailure(error: string) {
+  return /No conversation found with session ID|Session ID .+ is already in use|\[session_unavailable\]/i.test(error);
+}
+
 export function isPermanentModelFailure(error: string) {
   return /(?:\b(?:401|403)\b.*(?:unauthorized|forbidden|authentication|api)|(?:api|http|status|authentication).*\b(?:401|403)\b|invalid[ _-]?(?:api[ _-]?)?key|authentication[_ ]error|insufficient[_ ](?:quota|credits)|billing[_ ](?:error|disabled))/i.test(error);
 }
@@ -89,6 +93,8 @@ export interface TaskRecord {
   leaderCommandId: string;
   employeeId: string | null;
   sessionId: string | null;
+  /** Claude transcripts are local to the owning Agent, not shared queue data. */
+  sessionEmployeeId?: string | null;
   targetMode: TaskTargetMode;
   prompt: string;
   workspace: string | null;
@@ -98,6 +104,8 @@ export interface TaskRecord {
   requiredLabels: string[] | null;
   status: TaskStatus;
   retryCount: number;
+  /** Reconnect recovery is independent of execution/model retries. */
+  reconnectCount?: number;
   attempt: number;
   createdAt: string;
   startedAt: string | null;

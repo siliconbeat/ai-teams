@@ -12,6 +12,11 @@ import { createAiTeamsServer, type AiTeamsServer } from "./index";
 import type { ServerToEmployeeMessage, ServerToLeaderMessage } from "@ai-teams/shared";
 
 const TOKEN = "test-token";
+// Integration tests exercise real HTTP, WebSocket and SQLite I/O. Their
+// readiness budget is separate from the task execution deadline being tested.
+const IO_WAIT_MS = 3000;
+const MISSION_WAIT_MS = 5000; // Allows multiple 500 ms orchestrator scans.
+const NORMAL_TASK_TIMEOUT_SEC = 30;
 
 let tmpDir: string;
 let server: AiTeamsServer;
@@ -25,7 +30,7 @@ beforeEach(async () => {
   server = await createAiTeamsServer({
     authToken: TOKEN,
     dbPath: path.join(tmpDir, "ai-teams.db"),
-    defaultTimeoutSec: 0.08,
+    defaultTimeoutSec: NORMAL_TASK_TIMEOUT_SEC,
     disconnectGraceMs: 80,
     runningDisconnectGraceMs: 80,
     agentRegistrationMode: "open",
@@ -112,7 +117,7 @@ describe("Agent 注册审批", () => {
     server = await createAiTeamsServer({
       authToken: TOKEN,
       dbPath: path.join(tmpDir, "approval.db"),
-      defaultTimeoutSec: 0.08,
+      defaultTimeoutSec: NORMAL_TASK_TIMEOUT_SEC,
       disconnectGraceMs: 80,
       runningDisconnectGraceMs: 80,
       agentRegistrationMode: "approval",
@@ -176,7 +181,7 @@ describe("GET /health", () => {
     server = await createAiTeamsServer({
       authToken: TOKEN,
       dataDir,
-      defaultTimeoutSec: 0.08,
+      defaultTimeoutSec: NORMAL_TASK_TIMEOUT_SEC,
       disconnectGraceMs: 80,
       runningDisconnectGraceMs: 80,
       agentRegistrationMode: "open",
@@ -199,7 +204,7 @@ describe("GET /health", () => {
 // ─── AI Leader Missions ─────────────────────────────────────────
 
 describe("AI Leader Missions", () => {
-  it("创建 Mission 后复用任务队列派发子任务，并在 Review 完成后结束", async () => {
+  it.each([0, 250])("创建 Mission 后复用任务队列派发子任务，并在 Review 完成后结束（Agent 回报延迟 %i ms）", async (agentDelayMs) => {
     const alice = await connectAgent("alice");
     const bob = await connectAgent("bob");
 
@@ -217,28 +222,33 @@ describe("AI Leader Missions", () => {
     const created = (await response.json()) as { mission: { id: string; status: string }; subtasks: Array<{ taskId: string }> };
     const missionId = created.mission.id;
 
-    await waitUntil(async () => (await getMission(missionId)).subtasks.length >= 2, 1000);
+    await waitForMission(missionId, (detail) => detail.subtasks.length >= 2, "initial worker tasks");
     let detail = await getMission(missionId);
     expect(detail.mission.status).toBe("waiting_agents");
     expect(detail.subtasks.map((s) => s.role).sort()).toEqual(["analyst", "implementer"]);
 
+    // Controlled worker latency, not a wait for readiness. Normal tasks must
+    // remain runnable while the test client spends time processing the result.
+    if (agentDelayMs) await delay(agentDelayMs);
     for (const subtask of detail.subtasks) {
       const task = server.buildSnapshot().tasks.find((t) => t.id === subtask.taskId)!;
+      expect(task.status).toBe("dispatched");
+      expect(task.retryCount).toBe(0);
       const socket = task.employeeId === "alice" ? alice : bob;
       completeTask(socket, task.id, `${subtask.role} done`);
     }
 
-    await waitUntil(async () => (await getMission(missionId)).subtasks.some((s) => s.role === "reviewer"), 1000);
+    await waitForMission(missionId, (detail) => detail.subtasks.some((s) => s.role === "reviewer"), "reviewer task");
     detail = await getMission(missionId);
     const review = detail.subtasks.find((s) => s.role === "reviewer")!;
     const reviewTask = server.buildSnapshot().tasks.find((t) => t.id === review.taskId)!;
     completeTask(reviewTask.employeeId === "alice" ? alice : bob, reviewTask.id, "review passed");
 
-    await waitUntil(async () => (await getMission(missionId)).mission.status === "completed", 1000);
+    await waitForMission(missionId, (detail) => detail.mission.status === "completed", "completion");
     detail = await getMission(missionId);
     expect(detail.mission.result).toContain("Mission 完成");
     expect(detail.subtasks).toHaveLength(3);
-  });
+  }, 20_000);
 
   it("风险 Mission 会暂停等待人工确认，批准后继续派发任务", async () => {
     await connectAgent("alice");
@@ -254,7 +264,7 @@ describe("AI Leader Missions", () => {
     const created = (await response.json()) as { mission: { id: string } };
     const missionId = created.mission.id;
 
-    await waitUntil(async () => (await getMission(missionId)).mission.status === "waiting_human", 1000);
+    await waitForMission(missionId, (detail) => detail.mission.status === "waiting_human", "human approval");
     let detail = await getMission(missionId);
     const approval = detail.approvals.find((item) => item.status === "pending");
     expect(approval).toBeTruthy();
@@ -267,11 +277,11 @@ describe("AI Leader Missions", () => {
     });
     expect(approveResponse.status).toBe(200);
 
-    await waitUntil(async () => (await getMission(missionId)).subtasks.length >= 1, 1000);
+    await waitForMission(missionId, (detail) => detail.subtasks.length >= 1, "approved worker tasks");
     detail = await getMission(missionId);
     expect(detail.mission.status).toBe("waiting_agents");
     expect(detail.approvals.find((item) => item.id === approval!.id)?.status).toBe("approved");
-  });
+  }, 15_000);
 
   it("子任务标记 NEEDS_HUMAN_APPROVAL 后请求确认，批准后继续完成", async () => {
     const alice = await connectAgent("alice");
@@ -290,7 +300,7 @@ describe("AI Leader Missions", () => {
     const created = (await response.json()) as { mission: { id: string } };
     const missionId = created.mission.id;
 
-    await waitUntil(async () => (await getMission(missionId)).subtasks.length >= 2, 1000);
+    await waitForMission(missionId, (detail) => detail.subtasks.length >= 2, "initial worker tasks");
     const detail = await getMission(missionId);
     for (const [index, subtask] of detail.subtasks.entries()) {
       const task = server.buildSnapshot().tasks.find((t) => t.id === subtask.taskId)!;
@@ -298,7 +308,7 @@ describe("AI Leader Missions", () => {
       completeTask(socket, subtask.taskId, index === 0 ? "NEEDS_HUMAN_APPROVAL: risky operation" : "worker done");
     }
 
-    await waitUntil(async () => (await getMission(missionId)).mission.status === "waiting_human", 1000);
+    await waitForMission(missionId, (detail) => detail.mission.status === "waiting_human", "human approval");
     const waiting = await getMission(missionId);
     const approval = waiting.approvals.find((item) => item.status === "pending")!;
 
@@ -309,14 +319,14 @@ describe("AI Leader Missions", () => {
     });
     expect(approveResponse.status).toBe(200);
 
-    await waitUntil(async () => (await getMission(missionId)).subtasks.some((s) => s.role === "reviewer"), 1000);
+    await waitForMission(missionId, (detail) => detail.subtasks.some((s) => s.role === "reviewer"), "reviewer task");
     const afterApproval = await getMission(missionId);
     const review = afterApproval.subtasks.find((s) => s.role === "reviewer")!;
     const reviewTask = server.buildSnapshot().tasks.find((t) => t.id === review.taskId)!;
     completeTask(reviewTask.employeeId === "alice" ? alice : bob, review.taskId, "review passed after approval");
 
-    await waitUntil(async () => (await getMission(missionId)).mission.status === "completed", 1000);
-  });
+    await waitForMission(missionId, (detail) => detail.mission.status === "completed", "completion");
+  }, 25_000);
 
   it("子任务失败后批准继续会派发失败复盘任务，而不是直接结束", async () => {
     const alice = await connectAgent("alice");
@@ -335,7 +345,7 @@ describe("AI Leader Missions", () => {
     const created = (await response.json()) as { mission: { id: string } };
     const missionId = created.mission.id;
 
-    await waitUntil(async () => (await getMission(missionId)).subtasks.length >= 2, 1000);
+    await waitForMission(missionId, (detail) => detail.subtasks.length >= 2, "initial worker tasks");
     const detail = await getMission(missionId);
     for (const [index, subtask] of detail.subtasks.entries()) {
       if (index === 0) {
@@ -343,12 +353,15 @@ describe("AI Leader Missions", () => {
           await waitUntil(() => {
             const task = server.buildSnapshot().tasks.find((t) => t.id === subtask.taskId);
             return Boolean(task?.employeeId && task.status === "dispatched");
-          }, 1000);
+          });
           const task = server.buildSnapshot().tasks.find((t) => t.id === subtask.taskId)!;
           const socket = task.employeeId === "alice" ? alice : bob;
           socket.send(JSON.stringify({ type: "task.started", taskId: subtask.taskId, pid: 123 }));
           socket.send(JSON.stringify({ type: "task.failed", taskId: subtask.taskId, error: `worker failed ${attempt}` }));
-          await delay(20);
+          await waitUntil(() => {
+            const current = server.buildSnapshot().tasks.find((t) => t.id === subtask.taskId);
+            return Boolean(current && (current.retryCount > attempt || current.status === "failed"));
+          });
         }
       } else {
         const task = server.buildSnapshot().tasks.find((t) => t.id === subtask.taskId)!;
@@ -357,7 +370,7 @@ describe("AI Leader Missions", () => {
       }
     }
 
-    await waitUntil(async () => (await getMission(missionId)).mission.status === "waiting_human", 1000);
+    await waitForMission(missionId, (detail) => detail.mission.status === "waiting_human", "failure approval");
     const waiting = await getMission(missionId);
     const approval = waiting.approvals.find((item) => item.status === "pending")!;
     const approveResponse = await fetch(`${httpBaseUrl}/api/missions/${missionId}/approvals/${approval.id}/respond`, {
@@ -367,29 +380,37 @@ describe("AI Leader Missions", () => {
     });
     expect(approveResponse.status).toBe(200);
 
-    await waitUntil(async () => (await getMission(missionId)).subtasks.some((s) => s.role === "reviewer"), 1000);
+    await waitForMission(missionId, (detail) => detail.subtasks.some((s) => s.role === "reviewer"), "failure reviewer task");
     const afterApproval = await getMission(missionId);
     expect(afterApproval.mission.status).toBe("waiting_agents");
     const review = afterApproval.subtasks.find((s) => s.role === "reviewer")!;
     const reviewTask = server.buildSnapshot().tasks.find((t) => t.id === review.taskId)!;
     completeTask(reviewTask.employeeId === "alice" ? alice : bob, review.taskId, "failure review done");
 
-    await waitUntil(async () => (await getMission(missionId)).mission.status === "completed", 1000);
-  });
+    await waitForMission(missionId, (detail) => detail.mission.status === "completed", "completion");
+  }, 35_000);
 });
 
 // ─── 任务 CRUD REST API ────────────────────────────────────────
 
 describe("POST /api/tasks — 创建任务", () => {
-  it("创建 queue 任务", async () => {
+  it.each([0, 650])("创建 queue 任务（HTTP 请求延迟 %i ms）", async (requestDelayMs) => {
     const agent = await connectAgent("alice");
     const dispatchPromise = waitForAgentDispatch(agent);
+    const tasksUrl = `${httpBaseUrl}/api/tasks`;
 
-    const response = await fetch(`${httpBaseUrl}/api/tasks`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
-      body: JSON.stringify({ prompt: "queue task", atAgents: "queue" }),
-    });
+    const [dispatch, response] = await Promise.all([
+      dispatchPromise,
+      (async () => {
+        // Reproduce a slow HTTP request independently of host CPU load.
+        if (requestDelayMs) await delay(requestDelayMs);
+        return fetch(tasksUrl, {
+          method: "POST",
+          headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+          body: JSON.stringify({ prompt: "queue task", atAgents: "queue" }),
+        });
+      })(),
+    ]);
 
     expect(response.status).toBe(202);
     const body = (await response.json()) as { status: string; tasks: Array<{ id: string; status: string; targetMode: string }> };
@@ -398,7 +419,6 @@ describe("POST /api/tasks — 创建任务", () => {
     expect(["queued", "dispatched"]).toContain(body.tasks[0]!.status);
     expect(body.tasks[0]!.targetMode).toBe("queue");
 
-    const dispatch = await dispatchPromise;
     agent.send(JSON.stringify({ type: "task.accepted", taskId: dispatch.taskId }));
     agent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 1 }));
     agent.send(JSON.stringify({ type: "task.completed", taskId: dispatch.taskId, exitCode: 0, summary: "done" }));
@@ -1465,16 +1485,18 @@ describe("任务生命周期", () => {
     const agent = await connectAgent("alice");
     const leader = await connectLeader();
     const dispatchPromise = waitForAgentDispatch(agent);
+    // Subscribe before dispatch so a slow client cannot miss the 80 ms event.
+    const timedOut = waitForLeaderMessage(
+      leader,
+      (m) => m.type === "task.upsert" && m.task.prompt === "timeout test" && m.task.status === "timeout",
+    );
 
-    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "timeout test" }));
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "timeout test", timeoutSec: 0.08 }));
     const dispatch = await dispatchPromise;
     agent.send(JSON.stringify({ type: "task.started", taskId: dispatch.taskId, pid: 1 }));
 
-    await waitForLeaderMessage(
-      leader,
-      (m) => m.type === "task.upsert" && m.task.id === dispatch.taskId && m.task.status === "timeout",
-      500,
-    );
+    const timeoutEvent = await timedOut;
+    expect(timeoutEvent.type === "task.upsert" && timeoutEvent.task.id).toBe(dispatch.taskId);
 
     agent.send(JSON.stringify({ type: "task.completed", taskId: dispatch.taskId, exitCode: 0, summary: "late" }));
     await delay(30);
@@ -1694,6 +1716,116 @@ describe("断线任务恢复", () => {
   });
 });
 
+describe("会话恢复安全", () => {
+  it("重启迁移旧版未知归属会话后明确失败，不派给新 Agent，也不阻塞新任务", async () => {
+    const response = await fetch(`${httpBaseUrl}/api/tasks`, {
+      method: "POST", headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "legacy orphan", atAgents: "queue" }),
+    });
+    expect(response.status).toBe(202);
+    const taskId = (await response.json()).tasks[0].id;
+    await server.close();
+    const raw = new DatabaseSync(path.join(tmpDir, "ai-teams.db"));
+    raw.prepare("UPDATE tasks SET session_id = ?, employee_id = NULL WHERE id = ?").run("old-local-session", taskId);
+    raw.exec("ALTER TABLE tasks DROP COLUMN session_employee_id");
+    raw.exec("ALTER TABLE tasks DROP COLUMN reconnect_count");
+    raw.close();
+    server = await createAiTeamsServer({ authToken: TOKEN, dbPath: path.join(tmpDir, "ai-teams.db"), agentRegistrationMode: "open", logger: false });
+    await server.app.listen({ port: 0, host: "127.0.0.1" });
+    const address = server.app.server.address() as AddressInfo;
+    baseUrl = `ws://127.0.0.1:${address.port}`;
+    httpBaseUrl = `http://127.0.0.1:${address.port}`;
+    const bob = await connectAgent("bob");
+    await waitUntil(() => server.buildSnapshot().tasks.find(t => t.id === taskId)?.status === "failed");
+    expect(server.buildSnapshot().tasks.find(t => t.id === taskId)).toMatchObject({
+      sessionEmployeeId: null, employeeId: null, attempt: 0, retryCount: 0, reconnectCount: 0,
+      error: expect.stringContaining("会话所属 Agent 未知"),
+    });
+    const leader = await connectLeader();
+    const next = waitForAgentDispatch(bob);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "independent task" }));
+    expect((await next).prompt).toBe("independent task");
+  });
+
+  it("缺失会话不重复排队、不污染模型失败计数，重连也不复活终态任务", async () => {
+    const alice = await connectAgent("alice");
+    const leader = await connectLeader();
+    const dispatching = waitForAgentDispatch(alice);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "missing session" }));
+    const first = await dispatching;
+    alice.send(JSON.stringify({ type: "task.started", taskId: first.taskId, attempt: first.attempt, pid: 1, sessionId: "missing" }));
+    alice.send(JSON.stringify({ type: "task.failed", taskId: first.taskId, attempt: first.attempt, error: "No conversation found with session ID: missing", recoverable: true }));
+    await waitUntil(() => server.buildSnapshot().tasks.find(t => t.id === first.taskId)?.status === "failed");
+    await connectAgent("alice");
+    expect(server.buildSnapshot().tasks.find(t => t.id === first.taskId)).toMatchObject({ status: "failed", retryCount: 0, reconnectCount: 0, attempt: 1 });
+    expect(server.buildSnapshot().employees.find(e => e.id === "alice")).toMatchObject({ consecutiveQueueFailures: 0, queueTaskId: null });
+    expect(server.buildSnapshot().employees.find(e => e.id === "alice")?.queueRecovery).toBeUndefined();
+  });
+
+  it("首次启动失败的日志 UUID 不会让下一次派发错误使用 resume", async () => {
+    const alice = await connectAgent("alice");
+    const leader = await connectLeader();
+    const dispatching = waitForAgentDispatch(alice);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "startup failure" }));
+    const first = await dispatching;
+    alice.send(JSON.stringify({ type: "task.started", taskId: first.taskId, attempt: first.attempt, pid: 1, sessionId: null }));
+    alice.send(JSON.stringify({ type: "task.output", taskId: first.taskId, attempt: first.attempt, stream: "stdout", seq: 1, content: "[done] session_id: uncreated-id\n[done] result: startup failed" }));
+    const retrying = waitForAgentDispatch(alice);
+    alice.send(JSON.stringify({ type: "task.failed", taskId: first.taskId, attempt: first.attempt, error: "CLI startup failed before execution" }));
+    const retry = await retrying;
+    expect(retry.sessionId).toBeUndefined();
+    expect(retry.attempt).toBe(2);
+    expect(server.buildSnapshot().tasks.find(t => t.id === first.taskId)).toMatchObject({ sessionId: null, retryCount: 1, reconnectCount: 0 });
+  });
+
+  it("已确认的本机会话只回原 Agent，且不会阻塞其他无会话任务", async () => {
+    const alice = await connectAgent("alice");
+    const leader = await connectLeader();
+    const dispatching = waitForAgentDispatch(alice);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "bound session" }));
+    const first = await dispatching;
+    alice.send(JSON.stringify({ type: "task.started", taskId: first.taskId, attempt: first.attempt, pid: 1, sessionId: "local-alice" }));
+    await waitUntil(() => server.buildSnapshot().tasks.find(t => t.id === first.taskId)?.sessionEmployeeId === "alice");
+    await closeSocket(alice);
+    await waitUntil(() => server.buildSnapshot().tasks.find(t => t.id === first.taskId)?.status === "queued");
+    const bob = await connectAgent("bob");
+    const unrelated = waitForAgentDispatch(bob);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "independent task" }));
+    expect((await unrelated).prompt).toBe("independent task");
+    expect(server.buildSnapshot().tasks.find(t => t.id === first.taskId)).toMatchObject({ status: "queued", sessionEmployeeId: "alice", retryCount: 0, reconnectCount: 1 });
+    const agentToken = await createAgentRegistrationToken("alice");
+    const returning = await connectWs(`${baseUrl}/ws/agent`);
+    const resumed = waitForAgentDispatch(returning);
+    sendAgentRegister(returning, "alice", undefined, { agentToken });
+    expect(await resumed).toMatchObject({ taskId: first.taskId, sessionId: "local-alice", employeeId: "alice" });
+  });
+
+  it.each(["queue", "direct"] as const)("%s 重连预算与模型重试独立，耗尽不会再次入队", async (mode) => {
+    const alice = await connectAgent("alice");
+    const leader = await connectLeader();
+    const dispatching = waitForAgentDispatch(alice);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: mode === "queue" ? "queue" : ["alice"], prompt: "reconnect budget" }));
+    const first = await dispatching;
+    // Seed model retry history; reconnect must not mistake it for reconnects.
+    const record = server.buildSnapshot().tasks.find(t => t.id === first.taskId)!;
+    record.retryCount = 8;
+    const agentToken = await createAgentRegistrationToken("alice");
+    const replacement = await connectWs(`${baseUrl}/ws/agent`);
+    const resumed = waitForAgentDispatch(replacement);
+    sendAgentRegister(replacement, "alice", undefined, { agentToken });
+    expect((await resumed).attempt).toBe(2);
+    expect(record).toMatchObject({ retryCount: 8, reconnectCount: 1 });
+    record.reconnectCount = mode === "queue" ? 8 : 3;
+    record.error = "previous API failure";
+    await connectAgent("alice");
+    await waitUntil(() => record.status === "failed");
+    expect(record.retryCount).toBe(8);
+    expect(record.attempt).toBe(2);
+    expect(record.error).toContain("重连恢复次数已用尽");
+    expect(record.error).toContain("previous API failure");
+  });
+});
+
 describe("双槽位并行", () => {
   it("main 和 queue 槽位可同时运行", async () => {
     const agent = await connectAgent("alice");
@@ -1883,6 +2015,25 @@ describe("GET /api/snapshot", () => {
   });
 });
 
+describe("集成测试等待器", () => {
+  it("消息缺失仍会失败，迟到 await 不产生未处理拒绝且移除监听器", async () => {
+    const agent = await connectAgent("alice");
+    const messageListeners = agent.listenerCount("message");
+    const closeListeners = agent.listenerCount("close");
+    const waiting = waitForWsMessage(agent, () => false, 20);
+    // Deliberately await after rejection, as happens during slow HTTP requests.
+    await delay(40);
+    await expect(waiting).rejects.toThrow("Timed out after 20 ms waiting for websocket message");
+    expect(agent.listenerCount("message")).toBe(messageListeners);
+    expect(agent.listenerCount("close")).toBe(closeListeners);
+  });
+
+  it("永不满足的条件仍然有界失败并保留诊断", async () => {
+    await expect(waitUntil(() => false, 20, () => "phase=reviewer; task=queued"))
+      .rejects.toThrow("Timed out after 20 ms waiting for condition; phase=reviewer; task=queued");
+  });
+});
+
 // ─── Helper 函数 ───────────────────────────────────────────────
 
 async function connectLeader() {
@@ -1892,8 +2043,9 @@ async function connectLeader() {
 async function connectAgent(employeeId: string, activeTaskId?: string, opts?: { weight?: number; labels?: string[]; agentToken?: string; permissionMode?: string }) {
   const agentToken = await createAgentRegistrationToken(employeeId, opts);
   const socket = await connectWs(`${baseUrl}/ws/agent`);
+  const registered = waitForWsMessage<ServerToEmployeeMessage>(socket, (message) => message.type === "agent.registered");
   sendAgentRegister(socket, employeeId, activeTaskId, { ...opts, agentToken });
-  await waitUntil(() => server.buildSnapshot().employees.some((e) => e.id === employeeId && e.status === "online"));
+  await registered;
   return socket;
 }
 
@@ -1941,7 +2093,7 @@ function connectWs(url: string): Promise<WebSocket> {
   });
 }
 
-function waitForAgentDispatch(socket: WebSocket, timeoutMs = 500): Promise<Extract<ServerToEmployeeMessage, { type: "task.dispatch" }>> {
+function waitForAgentDispatch(socket: WebSocket, timeoutMs = IO_WAIT_MS): Promise<Extract<ServerToEmployeeMessage, { type: "task.dispatch" }>> {
   return waitForWsMessage(socket, (message): message is Extract<ServerToEmployeeMessage, { type: "task.dispatch" }> => {
     return message.type === "task.dispatch";
   }, timeoutMs);
@@ -1950,13 +2102,32 @@ function waitForAgentDispatch(socket: WebSocket, timeoutMs = 500): Promise<Extra
 async function getMission(missionId: string) {
   const response = await fetch(`${httpBaseUrl}/api/missions/${missionId}`, {
     headers: { authorization: `Bearer ${TOKEN}` },
+    signal: AbortSignal.timeout(IO_WAIT_MS),
   });
   expect(response.status).toBe(200);
   return response.json() as Promise<{
-    mission: { id: string; status: string; result: string | null };
+    mission: { id: string; status: string; result: string | null; error: string | null };
     subtasks: Array<{ taskId: string; role: string; iteration: number }>;
     approvals: Array<{ id: string; status: string; question: string }>;
   }>;
+}
+
+async function waitForMission(
+  missionId: string,
+  predicate: (detail: Awaited<ReturnType<typeof getMission>>) => boolean,
+  phase: string,
+) {
+  let lastDetail: Awaited<ReturnType<typeof getMission>> | undefined;
+  const diagnostic = () => `Mission ${missionId}: waiting for ${phase}; last detail=${JSON.stringify(lastDetail)}; ${testStateDiagnostic()}`;
+  await waitUntil(async () => {
+    lastDetail = await getMission(missionId);
+    if (predicate(lastDetail)) return true;
+    // A terminal failure cannot become ready; report the real state immediately.
+    if (["failed", "cancelled"].includes(lastDetail.mission.status)) {
+      throw new Error(diagnostic());
+    }
+    return false;
+  }, MISSION_WAIT_MS, diagnostic);
 }
 
 function completeTask(socket: WebSocket, taskId: string, summary: string) {
@@ -1978,7 +2149,7 @@ function waitForLeaderMessage(
 function waitForLeaderMessage(
   socket: WebSocket,
   predicate: (message: ServerToLeaderMessage) => boolean,
-  timeoutMs = 500,
+  timeoutMs = IO_WAIT_MS,
 ) {
   return waitForWsMessage(socket, predicate, timeoutMs);
 }
@@ -1986,21 +2157,27 @@ function waitForLeaderMessage(
 function waitForWsMessage<T>(
   socket: WebSocket,
   predicate: (message: T) => boolean,
-  timeoutMs = 500,
+  timeoutMs = IO_WAIT_MS,
 ): Promise<T> {
-  return new Promise((resolve, reject) => {
+  const promise = new Promise<T>((resolve, reject) => {
+    const receivedTypes: string[] = [];
     const timer = setTimeout(() => {
       cleanup();
-      reject(new Error("Timed out waiting for websocket message."));
+      reject(new Error(`Timed out after ${timeoutMs} ms waiting for websocket message; received=${JSON.stringify(receivedTypes)}; ${testStateDiagnostic()}`));
     }, timeoutMs);
 
     const onMessage = (raw: WebSocket.RawData) => {
-      const message = JSON.parse(raw.toString()) as T;
-      if (!predicate(message)) {
-        return;
+      try {
+        const message = JSON.parse(raw.toString()) as T;
+        receivedTypes.push(String((message as { type?: string }).type));
+        if (receivedTypes.length > 8) receivedTypes.shift();
+        if (!predicate(message)) return;
+        cleanup();
+        resolve(message);
+      } catch (error) {
+        cleanup();
+        reject(error);
       }
-      cleanup();
-      resolve(message);
     };
 
     const onClose = () => {
@@ -2017,9 +2194,13 @@ function waitForWsMessage<T>(
     socket.on("message", onMessage);
     socket.on("close", onClose);
   });
+  // Callers subscribe before triggering HTTP/WS work and may await that work
+  // first. Mark an early rejection handled without changing what await observes.
+  void promise.catch(() => {});
+  return promise;
 }
 
-function waitForClose(socket: WebSocket, timeoutMs = 500): Promise<{ code: number; reason: string }> {
+function waitForClose(socket: WebSocket, timeoutMs = IO_WAIT_MS): Promise<{ code: number; reason: string }> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("Timed out waiting for close.")), timeoutMs);
     socket.once("close", (code, reason) => {
@@ -2038,15 +2219,29 @@ function closeSocket(socket: WebSocket) {
   return closed;
 }
 
-async function waitUntil(predicate: () => boolean | Promise<boolean>, timeoutMs = 500) {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    if (await predicate()) {
-      return;
-    }
-    await delay(5);
+function testStateDiagnostic() {
+  const snapshot = server.buildSnapshot();
+  return JSON.stringify({
+    tasks: snapshot.tasks.slice(-10).map(({ id, status, employeeId, attempt, retryCount, error }) => ({ id, status, employeeId, attempt, retryCount, error })),
+    employees: snapshot.employees.map(({ id, status, mainTaskId, queueTaskId, queuePaused, queueRecovery }) => ({ id, status, mainTaskId, queueTaskId, queuePaused, queueRecovery })),
+  });
+}
+
+async function waitUntil(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs = IO_WAIT_MS,
+  diagnostic: () => string = testStateDiagnostic,
+) {
+  const deadline = performance.now() + timeoutMs;
+  while (true) {
+    // Check once more after an overdue timer wakes: ready state should not be
+    // missed merely because the event loop crossed the deadline while sleeping.
+    if (await predicate()) return;
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) break;
+    await delay(Math.min(10, remaining));
   }
-  throw new Error("Timed out waiting for condition.");
+  throw new Error(`Timed out after ${timeoutMs} ms waiting for condition; ${diagnostic()}`);
 }
 
 function delay(ms: number) {

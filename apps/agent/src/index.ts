@@ -7,6 +7,7 @@ import {
   type EmployeeToServerMessage,
   type ServerToEmployeeMessage,
   type TaskTargetMode,
+  isClaudeSessionFailure,
 } from "@ai-teams/shared";
 import { daemonize, stopDaemon, getDaemonStatus } from "@ai-teams/shared/daemon";
 import {
@@ -100,7 +101,8 @@ function finishTask(taskId: string, status: "completed" | "failed" | "cancelled"
     if (current.targetMode === "queue") {
       consecutiveQueueFailures = 0;
     } else {
-      agentState.sessionReady = true;
+      agentState.claudeSessionId = current.claudeSessionId;
+      agentState.sessionReady = current.sessionConfirmed === true;
       persistState(agentState);
     }
     send({
@@ -134,7 +136,7 @@ function finishTask(taskId: string, status: "completed" | "failed" | "cancelled"
     ...(failure.retryAfterMs !== undefined ? { retryAfterMs: failure.retryAfterMs } : {}),
   });
   if (current.targetMode === "queue") {
-    if (!failure.recoverable) {
+    if (!failure.recoverable && !isClaudeSessionFailure(failure.error)) {
       consecutiveQueueFailures += 1;
       if (consecutiveQueueFailures >= MAX_CONSECUTIVE_QUEUE_FAILURES) {
         console.log(`[agent:${EMPLOYEE_ID}] 连续 ${consecutiveQueueFailures} 次队列任务失败，暂停接单；保持心跳，等待服务器恢复探测或手动恢复。`);

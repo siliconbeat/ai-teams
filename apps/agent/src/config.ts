@@ -83,6 +83,9 @@ export type ActiveTask = {
   lastToolBlock: boolean;
   stderrTail: string;
   cliResultError?: boolean;
+  sessionConfirmed?: boolean;
+  usedResume?: boolean;
+  hasExecutionEvidence?: boolean;
   retriedWithFreshSession: boolean;
   resumingSession: boolean;
   generation: number;

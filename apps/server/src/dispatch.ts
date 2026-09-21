@@ -13,6 +13,7 @@ import {
   type TaskStatus,
   type TaskTargetMode,
   TERMINAL_STATUSES,
+  isClaudeSessionFailure,
 } from "@ai-teams/shared";
 import type { Database } from "./db.js";
 import type { StateStore } from "./state-store.js";
@@ -30,11 +31,6 @@ export function sendJson<T>(socket: WebSocket, payload: T, encryptor?: MaybeEncr
     const plain = JSON.stringify(payload);
     socket.send(encryptor ? encryptor.encrypt(plain) : plain);
   }
-}
-
-function extractDoneSessionId(content: string) {
-  const match = content.match(/^\[done\]\s+session_id:\s*(\S+)/m);
-  return match?.[1] ?? null;
 }
 
 export type DispatchContext = {
@@ -396,7 +392,7 @@ export function createDispatch(ctx: DispatchContext) {
     return false;
   }
 
-  function markTaskFailed(taskId: string, error: string, options?: { recoverable?: boolean; cooldownMs?: number; retryAfterMs?: number }) {
+  function markTaskFailed(taskId: string, error: string, options?: { recoverable?: boolean; cooldownMs?: number; retryAfterMs?: number; nonRetryable?: boolean }) {
     const task = state.tasks.get(taskId);
     if (!task || TERMINAL_STATUSES.has(task.status)) {
       return;
@@ -405,9 +401,11 @@ export function createDispatch(ctx: DispatchContext) {
     const employeeId = task.employeeId;
     const isQueueTask = task.targetMode === "queue";
     const wasRunning = task.status === "accepted" || task.status === "running";
+    const sessionFailure = isClaudeSessionFailure(error);
+    const nonRetryable = sessionFailure || options?.nonRetryable;
 
     // Only count as consecutive failure if the task was actually running (not a dispatch rejection)
-    if (isQueueTask && employeeId && wasRunning && !options?.recoverable) {
+    if (isQueueTask && employeeId && wasRunning && !options?.recoverable && !nonRetryable) {
       trackQueueFailure(employeeId, error);
     }
 
@@ -416,7 +414,7 @@ export function createDispatch(ctx: DispatchContext) {
       ? computeRecoverableRetryDelayMs(task, requestedCooldownMs)
       : undefined;
     const permanent = isPermanentModelFailure(error);
-    if (isQueueTask && employeeId) {
+    if (isQueueTask && employeeId && !nonRetryable) {
       const employee = state.employees.get(employeeId);
       if (permanent || options?.recoverable || employee?.queueRecovery?.phase === "probe") {
         coolDownEmployee(employeeId, error, requestedCooldownMs, permanent);
@@ -427,7 +425,7 @@ export function createDispatch(ctx: DispatchContext) {
       }
     }
 
-    if (isQueueTask && !permanent && reEnqueueOrTerminalFail(task, employeeId, error, {
+    if (isQueueTask && !permanent && !nonRetryable && reEnqueueOrTerminalFail(task, employeeId, error, {
       clearSlot: true,
       incrementRetry: true,
       recoverable: options?.recoverable,
@@ -456,11 +454,8 @@ export function createDispatch(ctx: DispatchContext) {
     if (!task || TERMINAL_STATUSES.has(task.status)) {
       return;
     }
-    const doneSessionId = extractDoneSessionId(chunk.content);
-    if (!task.sessionId && doneSessionId) {
-      task.sessionId = doneSessionId;
-      upsertTask(task);
-    }
+    // Output (including an error result with an allocated UUID) is not proof
+    // of resumable history. Only the Agent's confirmed task.started updates it.
     const history = state.taskLogs.get(chunk.taskId) ?? [];
     // Agent sequence restarts on every attempt. Keep the storage key monotonic
     // and use (attempt, sourceSeq) to suppress reconnect replay duplicates.
@@ -628,7 +623,14 @@ export function createDispatch(ctx: DispatchContext) {
 
       const requiredLabels = task.requiredLabels ?? undefined;
       let employeeId: string | null = null;
-      if (preferredEmployeeId) {
+      if (task.sessionId && task.sessionEmployeeId) {
+        if (preferredEmployeeId && preferredEmployeeId !== task.sessionEmployeeId) continue;
+        const owner = state.employees.get(task.sessionEmployeeId);
+        employeeId = owner && isEmployeeAvailableForQueue(owner, requiredLabels) ? owner.id : null;
+      } else if (task.sessionId) {
+        markTaskFailed(task.id, "[session_unavailable] 会话所属 Agent 未知，不能将本机会话随机派发到其他 Agent。请指定原 Agent 或确认副作用后新建任务。");
+        return true;
+      } else if (preferredEmployeeId) {
         const employee = state.employees.get(preferredEmployeeId);
         employeeId = employee && isEmployeeAvailableForQueue(employee, requiredLabels) ? employee.id : null;
       } else {
@@ -776,11 +778,15 @@ export function createDispatch(ctx: DispatchContext) {
     requiredLabels?: string[] | null,
     sessionId?: string,
   ) {
+    const sessionOwners = sessionId
+      ? new Set([...state.tasks.values()].filter((t) => t.sessionId === sessionId).map((t) => t.sessionEmployeeId ?? t.employeeId).filter((id): id is string => Boolean(id)))
+      : new Set<string>();
     const task: TaskRecord = {
       id: randomUUID(),
       leaderCommandId: leaderCommandId ?? randomUUID(),
       employeeId,
       sessionId: sessionId ?? null,
+      sessionEmployeeId: sessionId ? employeeId ?? (sessionOwners.size === 1 ? [...sessionOwners][0]! : null) : null,
       targetMode,
       prompt,
       workspace: workspace?.trim() || null,
@@ -790,6 +796,7 @@ export function createDispatch(ctx: DispatchContext) {
       requiredLabels: requiredLabels ?? null,
       status: "queued",
       retryCount: 0,
+      reconnectCount: 0,
       attempt: 0,
       createdAt: nowIso(),
       startedAt: null,
@@ -876,14 +883,16 @@ export function createDispatch(ctx: DispatchContext) {
     const task = state.tasks.get(taskId);
     if (!task || TERMINAL_STATUSES.has(task.status) || task.employeeId !== employeeId) return;
     clearTaskTimeout(task.id);
-    // Reconnection recovery consumes the same finite task budget, and uses the
-    // normal tracked timeout rather than an unfenced 120-second closure.
-    if (task.retryCount >= (isQueueSlot ? MAX_RECOVERABLE_QUEUE_RETRY : MAX_QUEUE_RETRY)) {
-      task.retryCount = MAX_RECOVERABLE_QUEUE_RETRY;
-      markTaskFailed(task.id, "重连恢复次数已用尽，请检查 Agent 后重新提交任务。");
+    if (isClaudeSessionFailure(task.error ?? "")) {
+      markTaskFailed(task.id, task.error!, { nonRetryable: true });
       return;
     }
-    task.retryCount += 1;
+    // Keep reconnect recovery independent of model failures and task retries.
+    if ((task.reconnectCount ?? 0) >= (isQueueSlot ? MAX_RECOVERABLE_QUEUE_RETRY : MAX_QUEUE_RETRY)) {
+      markTaskFailed(task.id, `重连恢复次数已用尽，请检查 Agent 后重新提交任务。${task.error ? ` 上次错误：${task.error}` : ""}`, { nonRetryable: true });
+      return;
+    }
+    task.reconnectCount = (task.reconnectCount ?? 0) + 1;
     dispatchTask(task, employeeId);
   }
 
@@ -1207,9 +1216,11 @@ export function createDispatch(ctx: DispatchContext) {
         upsertTask(task);
         log.info({ taskId: task.id, employeeId: socketEmployeeId }, "Task accepted");
         break;
-      case "task.started":
+      case "task.started": {
+        const alreadyRunning = task.status === "running";
         task.status = "running";
         task.sessionId = message.sessionId ?? task.sessionId;
+        if (message.sessionId) task.sessionEmployeeId = socketEmployeeId;
         task.startedAt = task.startedAt ?? nowIso();
         if (message.claudeVersion) {
           const employee = state.employees.get(socketEmployeeId);
@@ -1219,9 +1230,10 @@ export function createDispatch(ctx: DispatchContext) {
           }
         }
         upsertTask(task);
-        postTaskWebhook(task, "task.started");
+        if (!alreadyRunning) postTaskWebhook(task, "task.started");
         log.info({ taskId: task.id, employeeId: socketEmployeeId, sessionId: task.sessionId, pid: message.pid }, "Task started");
         break;
+      }
       case "task.output":
         if (!task.employeeId) {
           return;
@@ -1453,21 +1465,17 @@ export function createDispatch(ctx: DispatchContext) {
         if (!task || TERMINAL_STATUSES.has(task.status)) continue;
 
         clearTaskTimeout(taskId);
-        task.employeeId = null;
-        task.retryCount += 1;
+        task.reconnectCount = (task.reconnectCount ?? 0) + 1;
 
-        if (task.retryCount >= MAX_QUEUE_RETRY) {
-          task.status = "failed";
-          task.error = `任务重试次数超过上限（${MAX_QUEUE_RETRY}次），已终止。`;
-          task.finishedAt = nowIso();
-          upsertTask(task);
-          log.warn({ taskId, employeeId, retryCount: task.retryCount }, "Task exceeded max retry count, marked failed");
+        if (task.reconnectCount >= (task.targetMode === "queue" ? MAX_RECOVERABLE_QUEUE_RETRY : MAX_QUEUE_RETRY)) {
+          markTaskFailed(taskId, `重连恢复次数已用尽，请检查 Agent 后重新提交任务。${task.error ? ` 上次错误：${task.error}` : ""}`, { nonRetryable: true });
           continue;
         }
 
+        task.employeeId = null;
         task.status = "queued";
         upsertTask(task);
-        log.info({ taskId, employeeId, retryCount: task.retryCount }, "Task re-queued after disconnect grace period");
+        log.info({ taskId, employeeId, reconnectCount: task.reconnectCount }, "Task re-queued after disconnect grace period");
 
         if (task.targetMode === "queue") {
           enqueueSharedTask(taskId);
@@ -1478,8 +1486,8 @@ export function createDispatch(ctx: DispatchContext) {
         }
 
         // Schedule delayed re-dispatch for subsequent retries
-        if (task.retryCount > 1) {
-          const retryDelay = (task.retryCount - 1) * 5000;
+        if (task.reconnectCount > 1) {
+          const retryDelay = (task.reconnectCount - 1) * 5000;
           const existingDelay = retryDelays.get(taskId);
           if (existingDelay) clearTimeout(existingDelay);
           retryDelays.set(taskId, setTimeout(() => {

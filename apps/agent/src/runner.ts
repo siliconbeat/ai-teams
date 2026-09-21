@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import type { EmployeeToServerMessage } from "@ai-teams/shared";
-import { isPermanentModelFailure } from "@ai-teams/shared";
+import { isPermanentModelFailure, isClaudeSessionFailure } from "@ai-teams/shared";
 import {
   EMPLOYEE_ID,
   EMPLOYEE_NAME,
@@ -56,6 +57,8 @@ export interface RunnerDeps {
   send: (payload: EmployeeToServerMessage) => void;
   getAgentState: () => AgentState;
   setAgentState: (state: AgentState) => void;
+  /** Injectable subprocess for offline integration tests; production uses spawn. */
+  spawnClaude?: typeof spawn;
 }
 
 export function handleClaudeJsonLine(
@@ -77,6 +80,8 @@ export function handleClaudeJsonLine(
   }
 
   if (parsed.type === "stream_event") {
+    const active = findActiveTask(taskId);
+    if (active) active.hasExecutionEvidence = true;
     const event = parsed.event;
     if (!event) return;
 
@@ -115,6 +120,7 @@ export function handleClaudeJsonLine(
 
   if (parsed.type === "assistant" && Array.isArray(parsed.message?.content)) {
     const task = findActiveTask(taskId);
+    if (task) task.hasExecutionEvidence = true;
     if (task?.sawStreamText) {
       return;
     }
@@ -256,10 +262,12 @@ export function buildClaudeArgs(prompt: string, task: ActiveTask, agentState: Ag
   }
 
   if (task.resumingSession) {
+    task.usedResume = true;
     args.push("--resume", task.claudeSessionId);
   } else if (task.targetMode === "queue") {
     args.push("--session-id", task.claudeSessionId);
   } else if (agentState.sessionReady) {
+    task.usedResume = true;
     args.push("--resume", agentState.claudeSessionId);
   } else {
     args.push("--session-id", agentState.claudeSessionId);
@@ -282,7 +290,10 @@ export function shouldRetryWithFreshClaudeSession(
     task !== null &&
     !task.cancelRequested &&
     !task.retriedWithFreshSession &&
-    (isSessionBusy || (!task.resumingSession && task.targetMode !== "queue" && isMissingConversation))
+    // Never discard the history of a resumed conversation or replay work that
+    // may already have run. Only a fresh session-id collision is safe to retry.
+    !task.resumingSession && !task.usedResume && !task.hasExecutionEvidence &&
+    !isMissingConversation && isSessionBusy
   );
 }
 
@@ -296,7 +307,7 @@ export function classifyModelTransientFailure(
     return null;
   }
   const tail = task.stderrTail.slice(-MAX_ERROR_TAIL);
-  if (isPermanentModelFailure(tail) || !MODEL_TRANSIENT_ERROR_PATTERN.test(tail)) {
+  if (isClaudeSessionFailure(tail) || isPermanentModelFailure(tail) || !MODEL_TRANSIENT_ERROR_PATTERN.test(tail)) {
     return null;
   }
 
@@ -377,7 +388,7 @@ export function runClaudeTask(taskId: string, prompt: string, workspace: string 
   const args = buildClaudeArgs(prompt, currentTask, agentState);
   const permissionMode = resolveClaudePermissionMode(currentTask);
   const resolvedWorkspace = resolveWorkspace(workspace);
-  const child = spawn("claude", args, {
+  const child = (deps.spawnClaude ?? spawn)("claude", args, {
     cwd: resolvedWorkspace,
     env: {
       ...process.env,
@@ -408,28 +419,44 @@ export function runClaudeTask(taskId: string, prompt: string, workspace: string 
   currentTask.generation += 1;
   const generation = currentTask.generation;
   currentTask.child = child;
-  send({ type: "task.started", taskId, attempt: currentTask.attempt, pid: child.pid ?? 0, sessionId: currentTask.claudeSessionId, claudeVersion: getClaudeVersion({ refresh: true }) });
+  // A generated UUID / spawned process is not evidence of a saved transcript.
+  send({ type: "task.started", taskId, attempt: currentTask.attempt, pid: child.pid ?? 0, sessionId: null, claudeVersion: getClaudeVersion({ refresh: true }) });
   emitOutput(taskId, "stdout", `[agent] permission_mode: ${permissionMode}\n`);
 
   const stdoutReader = readline.createInterface({ input: child.stdout });
   stdoutReader.on("line", (line) => {
+    const active = findActiveTask(taskId);
+    if (active !== currentTask || active.generation !== generation || active.cancelRequested) return;
+    try {
+      const node = JSON.parse(line);
+      // init carries an allocated ID even when startup/API access later fails.
+      // Streamed execution must retain its session too: a tool may run before
+      // the final assistant/result node. If the transcript is lost, fail closed.
+      if (!active.sessionConfirmed && typeof node.session_id === "string" &&
+          (node.type === "stream_event" || node.type === "assistant" || (node.type === "result" && !node.is_error && node.subtype === "success")) &&
+          !active.cliConfig?.extraArgs?.includes("--no-session-persistence") &&
+          !/^(?:1|true)$/i.test(process.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY ?? "")) {
+        active.sessionConfirmed = true;
+        active.claudeSessionId = node.session_id;
+        send({ type: "task.started", taskId, attempt: active.attempt, pid: child.pid ?? 0, sessionId: node.session_id });
+      }
+    } catch { /* Non-JSON stdout is handled by the normal output parser below. */ }
     handleClaudeJsonLine(taskId, line, findActiveTask, emitOutput);
   });
 
   child.stderr.on("data", (chunk: Buffer) => {
+    if (findActiveTask(taskId) !== currentTask || currentTask.generation !== generation) return;
     emitStderr(taskId, chunk.toString());
   });
 
   child.on("error", (error) => {
+    if (findActiveTask(taskId) !== currentTask || currentTask.generation !== generation) return;
     finishTask(taskId, "failed", error.message);
   });
 
   child.on("close", (code) => {
     const task = findActiveTask(taskId);
-    if (!task && code === null) {
-      return;
-    }
-    if (task && task.generation !== generation) {
+    if (task !== currentTask || task.generation !== generation) {
       return;
     }
     if (task?.cancelRequested) {
@@ -452,13 +479,31 @@ export function runClaudeTask(taskId: string, prompt: string, workspace: string 
       fresh.cliResultError = false;
       fresh.sawStreamText = false;
       fresh.child = null;
-      const newState = resetClaudeSession();
-      setAgentState(newState);
-      fresh.claudeSessionId = newState.claudeSessionId;
+      fresh.sessionConfirmed = false;
+      fresh.usedResume = false;
+      fresh.hasExecutionEvidence = false;
+      if (fresh.targetMode === "queue") {
+        fresh.claudeSessionId = randomUUID();
+      } else {
+        const newState = resetClaudeSession();
+        setAgentState(newState);
+        fresh.claudeSessionId = newState.claudeSessionId;
+      }
       emitOutput(taskId, "stdout", "\n[agent] Claude session is unavailable or already in use. Starting a new session and retrying this task.\n");
       runClaudeTask(taskId, prompt, workspace, deps);
       return;
     }
-    finishTask(taskId, "failed", classifyModelTransientFailure(taskId, task?.cliResultError ? 1 : code, findActiveTask) ?? `Claude CLI 退出码 ${code ?? "unknown"}：${findActiveTask(taskId)?.stderrTail.slice(-1000) ?? ""}`);
+    if (isClaudeSessionFailure(task.stderrTail)) {
+      finishTask(taskId, "failed", `[session_unavailable] Claude 会话无法恢复：${task.stderrTail.slice(-1000)}\n会话 ${task.claudeSessionId}；工作目录 ${resolvedWorkspace}。已停止自动重试，请在原 Agent 检查会话文件；确认已执行操作后，显式重置会话并重新提交剩余工作，不要直接重放原任务。`);
+      return;
+    }
+    const persistenceDisabled = task.cliConfig?.extraArgs?.includes("--no-session-persistence") ||
+      /^(?:1|true)$/i.test(process.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY ?? "");
+    if (task.hasExecutionEvidence && !task.sessionConfirmed &&
+        (persistenceDisabled || (!task.resumingSession && !task.usedResume))) {
+      finishTask(taskId, "failed", `[session_unavailable] 任务已有执行输出，但未确认可恢复会话，已停止自动重放。请核对已执行操作和会话持久化配置，再提交剩余工作。CLI 错误：${task.stderrTail.slice(-1000)}`);
+      return;
+    }
+    finishTask(taskId, "failed", classifyModelTransientFailure(taskId, task.cliResultError ? 1 : code, findActiveTask) ?? `Claude CLI 退出码 ${code ?? "unknown"}：${task.stderrTail.slice(-1000)}`);
   });
 }

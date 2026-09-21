@@ -25,20 +25,22 @@ function task(overrides: Partial<ActiveTask>): ActiveTask {
 }
 
 describe("shouldRetryWithFreshClaudeSession", () => {
-  it("retries busy Claude sessions for direct, queue, and explicit resume tasks", () => {
+  it("retries a fresh session-id collision, but never discards resumed history", () => {
     const stderrTail = "Error: Session ID 379c1ae9-f1ed-47de-b43b-9c3eec3f5892 is already in use.";
     for (const current of [
       task({ targetMode: "direct", resumingSession: false, stderrTail }),
       task({ targetMode: "queue", resumingSession: false, stderrTail }),
-      task({ targetMode: "direct", resumingSession: true, stderrTail }),
     ]) {
       expect(shouldRetryWithFreshClaudeSession("task-1", 1, () => current)).toBe(true);
     }
+    expect(shouldRetryWithFreshClaudeSession("task-1", 1, () => task({ resumingSession: true, stderrTail }))).toBe(false);
+    expect(shouldRetryWithFreshClaudeSession("task-1", 1, () => task({ usedResume: true, stderrTail }))).toBe(false);
+    expect(shouldRetryWithFreshClaudeSession("task-1", 1, () => task({ hasExecutionEvidence: true, stderrTail }))).toBe(false);
   });
 
-  it("keeps missing conversation retry limited to non-queue fresh direct tasks", () => {
+  it("does not silently replace a missing conversation with empty history", () => {
     const stderrTail = "No conversation found with session ID abc";
-    expect(shouldRetryWithFreshClaudeSession("task-1", 1, () => task({ targetMode: "direct", resumingSession: false, stderrTail }))).toBe(true);
+    expect(shouldRetryWithFreshClaudeSession("task-1", 1, () => task({ targetMode: "direct", resumingSession: false, stderrTail }))).toBe(false);
     expect(shouldRetryWithFreshClaudeSession("task-1", 1, () => task({ targetMode: "queue", resumingSession: false, stderrTail }))).toBe(false);
     expect(shouldRetryWithFreshClaudeSession("task-1", 1, () => task({ targetMode: "direct", resumingSession: true, stderrTail }))).toBe(false);
   });

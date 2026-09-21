@@ -181,6 +181,7 @@ export async function initDb(db: Database) {
       leader_command_id           TEXT NOT NULL,
       employee_id                 TEXT,
       session_id                  TEXT,
+      session_employee_id         TEXT,
       target_mode                 TEXT NOT NULL DEFAULT 'queue',
       prompt                      TEXT NOT NULL,
       workspace                   TEXT,
@@ -204,6 +205,7 @@ export async function initDb(db: Database) {
       usage_cache_read_tokens     INTEGER,
       usage_cache_creation_tokens INTEGER,
       retry_count                 INTEGER NOT NULL DEFAULT 0,
+      reconnect_count             INTEGER NOT NULL DEFAULT 0,
       attempt                     INTEGER NOT NULL DEFAULT 0
     )
   `);
@@ -331,6 +333,18 @@ export async function initDb(db: Database) {
   await db.run(`
     CREATE INDEX IF NOT EXISTS idx_mission_approvals_mission ON mission_approvals(mission_id, status)
   `);
+
+  // Additive migrations also work for PostgreSQL. Do not silently lose the
+  // safety metadata if a migration fails for a reason other than duplication.
+  for (const column of ["session_employee_id TEXT", "reconnect_count INTEGER NOT NULL DEFAULT 0"]) {
+    try {
+      await db.run(`ALTER TABLE tasks ADD COLUMN ${column}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err ?? "");
+      if (!msg.includes("duplicate column") && !msg.includes("already exists")) throw err;
+    }
+  }
+  await db.run("UPDATE tasks SET session_employee_id = employee_id WHERE session_id IS NOT NULL AND session_employee_id IS NULL AND employee_id IS NOT NULL");
 
   // Migration: add retry_count column
   try {
@@ -485,9 +499,9 @@ export async function deleteEmployee(db: Database, employeeId: string) {
 }
 
 const TASK_COLUMNS = [
-  "id", "leader_command_id", "employee_id", "session_id", "target_mode",
+  "id", "leader_command_id", "employee_id", "session_id", "session_employee_id", "target_mode",
   "prompt", "workspace", "status", "timeout_sec", "cli_config", "priority", "required_labels",
-  "retry_count", "attempt",
+  "retry_count", "reconnect_count", "attempt",
   "created_at", "started_at", "finished_at", "exit_code", "summary", "error",
   "duration_ms", "duration_api_ms", "num_turns", "total_cost_usd",
   "usage_input_tokens", "usage_output_tokens", "usage_cache_read_tokens", "usage_cache_creation_tokens",
@@ -714,6 +728,7 @@ export type DbTaskRow = {
   leader_command_id: string;
   employee_id: string | null;
   session_id: string | null;
+  session_employee_id?: string | null;
   target_mode: string;
   prompt: string;
   workspace: string | null;
@@ -737,6 +752,7 @@ export type DbTaskRow = {
   usage_cache_read_tokens: number | null;
   usage_cache_creation_tokens: number | null;
   retry_count: number;
+  reconnect_count?: number;
   attempt: number;
 };
 
@@ -746,6 +762,7 @@ export function dbRowToTask(row: DbTaskRow, defaultTimeoutSec: number): TaskReco
     leaderCommandId: row.leader_command_id,
     employeeId: row.employee_id,
     sessionId: row.session_id,
+    sessionEmployeeId: row.session_employee_id ?? (row.session_id ? row.employee_id : null),
     targetMode: (row.target_mode || (row.employee_id ? "direct" : "queue")) as TaskRecord["targetMode"],
     prompt: row.prompt,
     workspace: row.workspace,
@@ -755,6 +772,7 @@ export function dbRowToTask(row: DbTaskRow, defaultTimeoutSec: number): TaskReco
     requiredLabels: row.required_labels ? JSON.parse(row.required_labels) : null,
     status: (row.status || "queued") as TaskRecord["status"],
     retryCount: row.retry_count ?? 0,
+    reconnectCount: row.reconnect_count ?? 0,
     attempt: row.attempt ?? 0,
     createdAt: row.created_at,
     startedAt: row.started_at,
@@ -779,6 +797,7 @@ function taskToDbValues(task: TaskRecord): unknown[] {
     task.leaderCommandId,
     task.employeeId,
     task.sessionId,
+    task.sessionEmployeeId ?? null,
     task.targetMode,
     task.prompt,
     task.workspace,
@@ -788,6 +807,7 @@ function taskToDbValues(task: TaskRecord): unknown[] {
     task.priority,
     task.requiredLabels ? JSON.stringify(task.requiredLabels) : null,
     task.retryCount,
+    task.reconnectCount ?? 0,
     task.attempt,
     task.createdAt,
     task.startedAt,
