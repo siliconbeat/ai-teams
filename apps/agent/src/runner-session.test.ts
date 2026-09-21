@@ -44,6 +44,38 @@ function line(child: ChildProcess & { stdout: PassThrough }, node: unknown) {
 }
 
 describe("CLI session lifecycle (isolated subprocess stub)", () => {
+  it("requires an explicit successful result even on exit zero", () => {
+    const h = harness();
+    h.children[0].emit("close", 0);
+    expect(h.finishTask).toHaveBeenCalledWith("task", "failed", expect.stringContaining("result"));
+  });
+
+  it("ignores JSON primitives and malformed content blocks safely", () => {
+    const h = harness();
+    for (const node of [null, 7, [], true, { type: "assistant", message: { content: [null, 1, { type: "text", text: 12 }] } }]) line(h.children[0], node);
+    line(h.children[0], { type: "result", subtype: "success", is_error: false, result: "done" });
+    h.children[0].emit("close", 0);
+    expect(h.finishTask).toHaveBeenCalledWith("task", "completed", 0);
+  });
+
+  it("caps summary while collecting a large output stream", () => {
+    const h = harness();
+    for (let i = 0; i < 512; i++) line(h.children[0], { type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "x".repeat(4096) } } });
+    expect(h.active()!.summary.join("")).toHaveLength(8000);
+  });
+
+  it("rejects an oversized unterminated line and cannot mark it successful", () => {
+    const h = harness();
+    h.children[0].stdout.write("x".repeat(1024 * 1024 + 1));
+    expect(h.children[0].kill).toHaveBeenCalledWith("SIGKILL");
+    h.children[0].emit("close", 0);
+    expect(h.finishTask).toHaveBeenCalledWith("task", "failed", expect.stringContaining("1 MiB"));
+  });
+
+  it.each(["--help", "--output-format=json", "--resume", "--"])("rejects protocol override %s before spawn", flag => {
+    expect(() => harness({ cliConfig: { extraArgs: [flag] } })).toThrow("execution protocol");
+  });
+
   it("does not advertise a generated/init/error session as resumable after startup 429", () => {
     const h = harness();
     line(h.children[0], { type: "system", subtype: "init", session_id: "allocated-id" });
@@ -131,7 +163,7 @@ describe("CLI session lifecycle (isolated subprocess stub)", () => {
     h.active()!.cancelRequested = true;
     h.children[0].stderr.write("Session ID allocated-id is already in use");
     h.children[0].emit("close", 1);
-    expect(h.finishTask).toHaveBeenCalledWith("task", "cancelled");
+    expect(h.finishTask).not.toHaveBeenCalled(); // lifecycle owner waits for process-tree teardown
     expect(h.spawnClaude).toHaveBeenCalledTimes(1);
     const next = harness();
     next.replace({ ...next.active()!, attempt: 2 });

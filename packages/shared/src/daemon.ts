@@ -1,13 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execFileSync, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 
 // --- PID file helpers ---
 
 export function readPidFile(pidFile: string): number | null {
   try {
     const content = fs.readFileSync(pidFile, "utf-8").trim();
-    const pid = Number(content);
+    const pid = content.startsWith("{") ? Number(JSON.parse(content).pid) : Number(content);
     return Number.isInteger(pid) && pid > 0 ? pid : null;
   } catch {
     return null;
@@ -16,7 +17,34 @@ export function readPidFile(pidFile: string): number | null {
 
 export function writePidFile(pidFile: string, pid: number): void {
   fs.mkdirSync(path.dirname(pidFile), { recursive: true });
-  fs.writeFileSync(pidFile, String(pid), "utf-8");
+  const previous = readPidFile(pidFile);
+  if (previous && isProcessRunning(previous)) throw new Error(`PID file already owned by live process ${previous}`);
+  if (previous) {
+    const record = fs.readFileSync(pidFile, "utf8");
+    if (readPidFile(pidFile) !== previous || isProcessRunning(previous)) throw new Error("PID ownership changed.");
+    removeOwnedPidFile(pidFile, record);
+  }
+  fs.writeFileSync(pidFile, JSON.stringify({ pid, identity: processIdentity(pid), nonce: randomUUID() }), { flag: "wx", mode: 0o600 });
+}
+
+function processIdentity(pid: number): string | null {
+  try {
+    return execFileSync("ps", ["-p", String(pid), "-o", "lstart=", "-o", "args="], { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }).trim() || null;
+  } catch { return null; }
+}
+
+function verifiedPidRecord(pidFile: string, pid: number) {
+  const raw = fs.readFileSync(pidFile, "utf8");
+  let identity: string | null = null;
+  try { identity = JSON.parse(raw).identity; } catch { /* legacy numeric PID */ }
+  if (!identity || identity !== processIdentity(pid)) {
+    throw new Error(`Refusing to signal unverified PID ${pid}. Inspect the process and legacy/stale PID file ${pidFile} manually.`);
+  }
+  return raw;
+}
+
+function removeOwnedPidFile(pidFile: string, record: string) {
+  try { if (fs.readFileSync(pidFile, "utf8") === record) fs.unlinkSync(pidFile); } catch { /* changed or gone */ }
 }
 
 export function removePidFile(pidFile: string): void {
@@ -43,17 +71,29 @@ export function isProcessRunning(pid: number): boolean {
  */
 export function spawnWorker(script: string, args: string[], logFile: string): ChildProcess {
   fs.mkdirSync(path.dirname(logFile), { recursive: true });
-  const logStream = fs.openSync(logFile, "a");
-
   const child = spawn(process.execPath, [script, ...args], {
-    stdio: ["ignore", logStream, logStream],
+    stdio: ["ignore", "pipe", "pipe"],
     env: {
       ...process.env,
       __AI_TEAMS_DAEMON_WORKER: "1",
       __AI_TEAMS_DAEMON_WATCHDOG: undefined,
     },
   });
-  fs.closeSync(logStream);
+  let logFailed = false;
+  const append = (chunk: Buffer) => {
+    if (logFailed) return;
+    try {
+      if (fs.existsSync(logFile) && fs.statSync(logFile).size >= 8 * 1024 * 1024) {
+        for (let n = 2; n >= 0; n--) {
+          const source = n ? `${logFile}.${n}` : logFile;
+          if (fs.existsSync(source)) fs.renameSync(source, `${logFile}.${n + 1}`);
+        }
+      }
+      fs.appendFileSync(logFile, chunk.subarray(0, 256 * 1024));
+    } catch (error) { logFailed = true; console.error(`Daemon log unavailable: ${String(error)}`); }
+  };
+  child.stdout?.on("data", append);
+  child.stderr?.on("data", append);
   return child;
 }
 
@@ -74,11 +114,12 @@ export async function runWatchdog(opts: {
   const { name, pidFile, logFile, workerScript, workerArgs } = opts;
 
   writePidFile(pidFile, process.pid);
+  const ownedRecord = fs.readFileSync(pidFile, "utf8");
 
   let restartTimestamps: number[] = [];
 
   function cleanupAndExit(code: number): never {
-    removePidFile(pidFile);
+    removeOwnedPidFile(pidFile, ownedRecord);
     process.exit(code);
   }
 
@@ -144,6 +185,7 @@ export function getDaemonStatus(pidFile: string): DaemonStatus {
     return { running: false, pid: null };
   }
   if (isProcessRunning(pid)) {
+    verifiedPidRecord(pidFile, pid);
     return { running: true, pid };
   }
   // Stale PID file — clean it up
@@ -163,21 +205,26 @@ export async function stopDaemon(pidFile: string): Promise<void> {
     return;
   }
 
+  const ownedRecord = verifiedPidRecord(pidFile, pid);
   process.kill(pid, "SIGTERM");
 
   // Wait up to 10 seconds for process to exit
   for (let i = 0; i < 20; i++) {
     await new Promise((resolve) => setTimeout(resolve, 500));
     if (!isProcessRunning(pid)) {
-      removePidFile(pidFile);
+      removeOwnedPidFile(pidFile, ownedRecord);
       console.log(`Stopped (PID ${pid}).`);
       return;
     }
   }
 
   // Force kill
+  if (fs.readFileSync(pidFile, "utf8") !== ownedRecord) throw new Error("Daemon ownership changed while stopping.");
+  verifiedPidRecord(pidFile, pid);
   process.kill(pid, "SIGKILL");
-  removePidFile(pidFile);
+  for (let i = 0; i < 20 && isProcessRunning(pid); i++) await new Promise(resolve => setTimeout(resolve, 100));
+  if (isProcessRunning(pid)) throw new Error(`PID ${pid} did not exit; refusing overlapping restart.`);
+  removeOwnedPidFile(pidFile, ownedRecord);
   console.log(`Force killed (PID ${pid}).`);
 }
 

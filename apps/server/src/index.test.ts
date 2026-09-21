@@ -9,7 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import { SqliteDatabase } from "./db";
 import WebSocket from "ws";
 import { createAiTeamsServer, type AiTeamsServer } from "./index";
-import type { ServerToEmployeeMessage, ServerToLeaderMessage } from "@ai-teams/shared";
+import type { ServerToEmployeeMessage, ServerToLeaderMessage, TaskTerminalMessage } from "@ai-teams/shared";
 
 const TOKEN = "test-token";
 // Integration tests exercise real HTTP, WebSocket and SQLite I/O. Their
@@ -1665,7 +1665,7 @@ describe("断线任务恢复", () => {
     expect(server.buildSnapshot().tasks.find((t) => t.id === dispatch.taskId)?.status).toBe("running");
   });
 
-  it("宽限期过后队列任务重新入队，其他 Agent 可接手", async () => {
+  it("宽限期过后保留执行归属，其他 Agent 不重放执行状态未知的任务", async () => {
     const alice = await connectAgent("alice");
     const leader = await connectLeader();
 
@@ -1684,11 +1684,11 @@ describe("断线任务恢复", () => {
       500,
     );
 
-    // Bob comes online and should get the re-queued task from shared queue
-    const bob = await connectAgent("bob");
+    // A lost connection does not prove that Alice's subprocess stopped.
+    await connectAgent("bob");
     await delay(20);
     const snapshot = server.buildSnapshot();
-    expect(snapshot.tasks.find((t) => t.id === dispatch.taskId)?.status).toBe("dispatched");
+    expect(snapshot.tasks.find((t) => t.id === dispatch.taskId)).toMatchObject({ status: "queued", sessionEmployeeId: "alice", attempt: dispatch.attempt });
   });
 
   it("直接任务断线后回到员工个人队列", async () => {
@@ -1894,6 +1894,66 @@ describe("双槽位并行", () => {
   });
 });
 
+describe("0.9.2 terminal reconciliation and execution barriers", () => {
+  it.each(["legacy-buffer", "durable-outbox"])("reconciles %s completion after grace without dispatching attempt two", async mode => {
+    const agent = await connectAgent("alice");
+    const leader = await connectLeader();
+    const dispatched = waitForAgentDispatch(agent);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "offline result", timeoutSec: 30 }));
+    const task = await dispatched;
+    agent.send(JSON.stringify({ type: "task.started", taskId: task.taskId, attempt: task.attempt, pid: 42, sessionId: "alice-session" }));
+    await waitUntil(() => server.buildSnapshot().tasks.find(t => t.id === task.taskId)?.status === "running");
+    await closeSocket(agent);
+    await waitUntil(() => server.buildSnapshot().tasks.find(t => t.id === task.taskId)?.status === "queued");
+    const terminal: TaskTerminalMessage = { type: "task.completed", taskId: task.taskId, attempt: task.attempt, exitCode: 0, summary: "finished offline" };
+    const token = await createAgentRegistrationToken("alice");
+    const reconnected = await connectWs(`${baseUrl}/ws/agent`);
+    const received: ServerToEmployeeMessage[] = [];
+    reconnected.on("message", raw => received.push(JSON.parse(raw.toString())));
+    const registered = waitForWsMessage<ServerToEmployeeMessage>(reconnected, m => m.type === "agent.registered");
+    const ack = waitForWsMessage<ServerToEmployeeMessage>(reconnected, m => m.type === "task.ack");
+    sendAgentRegister(reconnected, "alice", undefined, { agentToken: token,
+      ...(mode === "durable-outbox" ? { pendingTerminals: [terminal] } : { pendingTaskIds: [task.taskId] }),
+    });
+    await registered;
+    if (mode === "legacy-buffer") reconnected.send(JSON.stringify(terminal));
+    await ack;
+    expect(server.buildSnapshot().tasks.find(t => t.id === task.taskId)).toMatchObject({ status: "completed", attempt: task.attempt, summary: "finished offline" });
+    expect(received.some(m => m.type === "task.dispatch" && m.taskId === task.taskId)).toBe(false);
+    // Duplicate terminal events (lost ACK) remain idempotent.
+    const secondAck = waitForWsMessage<ServerToEmployeeMessage>(reconnected, m => m.type === "task.ack");
+    reconnected.send(JSON.stringify(terminal)); await secondAck;
+    expect(server.buildSnapshot().tasks.find(t => t.id === task.taskId)?.attempt).toBe(task.attempt);
+  });
+
+  it("direct timeout holds the slot until the old attempt acknowledges teardown", async () => {
+    const agent = await connectAgent("alice");
+    const leader = await connectLeader();
+    const first = waitForAgentDispatch(agent);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "timed out old process", timeoutSec: 0.08 }));
+    const task = await first;
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: ["alice"], prompt: "must wait for teardown", timeoutSec: 30 }));
+    await waitUntil(() => server.buildSnapshot().tasks.find(t => t.id === task.taskId)?.status === "timeout");
+    expect(server.buildSnapshot().employees.find(e => e.id === "alice")?.mainTaskId).toBe(task.taskId);
+    expect(server.buildSnapshot().tasks.find(t => t.prompt === "must wait for teardown")?.status).toBe("queued");
+    const next = waitForAgentDispatch(agent);
+    agent.send(JSON.stringify({ type: "task.cancelled", taskId: task.taskId, attempt: task.attempt }));
+    expect((await next).prompt).toBe("must wait for teardown");
+  });
+
+  it("queue timeout does not move an unacknowledged execution to another agent", async () => {
+    const alice = await connectAgent("alice");
+    const leader = await connectLeader();
+    const first = waitForAgentDispatch(alice);
+    leader.send(JSON.stringify({ type: "command.dispatch", atAgents: "queue", prompt: "quarantined queue", timeoutSec: 0.08 }));
+    const task = await first;
+    await connectAgent("bob");
+    await waitUntil(() => server.buildSnapshot().tasks.find(t => t.id === task.taskId)?.status === "queued");
+    expect(server.buildSnapshot().employees.find(e => e.id === "bob")?.queueTaskId).toBeNull();
+    expect(server.buildSnapshot().tasks.find(t => t.id === task.taskId)?.attempt).toBe(task.attempt);
+  });
+});
+
 // ─── 安全 ──────────────────────────────────────────────────────
 
 describe("安全", () => {
@@ -2040,7 +2100,7 @@ async function connectLeader() {
   return connectWs(`${baseUrl}/ws/leader?token=${TOKEN}`);
 }
 
-async function connectAgent(employeeId: string, activeTaskId?: string, opts?: { weight?: number; labels?: string[]; agentToken?: string; permissionMode?: string }) {
+async function connectAgent(employeeId: string, activeTaskId?: string, opts?: { weight?: number; labels?: string[]; agentToken?: string; permissionMode?: string; pendingTaskIds?: string[]; pendingTerminals?: TaskTerminalMessage[] }) {
   const agentToken = await createAgentRegistrationToken(employeeId, opts);
   const socket = await connectWs(`${baseUrl}/ws/agent`);
   const registered = waitForWsMessage<ServerToEmployeeMessage>(socket, (message) => message.type === "agent.registered");
@@ -2065,7 +2125,7 @@ async function createAgentRegistrationToken(employeeId: string, opts?: { labels?
   return body.agentToken;
 }
 
-function sendAgentRegister(socket: WebSocket, employeeId: string, activeTaskId?: string, opts?: { weight?: number; labels?: string[]; permissionMode?: string; agentToken?: string }) {
+function sendAgentRegister(socket: WebSocket, employeeId: string, activeTaskId?: string, opts?: { weight?: number; labels?: string[]; permissionMode?: string; agentToken?: string; pendingTaskIds?: string[]; pendingTerminals?: TaskTerminalMessage[] }) {
   socket.send(
     JSON.stringify({
       type: "agent.register",
@@ -2079,6 +2139,8 @@ function sendAgentRegister(socket: WebSocket, employeeId: string, activeTaskId?:
       weight: opts?.weight,
       activeMainTaskId: activeTaskId ?? null,
       activeQueueTaskId: null,
+      pendingTaskIds: opts?.pendingTaskIds,
+      pendingTerminals: opts?.pendingTerminals,
       lastOutputSeq: 0,
     }),
   );

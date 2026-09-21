@@ -83,6 +83,11 @@ export type ActiveTask = {
   lastToolBlock: boolean;
   stderrTail: string;
   cliResultError?: boolean;
+  cliResultSuccess?: boolean;
+  protocolError?: string;
+  deadlineTimer?: NodeJS.Timeout;
+  processGroup?: boolean;
+  stopPromise?: Promise<void>;
   sessionConfirmed?: boolean;
   usedResume?: boolean;
   hasExecutionEvidence?: boolean;

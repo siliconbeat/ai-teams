@@ -8,6 +8,7 @@ import {
   parseServerToEmployeeMessage,
   type EmployeeToServerMessage,
   type ServerToEmployeeMessage,
+  type TaskTerminalMessage,
 } from "@ai-teams/shared";
 import {
   AGENT_TOKEN,
@@ -67,7 +68,21 @@ export type ConnectionState = {
   reconnectTimer: NodeJS.Timeout | null;
   heartbeatTimer: NodeJS.Timeout | null;
   bufferedMessages: EmployeeToServerMessage[];
+  terminalMessages?: TaskTerminalMessage[];
+  persistTerminals?: (messages: TaskTerminalMessage[]) => void;
+  storageFailed?: boolean;
+  stopped?: boolean;
+  onFatal?: () => void;
 };
+
+export function isTerminal(payload: EmployeeToServerMessage): payload is TaskTerminalMessage {
+  return payload.type === "task.completed" || payload.type === "task.failed" || payload.type === "task.cancelled";
+}
+function persistTerminals(state: ConnectionState) {
+  try { state.persistTerminals?.(state.terminalMessages ?? []); }
+  catch (error) { state.storageFailed = true; console.error(`[agent] Terminal persistence failed; accepting tasks is paused: ${String(error)}`); }
+}
+const MAX_BUFFER_BYTES = 2 * 1024 * 1024;
 
 export function buildAgentWsUrl() {
   const url = new URL("/ws/agent", SERVER_URL);
@@ -78,17 +93,35 @@ function isTaskMessage(payload: EmployeeToServerMessage) {
   return payload.type.startsWith("task.");
 }
 
-export function send(state: ConnectionState, payload: EmployeeToServerMessage) {
-  if (state.socket && state.socket.readyState === WebSocket.OPEN) {
-    state.socket.send(encrypt(JSON.stringify(payload)));
-    return;
+export function send(state: ConnectionState, payload: EmployeeToServerMessage, durable = true) {
+  if (durable && isTerminal(payload) && payload.attempt !== undefined && state.persistTerminals) {
+    const messages = state.terminalMessages ??= [];
+    if (!messages.some(m => m.taskId === payload.taskId && m.attempt === payload.attempt)) {
+      messages.push(payload);
+      persistTerminals(state);
+    }
   }
-  if (isTaskMessage(payload)) {
+  if (state.socket && state.socket.readyState === WebSocket.OPEN) {
+    if ((state.socket.bufferedAmount ?? 0) > MAX_BUFFER_BYTES) {
+      // Output is lossy; terminal events remain durable and replay on reconnect.
+      if (payload.type === "task.output") return;
+      state.socket.close(1013, "backpressure");
+    } else {
+      try { state.socket.send(encrypt(JSON.stringify(payload)), error => { if (error) state.socket?.terminate(); }); return; }
+      catch { state.socket.terminate(); }
+    }
+  }
+  if (isTaskMessage(payload) && durable) {
     state.bufferedMessages.push(payload);
-    if (state.bufferedMessages.length > MAX_BUFFERED_MESSAGES) {
+    while (state.bufferedMessages.length > MAX_BUFFERED_MESSAGES || Buffer.byteLength(JSON.stringify(state.bufferedMessages)) > MAX_BUFFER_BYTES) {
       // Preserve completion/failure acknowledgements over lossy output history.
       const output = state.bufferedMessages.findIndex(m => m.type === "task.output");
-      state.bufferedMessages.splice(output >= 0 ? output : 0, 1);
+      if (output >= 0) state.bufferedMessages.splice(output, 1);
+      else {
+        const disposable = state.bufferedMessages.findIndex(m => !isTerminal(m) || state.terminalMessages?.some(t => t.taskId === ("taskId" in m ? m.taskId : "") && t.attempt === ("attempt" in m ? m.attempt : undefined)));
+        if (disposable >= 0) state.bufferedMessages.splice(disposable, 1);
+        else { state.storageFailed = true; break; }
+      }
     }
   }
 }
@@ -100,7 +133,7 @@ export function flushBufferedMessages(state: ConnectionState) {
   const messages = state.bufferedMessages;
   state.bufferedMessages = [];
   for (const message of messages) {
-    state.socket.send(encrypt(JSON.stringify(message)));
+    send(state, message);
   }
 }
 
@@ -117,6 +150,7 @@ let reconnectAttempt = 0;
 const RECONNECT_MAX_MS = 60000;
 
 export function scheduleReconnect(state: ConnectionState, connectFn: () => void) {
+  if (state.stopped) return;
   if (state.reconnectTimer) {
     return;
   }
@@ -152,12 +186,14 @@ export function registerAgent(
     activeMainTaskId: mainTask?.taskId ?? null,
     activeQueueTaskId: queueTask?.taskId ?? null,
     pendingTaskIds: state.bufferedMessages.flatMap(m => m.type === "task.completed" || m.type === "task.failed" || m.type === "task.cancelled" ? [m.taskId] : []),
+    pendingTerminals: state.terminalMessages,
     lastOutputSeq: Math.max(mainTask?.seq ?? 0, queueTask?.seq ?? 0),
     weight: EMPLOYEE_WEIGHT,
   });
 }
 
 export function requestTask(state: ConnectionState) {
+  if (state.stopped || state.storageFailed || (state.terminalMessages?.length ?? 0) >= 390) return;
   send(state, { type: "agent.request_task", employeeId: EMPLOYEE_ID });
 }
 
@@ -167,6 +203,7 @@ export function connect(
   getQueueTask: () => ActiveTask | null,
   onMessage: (message: ServerToEmployeeMessage) => void,
 ) {
+  if (state.stopped) return;
   if (!AGENT_TOKEN) {
     console.error("[agent] AI_TEAMS_AGENT_TOKEN is required. 请先在 Web 端添加 Agent 并复制 Agent Token。");
     process.exit(1);
@@ -183,6 +220,11 @@ export function connect(
     try {
       const decrypted = decrypt(raw.toString());
       const message = parseServerToEmployeeMessage(parseJsonMessage(decrypted));
+      if (message.type === "task.ack") {
+        state.terminalMessages = state.terminalMessages?.filter(m => m.taskId !== message.taskId || m.attempt !== message.attempt);
+        persistTerminals(state);
+        return;
+      }
       if (message.type === "agent.registered") {
         resetReconnectAttempt();
         flushBufferedMessages(state);
@@ -198,9 +240,12 @@ export function connect(
   state.socket.on("close", (code, reason) => {
     if (state.heartbeatTimer) clearInterval(state.heartbeatTimer);
     state.heartbeatTimer = null;
+    if (state.stopped) return;
     if (code === 1008) {
       console.error(`[agent:${EMPLOYEE_ID}] 认证失败：Token 无效或服务器拒绝连接。${reason ? ` (${reason})` : ""}`);
       console.error(`[agent:${EMPLOYEE_ID}] 请检查 Agent Token 与员工 ID 是否和 Web 端注册记录一致。`);
+      state.stopped = true;
+      if (state.onFatal) { state.onFatal(); return; }
       process.exit(1);
     }
     console.log(`[agent:${EMPLOYEE_ID}] disconnected, reconnecting in ${RECONNECT_MS}ms...`);

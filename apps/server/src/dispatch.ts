@@ -55,6 +55,7 @@ export function createDispatch(ctx: DispatchContext) {
   let deferredWrites: Array<() => Promise<void>> = [];
   const deferredMessages: Array<{ message: EmployeeToServerMessage; socket: WebSocket }> = [];
   const pendingCancellations = new Map<string, Set<string>>();
+  const reconcilingAgents = new Set<string>();
   let webhookController = new AbortController();
 
   function writeTaskData(write: () => Promise<void>) {
@@ -303,21 +304,6 @@ export function createDispatch(ctx: DispatchContext) {
     return released;
   }
 
-  function scheduleStaleQueueSlotRelease(taskId: string, employeeId: string | null) {
-    if (!employeeId) return;
-    const timer = setTimeout(() => {
-      const task = state.tasks.get(taskId);
-      const employee = state.employees.get(employeeId);
-      if (!task || !employee || employee.queueTaskId !== taskId) return;
-      if (task.status === "queued" && task.employeeId === null) {
-        log.warn({ taskId, employeeId }, "Queue task cancel acknowledgement timed out, releasing stale slot");
-        releaseTaskSlots(taskId);
-        dispatchSharedQueuedTasks();
-      }
-    }, 15_000);
-    timer.unref();
-  }
-
   const MAX_QUEUE_RETRY = 3;
   const MAX_RECOVERABLE_QUEUE_RETRY = 8;
   const MAX_CONSECUTIVE_QUEUE_FAILURES = 5;
@@ -483,8 +469,11 @@ export function createDispatch(ctx: DispatchContext) {
       return;
     }
     const socket = task.employeeId ? state.agentSockets.get(task.employeeId) : undefined;
-    if (socket) {
-      sendJson<ServerToEmployeeMessage>(socket, { type: "task.cancel", taskId: task.id }, ctx.encryptor);
+    if (task.employeeId) {
+      const pending = pendingCancellations.get(task.employeeId) ?? new Set<string>();
+      pending.add(task.id);
+      pendingCancellations.set(task.employeeId, pending);
+      if (socket) sendJson<ServerToEmployeeMessage>(socket, { type: "task.cancel", taskId: task.id }, ctx.encryptor);
     }
     clearTaskTimeout(task.id);
 
@@ -499,7 +488,6 @@ export function createDispatch(ctx: DispatchContext) {
     // Don't clear slot — agent hasn't processed cancel yet
 
     if (isQueueTask && reEnqueueOrTerminalFail(current, employeeId, error, { clearSlot: false })) {
-      scheduleStaleQueueSlotRelease(current.id, employeeId);
       return;
     }
 
@@ -511,7 +499,8 @@ export function createDispatch(ctx: DispatchContext) {
     log.warn({ taskId: task.id, employeeId, timeoutSec: task.timeoutSec }, "Task timed out");
     upsertTask(current);
     postTaskWebhook(current, "task.timeout");
-    releaseTaskSlots(current.id);
+    // Timeout is not evidence that the old process has stopped.
+    if (!employeeId) releaseTaskSlots(current.id);
   }
 
   function enqueueSharedTask(taskId: string) {
@@ -542,7 +531,7 @@ export function createDispatch(ctx: DispatchContext) {
   }
 
   function isEmployeeAvailableForQueue(employee: EmployeeSnapshot, requiredLabels?: string[] | null) {
-    if (pendingCancellations.has(employee.id)) return false;
+    if (pendingCancellations.has(employee.id) || reconcilingAgents.has(employee.id)) return false;
     const socket = state.agentSockets.get(employee.id);
     if (employee.status !== "online" || employee.queueTaskId || socket?.readyState !== WebSocket.OPEN) {
       return false;
@@ -619,11 +608,12 @@ export function createDispatch(ctx: DispatchContext) {
       const taskId = state.sharedTaskQueue[i]!;
       const task = state.tasks.get(taskId);
       if (!task || task.status !== "queued" || task.targetMode !== "queue") continue;
+      if ([...pendingCancellations.values()].some(ids => ids.has(taskId))) continue;
       if (retryDelays.has(taskId)) continue;
 
       const requiredLabels = task.requiredLabels ?? undefined;
       let employeeId: string | null = null;
-      if (task.sessionId && task.sessionEmployeeId) {
+      if ((task.sessionId || (task.reconnectCount ?? 0) > 0) && task.sessionEmployeeId) {
         if (preferredEmployeeId && preferredEmployeeId !== task.sessionEmployeeId) continue;
         const owner = state.employees.get(task.sessionEmployeeId);
         employeeId = owner && isEmployeeAvailableForQueue(owner, requiredLabels) ? owner.id : null;
@@ -677,10 +667,10 @@ export function createDispatch(ctx: DispatchContext) {
     }
 
     const currentSlotTaskId = isQueueSlot ? employee.queueTaskId : employee.mainTaskId;
-    if (pendingCancellations.has(assignedEmployeeId) || (currentSlotTaskId && currentSlotTaskId !== task.id)) {
+    if (pendingCancellations.has(assignedEmployeeId) || reconcilingAgents.has(assignedEmployeeId) || (currentSlotTaskId && currentSlotTaskId !== task.id)) {
       const queueMap = isQueueSlot ? state.taskQueues : state.mainTaskQueues;
       const queue = queueMap.get(assignedEmployeeId) ?? [];
-      queue.push(task.id);
+      if (!queue.includes(task.id)) queue.push(task.id);
       queueMap.set(assignedEmployeeId, queue);
       return;
     }
@@ -690,6 +680,7 @@ export function createDispatch(ctx: DispatchContext) {
       sendJson<ServerToEmployeeMessage>(socket, { type: "queue.resume" }, ctx.encryptor);
     }
     task.employeeId = assignedEmployeeId;
+    task.sessionEmployeeId = assignedEmployeeId;
     task.attempt += 1;
     task.status = "dispatched";
     log.info({ taskId: task.id, employeeId: assignedEmployeeId, attempt: task.attempt, targetMode: task.targetMode, prompt: task.prompt.slice(0, 80) }, "Task dispatched");
@@ -743,6 +734,7 @@ export function createDispatch(ctx: DispatchContext) {
   }
 
   function dispatchNextMainQueuedTask(employeeId: string) {
+    if (reconcilingAgents.has(employeeId)) return;
     if (state.clearingTasks || pendingCancellations.has(employeeId)) return;
     const employee = state.employees.get(employeeId);
     if (!employee || employee.mainTaskId || employee.status !== "online") {
@@ -954,8 +946,13 @@ export function createDispatch(ctx: DispatchContext) {
     const previousQueueTaskId = previous?.queueTaskId ?? null;
     // A task may have finished while disconnected. Let buffered terminal events
     // settle that attempt before deciding to restart its process.
-    const activeMainTaskId = message.activeMainTaskId ?? (previousMainTaskId && message.pendingTaskIds?.includes(previousMainTaskId) ? previousMainTaskId : null);
-    const activeQueueTaskId = message.activeQueueTaskId ?? (previousQueueTaskId && message.pendingTaskIds?.includes(previousQueueTaskId) ? previousQueueTaskId : null);
+    const legacyPending = (mode: "main" | "queue") => message.pendingTaskIds?.find(id => {
+      const task = state.tasks.get(id);
+      return task && (task.employeeId === message.employeeId || task.sessionEmployeeId === message.employeeId) &&
+        !TERMINAL_STATUSES.has(task.status) && (mode === "queue" ? task.targetMode === "queue" : task.targetMode !== "queue");
+    });
+    const activeMainTaskId = message.activeMainTaskId ?? legacyPending("main") ?? null;
+    const activeQueueTaskId = message.activeQueueTaskId ?? legacyPending("queue") ?? null;
 
     const disconnectTimer = state.disconnectTimers.get(message.employeeId);
     if (disconnectTimer) {
@@ -981,7 +978,23 @@ export function createDispatch(ctx: DispatchContext) {
     }
     state.agentSockets.set(message.employeeId, socket);
     state.socketToEmployeeId.set(socket, message.employeeId);
+    reconcilingAgents.add(message.employeeId);
     pendingCancellations.delete(message.employeeId);
+    // Grace expiry can clear slots, but must not erase attempt ownership.
+    for (const taskId of [activeMainTaskId, activeQueueTaskId, ...(message.pendingTerminals ?? []).map(m => m.taskId)]) {
+      const task = taskId ? state.tasks.get(taskId) : undefined;
+      const terminal = message.pendingTerminals?.find(m => m.taskId === taskId);
+      if (task?.status === "queued" && !task.employeeId && task.sessionEmployeeId === message.employeeId &&
+          (task.reconnectCount ?? 0) > 0 && (!terminal || terminal.attempt === task.attempt)) {
+        task.employeeId = message.employeeId;
+        task.status = "accepted";
+        removeFromSharedQueue(task.id);
+        upsertTask(task);
+        clearTaskTimeout(task.id);
+        const elapsed = task.startedAt ? Date.now() - Date.parse(task.startedAt) : 0;
+        state.taskTimeouts.set(task.id, setTimeout(() => markTaskTimeout(task), Math.max(1, task.timeoutSec * 1000 - elapsed)));
+      }
+    }
     // A reconnect after cleanup (including a server restart) must stop old work.
     for (const taskId of [activeMainTaskId, activeQueueTaskId]) {
       const task = taskId ? state.tasks.get(taskId) : undefined;
@@ -1049,7 +1062,12 @@ export function createDispatch(ctx: DispatchContext) {
     sendJson<ServerToEmployeeMessage>(socket, {
       type: "agent.registered",
       consecutiveQueueFailures: state.consecutiveQueueFailures.get(message.employeeId) ?? 0,
+      terminalAck: true,
     }, ctx.encryptor);
+
+    try {
+      for (const terminal of message.pendingTerminals ?? []) await handleAgentMessage(terminal, socket);
+    } finally { reconcilingAgents.delete(message.employeeId); }
 
     const registeredEmployee = state.employees.get(message.employeeId)!;
     if (!registeredEmployee.queueRecovery && registeredEmployee.consecutiveQueueFailures >= MAX_CONSECUTIVE_QUEUE_FAILURES) {
@@ -1057,10 +1075,10 @@ export function createDispatch(ctx: DispatchContext) {
     } else armRecovery(registeredEmployee);
     if (mainTaskId && activeMainTaskId !== mainTaskId) recoverOrFail(mainTaskId, message.employeeId, false);
     if (queueTaskId && activeQueueTaskId !== queueTaskId) recoverOrFail(queueTaskId, message.employeeId, true);
-    if (!mainTaskId) {
+    if (!registeredEmployee.mainTaskId) {
       dispatchNextMainQueuedTask(message.employeeId);
     }
-    if (!queueTaskId) {
+    if (!registeredEmployee.queueTaskId) {
       dispatchNextQueuedTask(message.employeeId);
     }
     dispatchSharedQueuedTasks();
@@ -1098,6 +1116,25 @@ export function createDispatch(ctx: DispatchContext) {
   }
 
   async function handleAgentMessage(message: EmployeeToServerMessage, socket: WebSocket) {
+    const terminal = message.type === "task.completed" || message.type === "task.failed" || message.type === "task.cancelled";
+    const deferred = state.clearingTasks;
+    await processAgentMessage(message, socket);
+    if (!terminal || deferred || closed || !state.socketToEmployeeId.has(socket) || socket.readyState !== WebSocket.OPEN) return;
+    try {
+      await Promise.all([...pendingWrites]);
+      if (state.clearingTasks || closed) return;
+      const task = state.tasks.get(message.taskId);
+      if (task) {
+        const write = persistTask(db, structuredClone(task));
+        pendingWrites.add(write);
+        try { await write; } finally { pendingWrites.delete(write); }
+      }
+      if (state.clearingTasks || closed) return;
+      sendJson<ServerToEmployeeMessage>(socket, { type: "task.ack", taskId: message.taskId, attempt: messageAttempt(message) }, ctx.encryptor);
+    } catch (error) { log.error({ error }, "Terminal ACK withheld: persistence unavailable"); }
+  }
+
+  async function processAgentMessage(message: EmployeeToServerMessage, socket: WebSocket) {
     if (closed) return;
     if (state.clearingTasks) {
       deferredMessages.push({ message, socket });
@@ -1153,8 +1190,10 @@ export function createDispatch(ctx: DispatchContext) {
     const task = state.tasks.get(message.taskId);
     const pending = pendingCancellations.get(socketEmployeeId);
     if (pending?.has(message.taskId) && ["task.cancelled", "task.completed", "task.failed"].includes(message.type)) {
+      if (task && messageAttempt(message) !== undefined && messageAttempt(message) !== task.attempt) return;
       pending.delete(message.taskId);
       if (pending.size === 0) pendingCancellations.delete(socketEmployeeId);
+      clearStaleSlotForSocket(message.taskId, socketEmployeeId);
       dispatchNextMainQueuedTask(socketEmployeeId);
       dispatchNextQueuedTask(socketEmployeeId);
       return;

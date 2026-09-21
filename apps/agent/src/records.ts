@@ -26,12 +26,20 @@ function localDateKey() {
 }
 
 export function appendDailyRecord(markdown: string) {
+  try {
   fs.mkdirSync(DAILY_RECORDS_DIR, { recursive: true });
   const filePath = path.join(DAILY_RECORDS_DIR, `${localDateKey()}.md`);
+  const totalBytes = fs.readdirSync(DAILY_RECORDS_DIR).filter(name => /^\d{4}-\d{2}-\d{2}\.md$/.test(name))
+    .reduce((sum, name) => sum + fs.statSync(path.join(DAILY_RECORDS_DIR, name)).size, 0);
+  if (totalBytes >= 64 * 1024 * 1024) return; // Preserve existing memory; stop growing instead of deleting it.
   if (!fs.existsSync(filePath)) {
     fs.writeFileSync(filePath, `# ${EMPLOYEE_NAME} Daily Activity - ${localDateKey()}\n\n`);
   }
-  fs.appendFileSync(filePath, markdown);
+  // Daily memory is best effort, bounded per day; never block task settlement.
+  if (fs.statSync(filePath).size < 8 * 1024 * 1024) fs.appendFileSync(filePath, markdown.slice(0, 64 * 1024));
+  } catch (error) {
+    console.error(`[agent] Activity record unavailable: ${String(error)}`);
+  }
 }
 
 function formatPromptForRecord(prompt: string) {

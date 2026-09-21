@@ -61,3 +61,40 @@ it("bounded disconnect buffering preserves terminal events and advertises them i
   registerAgent(state, null, null);
   expect(sockets[0].sent[0].pendingTaskIds).toEqual(["finished"]);
 });
+
+it("persists terminals before sending and removes them only after server ACK", () => {
+  const save = vi.fn();
+  state.persistTerminals = save;
+  connect(state, () => null, () => null, () => {});
+  send(state, { type: "task.completed", taskId: "durable", attempt: 2, exitCode: 0 });
+  expect(save).toHaveBeenCalledWith([expect.objectContaining({ taskId: "durable", attempt: 2 })]);
+  expect(state.terminalMessages).toHaveLength(1);
+  registerAgent(state, null, null);
+  expect(sockets[0].sent.at(-1).pendingTerminals).toHaveLength(1);
+  sockets[0].emit("message", Buffer.from(JSON.stringify({ type: "task.ack", taskId: "durable", attempt: 1 })));
+  expect(state.terminalMessages).toHaveLength(1);
+  sockets[0].emit("message", Buffer.from(JSON.stringify({ type: "task.ack", taskId: "durable", attempt: 2 })));
+  expect(state.terminalMessages).toEqual([]);
+});
+
+it("storage failure pauses admission but does not prevent sending terminal evidence", () => {
+  state.persistTerminals = () => { throw new Error("ENOSPC"); };
+  connect(state, () => null, () => null, () => {});
+  expect(() => send(state, { type: "task.completed", taskId: "full", attempt: 1, exitCode: 0 })).not.toThrow();
+  expect(state.storageFailed).toBe(true);
+  expect(sockets[0].sent.at(-1).type).toBe("task.completed");
+});
+
+it("bounds disconnected output by bytes, not just message count", () => {
+  send(state, { type: "task.output", taskId: "large", seq: 1, stream: "stdout", content: "x".repeat(3 * 1024 * 1024) });
+  expect(Buffer.byteLength(JSON.stringify(state.bufferedMessages))).toBeLessThan(2 * 1024 * 1024);
+});
+
+it("authentication rejection drains via the lifecycle owner without reconnect", () => {
+  state.onFatal = vi.fn();
+  connect(state, () => null, () => null, () => {});
+  sockets[0].emit("close", 1008, "replaced");
+  expect(state.onFatal).toHaveBeenCalledOnce();
+  expect(state.stopped).toBe(true);
+  expect(state.reconnectTimer).toBeNull();
+});

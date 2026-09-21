@@ -138,6 +138,23 @@ describe("stopDaemon", () => {
     await stopDaemon(path.join(dir, "no.pid"));
   });
 
+  it("refuses a live legacy PID without signalling the unrelated process", async () => {
+    const dir = tmpDir(); dirs.push(dir);
+    const pidFile = path.join(dir, "unverified.pid");
+    fs.writeFileSync(pidFile, String(process.pid));
+    await expect(stopDaemon(pidFile)).rejects.toThrow("unverified PID");
+    expect(isProcessRunning(process.pid)).toBe(true);
+  });
+
+  it("refuses to overwrite a live daemon ownership record", () => {
+    const dir = tmpDir(); dirs.push(dir);
+    const pidFile = path.join(dir, "owned.pid");
+    writePidFile(pidFile, process.pid);
+    const before = fs.readFileSync(pidFile, "utf8");
+    expect(() => writePidFile(pidFile, process.pid)).toThrow("already owned");
+    expect(fs.readFileSync(pidFile, "utf8")).toBe(before);
+  });
+
   it("cleans stale PID file when process is already dead", async () => {
     const dir = tmpDir();
     dirs.push(dir);

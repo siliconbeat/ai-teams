@@ -202,8 +202,9 @@ export type ServerToEmployeeMessage =
       sessionId?: string;
     }
   | { type: "task.cancel"; taskId: string }
+  | { type: "task.ack"; taskId: string; attempt?: number }
   | { type: "queue.resume" }
-  | { type: "agent.registered"; consecutiveQueueFailures: number }
+  | { type: "agent.registered"; consecutiveQueueFailures: number; terminalAck?: boolean }
   | { type: "session.reset" }
   | { type: "server.error"; code: string; message: string };
 
@@ -222,6 +223,7 @@ export type EmployeeToServerMessage =
       activeMainTaskId?: string | null;
       activeQueueTaskId?: string | null;
       pendingTaskIds?: string[];
+      pendingTerminals?: TaskTerminalMessage[];
       lastOutputSeq?: number;
       weight?: number;
     }
@@ -248,6 +250,8 @@ export type EmployeeToServerMessage =
   | { type: "task.failed"; taskId: string; error: string; recoverable?: boolean; cooldownMs?: number; retryAfterMs?: number; attempt?: number }
   | { type: "task.cancelled"; taskId: string; attempt?: number }
   | { type: "session.reset.ack"; employeeId: string };
+
+export type TaskTerminalMessage = Extract<EmployeeToServerMessage, { type: "task.completed" | "task.failed" | "task.cancelled" }>;
 
 export type LeaderToServerMessage =
   | {
@@ -372,6 +376,10 @@ export function parseEmployeeToServerMessage(value: unknown): EmployeeToServerMe
       activeMainTaskId: optionalNullableStringField(message, "activeMainTaskId"),
       activeQueueTaskId: optionalNullableStringField(message, "activeQueueTaskId"),
       pendingTaskIds: message.pendingTaskIds === undefined ? undefined : stringArrayField(message, "pendingTaskIds").slice(0, 400),
+      pendingTerminals: Array.isArray(message.pendingTerminals) ? message.pendingTerminals.slice(0, 400).map(value => {
+        if (!value || typeof value !== "object" || !["task.completed", "task.failed", "task.cancelled"].includes(value.type)) throw new ProtocolError("Invalid pending terminal event");
+        return parseEmployeeToServerMessage(value) as TaskTerminalMessage;
+      }) : undefined,
       lastOutputSeq: optionalNonNegativeNumberField(message, "lastOutputSeq"),
       weight: optionalNonNegativeNumberField(message, "weight"),
     };
@@ -461,6 +469,7 @@ export function parseEmployeeToServerMessage(value: unknown): EmployeeToServerMe
 export function parseServerToEmployeeMessage(value: unknown): ServerToEmployeeMessage {
   const message = objectValue(value, "message");
   const type = stringField(message, "type");
+  if (type === "task.ack") return { type, taskId: nonEmptyStringField(message, "taskId"), attempt: optionalNonNegativeNumberField(message, "attempt") };
 
   if (type === "task.dispatch") {
     const sessionId = optionalStringField(message, "sessionId");
@@ -488,7 +497,7 @@ export function parseServerToEmployeeMessage(value: unknown): ServerToEmployeeMe
   }
 
   if (type === "agent.registered") {
-    return { type, consecutiveQueueFailures: nonNegativeNumberField(message, "consecutiveQueueFailures") };
+    return { type, consecutiveQueueFailures: nonNegativeNumberField(message, "consecutiveQueueFailures"), ...(message.terminalAck === true ? { terminalAck: true } : {}) };
   }
 
   if (type === "session.reset") {

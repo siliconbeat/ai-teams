@@ -7,6 +7,7 @@ function readStdin() {
     let content = "";
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (chunk) => {
+      if (content.length + chunk.length > 1024 * 1024) process.exit(0);
       content += chunk;
     });
     process.stdin.on("end", () => resolve(content));
@@ -57,6 +58,9 @@ function describeTool(input) {
     const dailyDir = path.join(recordDir, "daily");
     fs.mkdirSync(dailyDir, { recursive: true });
     const filePath = path.join(dailyDir, dateKey() + ".md");
+    const total = fs.readdirSync(dailyDir).filter(name => /^\\d{4}-\\d{2}-\\d{2}\\.md$/.test(name))
+      .reduce((sum, name) => sum + fs.statSync(path.join(dailyDir, name)).size, 0);
+    if (total >= 64 * 1024 * 1024 || (fs.existsSync(filePath) && fs.statSync(filePath).size >= 8 * 1024 * 1024)) process.exit(0);
     if (!fs.existsSync(filePath)) {
       fs.writeFileSync(filePath, "# " + process.env.AI_TEAMS_AGENT_NAME + " Daily Activity - " + dateKey() + "\\n\\n");
     }
@@ -80,7 +84,7 @@ function describeTool(input) {
       "",
     ].filter(Boolean);
 
-    fs.appendFileSync(filePath, lines.join("\\n") + "\\n");
+    fs.appendFileSync(filePath, (lines.join("\\n") + "\\n").slice(0, 64 * 1024));
     process.exit(0);
   } catch (error) {
     process.stderr.write(String(error && error.stack ? error.stack : error));

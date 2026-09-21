@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import readline from "node:readline";
 import type { EmployeeToServerMessage } from "@ai-teams/shared";
 import { isPermanentModelFailure, isClaudeSessionFailure } from "@ai-teams/shared";
 import {
@@ -24,6 +23,15 @@ import {
 import { ensureWorkspaceClaudeMd, ensureClaudeHookFiles } from "./records.js";
 import { resetClaudeSession } from "./state.js";
 import { getClaudeVersion } from "./claude-version.js";
+import { signalTaskProcess } from "./process-tree.js";
+
+export const MAX_SUMMARY_CHARS = 8000;
+export const MAX_CLI_LINE_BYTES = 1024 * 1024;
+function appendSummary(task: ActiveTask | null, text: string) {
+  if (!task || typeof text !== "string") return;
+  const remaining = MAX_SUMMARY_CHARS - task.summary.reduce((size, part) => size + part.length, 0);
+  if (remaining > 0) task.summary.push(text.slice(0, remaining));
+}
 
 function resolveWorkspace(raw: string | null | undefined): string {
   if (!raw || !raw.trim()) {
@@ -79,6 +87,12 @@ export function handleClaudeJsonLine(
     return;
   }
 
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+  if (parsed.type === "result") {
+    const task = findActiveTask(taskId);
+    if (task) task.cliResultSuccess = parsed.subtype === "success" && parsed.is_error === false;
+  }
+
   if (parsed.type === "stream_event") {
     const active = findActiveTask(taskId);
     if (active) active.hasExecutionEvidence = true;
@@ -87,16 +101,16 @@ export function handleClaudeJsonLine(
 
     if (event.type === "content_block_delta") {
       const delta = event.delta;
-      if (delta?.type === "text_delta" && delta.text) {
+      if (delta?.type === "text_delta" && typeof delta.text === "string") {
         const task = findActiveTask(taskId);
         if (task) {
           task.sawStreamText = true;
-          if (!task.resumingSession) task.summary.push(delta.text);
+          if (!task.resumingSession) appendSummary(task, delta.text);
         }
         emitOutput(taskId, "stdout", delta.text, true);
-      } else if (delta?.type === "thinking_delta" && delta.thinking) {
+      } else if (delta?.type === "thinking_delta" && typeof delta.thinking === "string") {
         emitOutput(taskId, "stdout", delta.thinking, true);
-      } else if (delta?.type === "input_json_delta" && delta.partial_json) {
+      } else if (delta?.type === "input_json_delta" && typeof delta.partial_json === "string") {
         emitOutput(taskId, "stdout", delta.partial_json, true);
       }
     } else if (event.type === "content_block_start" && event.content_block) {
@@ -125,8 +139,9 @@ export function handleClaudeJsonLine(
       return;
     }
     for (const block of parsed.message.content) {
-      if (block.type === "text" && block.text) {
-        task?.summary.push(block.text);
+      if (!block || typeof block !== "object") continue;
+      if (block.type === "text" && typeof block.text === "string") {
+        appendSummary(task, block.text);
         emitOutput(taskId, "stdout", `${block.text}\n`);
       } else if (block.type === "thinking" && block.thinking) {
         emitOutput(taskId, "stdout", `[thinking] ${block.thinking}\n`);
@@ -153,9 +168,9 @@ export function handleClaudeJsonLine(
       return;
     }
     if (task?.resumingSession && task.summary.length === 0) {
-      task.summary.push(parsed.result);
+      appendSummary(task, parsed.result);
     } else if (!task?.sawStreamText) {
-      task?.summary.push(parsed.result);
+      appendSummary(task, parsed.result);
     }
     emitOutput(taskId, "stdout", formatClaudeDoneNode(parsed, !task?.resumingSession && !!task?.sawStreamText));
     extractMetrics(taskId, parsed, findActiveTask);
@@ -254,6 +269,10 @@ export function buildClaudeArgs(prompt: string, task: ActiveTask, agentState: Ag
     }
   }
   if (cfg?.extraArgs) {
+    const reserved = /^(?:--(?:help|version|output-format|input-format|print|resume|continue|session-id|fork-session|replay-user-messages|include-partial-messages|verbose)|-[phvrc])(?:=|$)/;
+    if (cfg.extraArgs.some(arg => reserved.test(arg) || arg === "--")) {
+      throw new Error("extraArgs cannot override the managed Claude execution protocol or session.");
+    }
     args.push(...cfg.extraArgs);
   }
 
@@ -341,7 +360,7 @@ export function classifyModelTransientFailure(
 export function runFakeTask(taskId: string, prompt: string, deps: RunnerDeps) {
   const { findActiveTask, send, emitOutput, finishTask } = deps;
   const task = findActiveTask(taskId);
-  send({ type: "task.started", taskId, attempt: task?.attempt, pid: process.pid, sessionId: task?.claudeSessionId ?? null, claudeVersion: getClaudeVersion({ refresh: true }) });
+  send({ type: "task.started", taskId, attempt: task?.attempt, pid: process.pid, sessionId: task?.claudeSessionId ?? null, claudeVersion: getClaudeVersion() });
   const steps = [
     `收到任务：${prompt}\n`,
     "分析任务上下文...\n",
@@ -362,7 +381,7 @@ export function runFakeTask(taskId: string, prompt: string, deps: RunnerDeps) {
       return;
     }
     const chunk = steps[index];
-    current.summary.push(chunk);
+    appendSummary(current, chunk);
     emitOutput(taskId, "stdout", chunk);
     index += 1;
   }, 800);
@@ -404,6 +423,7 @@ export function runClaudeTask(taskId: string, prompt: string, workspace: string 
       AI_TEAMS_TASK_WORKSPACE: resolvedWorkspace,
     },
     stdio: ["ignore", "pipe", "pipe"],
+    detached: process.platform !== "win32",
   });
 
   const taskStillActive = findActiveTask(taskId);
@@ -419,12 +439,12 @@ export function runClaudeTask(taskId: string, prompt: string, workspace: string 
   currentTask.generation += 1;
   const generation = currentTask.generation;
   currentTask.child = child;
+  currentTask.processGroup = !deps.spawnClaude && process.platform !== "win32";
   // A generated UUID / spawned process is not evidence of a saved transcript.
-  send({ type: "task.started", taskId, attempt: currentTask.attempt, pid: child.pid ?? 0, sessionId: null, claudeVersion: getClaudeVersion({ refresh: true }) });
+  send({ type: "task.started", taskId, attempt: currentTask.attempt, pid: child.pid ?? 0, sessionId: null, claudeVersion: getClaudeVersion() });
   emitOutput(taskId, "stdout", `[agent] permission_mode: ${permissionMode}\n`);
 
-  const stdoutReader = readline.createInterface({ input: child.stdout });
-  stdoutReader.on("line", (line) => {
+  const onLine = (line: string) => {
     const active = findActiveTask(taskId);
     if (active !== currentTask || active.generation !== generation || active.cancelRequested) return;
     try {
@@ -432,7 +452,7 @@ export function runClaudeTask(taskId: string, prompt: string, workspace: string 
       // init carries an allocated ID even when startup/API access later fails.
       // Streamed execution must retain its session too: a tool may run before
       // the final assistant/result node. If the transcript is lost, fail closed.
-      if (!active.sessionConfirmed && typeof node.session_id === "string" &&
+      if (node && !active.sessionConfirmed && typeof node.session_id === "string" &&
           (node.type === "stream_event" || node.type === "assistant" || (node.type === "result" && !node.is_error && node.subtype === "success")) &&
           !active.cliConfig?.extraArgs?.includes("--no-session-persistence") &&
           !/^(?:1|true)$/i.test(process.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY ?? "")) {
@@ -441,7 +461,32 @@ export function runClaudeTask(taskId: string, prompt: string, workspace: string 
         send({ type: "task.started", taskId, attempt: active.attempt, pid: child.pid ?? 0, sessionId: node.session_id });
       }
     } catch { /* Non-JSON stdout is handled by the normal output parser below. */ }
-    handleClaudeJsonLine(taskId, line, findActiveTask, emitOutput);
+    try { handleClaudeJsonLine(taskId, line, findActiveTask, emitOutput); }
+    catch (error) {
+      active.protocolError = `Invalid Claude output: ${String(error)}`;
+      signalTaskProcess(child, !!active.processGroup, "SIGKILL");
+    }
+  };
+  // Bound an unterminated JSON line before a readline-style buffer can grow.
+  let pendingLine = Buffer.alloc(0);
+  child.stdout.on("data", (chunk: Buffer) => {
+    if (findActiveTask(taskId) !== currentTask || currentTask.generation !== generation || currentTask.protocolError) return;
+    const data = Buffer.concat([pendingLine, Buffer.from(chunk)]);
+    let start = 0;
+    while (start < data.length) {
+      const end = data.indexOf(10, start);
+      const length = (end < 0 ? data.length : end) - start;
+      if (length > MAX_CLI_LINE_BYTES) {
+        pendingLine = Buffer.alloc(0);
+        currentTask.protocolError = "Claude output line exceeded 1 MiB.";
+        signalTaskProcess(child, !!currentTask.processGroup, "SIGKILL");
+        return;
+      }
+      if (end < 0) break;
+      onLine(data.subarray(start, end).toString("utf8"));
+      start = end + 1;
+    }
+    pendingLine = Buffer.from(data.subarray(start));
   });
 
   child.stderr.on("data", (chunk: Buffer) => {
@@ -451,6 +496,7 @@ export function runClaudeTask(taskId: string, prompt: string, workspace: string 
 
   child.on("error", (error) => {
     if (findActiveTask(taskId) !== currentTask || currentTask.generation !== generation) return;
+    if (currentTask.cancelRequested) { emitStderr(taskId, error.message); return; }
     finishTask(taskId, "failed", error.message);
   });
 
@@ -460,10 +506,12 @@ export function runClaudeTask(taskId: string, prompt: string, workspace: string 
       return;
     }
     if (task?.cancelRequested) {
-      finishTask(taskId, "cancelled");
+      // cancelTask owns settlement after the entire execution domain is stopped.
       return;
     }
-    if (code === 0 && !task?.cliResultError) {
+    if (pendingLine.length) { onLine(pendingLine.toString("utf8")); pendingLine = Buffer.alloc(0); }
+    if (task.protocolError) { finishTask(taskId, "failed", task.protocolError); return; }
+    if (code === 0 && task.cliResultSuccess && !task.cliResultError) {
       finishTask(taskId, "completed", 0);
       return;
     }
@@ -477,6 +525,7 @@ export function runClaudeTask(taskId: string, prompt: string, workspace: string 
       fresh.retriedWithFreshSession = true;
       fresh.stderrTail = "";
       fresh.cliResultError = false;
+      fresh.cliResultSuccess = false;
       fresh.sawStreamText = false;
       fresh.child = null;
       fresh.sessionConfirmed = false;
@@ -490,7 +539,8 @@ export function runClaudeTask(taskId: string, prompt: string, workspace: string 
         fresh.claudeSessionId = newState.claudeSessionId;
       }
       emitOutput(taskId, "stdout", "\n[agent] Claude session is unavailable or already in use. Starting a new session and retrying this task.\n");
-      runClaudeTask(taskId, prompt, workspace, deps);
+      try { runClaudeTask(taskId, prompt, workspace, deps); }
+      catch (error) { finishTask(taskId, "failed", String(error)); }
       return;
     }
     if (isClaudeSessionFailure(task.stderrTail)) {
@@ -504,6 +554,6 @@ export function runClaudeTask(taskId: string, prompt: string, workspace: string 
       finishTask(taskId, "failed", `[session_unavailable] 任务已有执行输出，但未确认可恢复会话，已停止自动重放。请核对已执行操作和会话持久化配置，再提交剩余工作。CLI 错误：${task.stderrTail.slice(-1000)}`);
       return;
     }
-    finishTask(taskId, "failed", classifyModelTransientFailure(taskId, task.cliResultError ? 1 : code, findActiveTask) ?? `Claude CLI 退出码 ${code ?? "unknown"}：${task.stderrTail.slice(-1000)}`);
+    finishTask(taskId, "failed", classifyModelTransientFailure(taskId, task.cliResultError ? 1 : code, findActiveTask) ?? `Claude CLI 退出码 ${code ?? "unknown"}，未收到有效成功 result：${task.stderrTail.slice(-1000)}`);
   });
 }

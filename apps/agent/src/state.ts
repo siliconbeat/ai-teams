@@ -7,6 +7,21 @@ import {
   type AgentState,
 } from "./config.js";
 
+export let stateStorageHealthy = true;
+
+export function atomicWriteJson(file: string, value: unknown) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    const fd = fs.openSync(temp, "wx", 0o600);
+    try { fs.writeFileSync(fd, JSON.stringify(value)); fs.fsyncSync(fd); }
+    finally { fs.closeSync(fd); }
+    fs.renameSync(temp, file);
+  } finally {
+    try { fs.unlinkSync(temp); } catch { /* renamed or failed before create */ }
+  }
+}
+
 export function loadState(): AgentState {
   try {
     const content = fs.readFileSync(STATE_FILE, "utf8");
@@ -43,12 +58,19 @@ function loadLegacyState(): AgentState | null {
 }
 
 export function persistState(state: AgentState) {
-  fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  try {
+    atomicWriteJson(STATE_FILE, state);
+    stateStorageHealthy = true;
+    return true;
+  } catch (error) {
+    stateStorageHealthy = false;
+    console.error(`[agent] Session state persistence failed; new tasks paused: ${String(error)}`);
+    return false;
+  }
 }
 
 export function resetClaudeSession(): AgentState {
   const state = { claudeSessionId: randomUUID(), sessionReady: false };
-  persistState(state);
+  if (!persistState(state)) throw new Error("Cannot safely persist a new Claude session.");
   return state;
 }

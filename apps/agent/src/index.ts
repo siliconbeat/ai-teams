@@ -18,7 +18,9 @@ import {
   type ActiveTask,
   type AgentState,
 } from "./config.js";
-import { loadState, persistState, resetClaudeSession } from "./state.js";
+import { loadState, persistState, resetClaudeSession, stateStorageHealthy } from "./state.js";
+import { stopTaskProcess } from "./process-tree.js";
+import { loadTerminalOutbox, saveTerminalOutbox } from "./outbox.js";
 import { recordTaskStart, recordTaskFinish } from "./records.js";
 import { runClaudeTask, runFakeTask } from "./runner.js";
 import {
@@ -42,6 +44,8 @@ const connState: ConnectionState = {
   reconnectTimer: null,
   heartbeatTimer: null,
   bufferedMessages: [],
+  terminalMessages: loadTerminalOutbox(),
+  persistTerminals: saveTerminalOutbox,
 };
 
 function findActiveTask(taskId: string): ActiveTask | null {
@@ -84,15 +88,17 @@ function emitStderr(taskId: string, content: string) {
 }
 
 function requestTask() {
+  if (shuttingDown || !stateStorageHealthy || connState.storageFailed || (connState.terminalMessages?.length ?? 0) >= 390) return;
   send({ type: "agent.request_task", employeeId: EMPLOYEE_ID });
 }
 
 type FailurePayload = { error: string; recoverable?: boolean; cooldownMs?: number; retryAfterMs?: number };
 
-function finishTask(taskId: string, status: "completed" | "failed" | "cancelled", payload?: string | number | FailurePayload) {
+export function finishTask(taskId: string, status: "completed" | "failed" | "cancelled", payload?: string | number | FailurePayload) {
   const current = findActiveTask(taskId);
   if (!current) return;
   const slot = slotForTargetMode(current.targetMode);
+  if (current.deadlineTimer) clearTimeout(current.deadlineTimer);
   slot.set(null);
   const recordDetail = typeof payload === "object" && payload !== null ? payload.error : payload;
   recordTaskFinish(current, status, recordDetail);
@@ -157,25 +163,30 @@ const runnerDeps = {
   setAgentState: (state: AgentState) => { agentState = state; },
 };
 
-function startTask(message: Extract<ServerToEmployeeMessage, { type: "task.dispatch" }>) {
+export function startTask(message: Extract<ServerToEmployeeMessage, { type: "task.dispatch" }>) {
+  if (shuttingDown || !stateStorageHealthy || connState.storageFailed || (connState.terminalMessages?.length ?? 0) >= 390) {
+    connectionSend(connState, { type: "task.failed", taskId: message.taskId, attempt: message.attempt,
+      error: "Agent is draining or local durable storage is unavailable; no process was started." }, false);
+    return;
+  }
   if (message.targetMode === "queue" && consecutiveQueueFailures >= MAX_CONSECUTIVE_QUEUE_FAILURES) {
-    send({
+    connectionSend(connState, {
       type: "task.failed",
       taskId: message.taskId,
       attempt: message.attempt,
       error: `Agent 连续 ${consecutiveQueueFailures} 次队列任务失败，暂停接受新队列任务，等待手动恢复。`,
-    });
+    }, false);
     return;
   }
 
   const slot = slotForTargetMode(message.targetMode);
   if (slot.get()) {
-    send({
+    connectionSend(connState, {
       type: "task.failed",
       taskId: message.taskId,
       attempt: message.attempt,
       error: `员工当前忙碌，${message.targetMode === "queue" ? "队列" : "主"}任务槽正在执行任务 ${slot.get()!.taskId}。`,
-    });
+    }, false);
     return;
   }
 
@@ -198,6 +209,9 @@ function startTask(message: Extract<ServerToEmployeeMessage, { type: "task.dispa
     resultMetrics: {},
   };
   slot.set(task);
+  task.deadlineTimer = setTimeout(() => {
+    if (findActiveTask(task.taskId) === task) cancelTask(task.taskId);
+  }, Math.min(message.timeoutSec * 1000, 2_147_483_647));
 
   send({ type: "task.accepted", taskId: message.taskId, attempt: task.attempt });
   recordTaskStart(task, message.prompt, message.workspace);
@@ -207,10 +221,11 @@ function startTask(message: Extract<ServerToEmployeeMessage, { type: "task.dispa
     return;
   }
 
-  runClaudeTask(message.taskId, message.prompt, message.workspace, runnerDeps);
+  try { runClaudeTask(message.taskId, message.prompt, message.workspace, runnerDeps); }
+  catch (error) { finishTask(message.taskId, "failed", `Task startup failed: ${String(error)}`); }
 }
 
-function cancelTask(taskId: string) {
+export function cancelTask(taskId: string) {
   const task = findActiveTask(taskId);
   if (!task) {
     // Idempotent acknowledgement also releases the server's cleanup barrier.
@@ -219,18 +234,18 @@ function cancelTask(taskId: string) {
   }
   task.cancelRequested = true;
   if (task.child) {
-    const gen = task.generation;
-    task.child.kill("SIGTERM");
-    setTimeout(() => {
-      const t = findActiveTask(taskId);
-      if (t && t.generation === gen && t.child) t.child.kill("SIGKILL");
-    }, 3000);
+    if (task.stopPromise) return;
+    task.stopPromise = stopTaskProcess(task.child, !!task.processGroup);
+    void task.stopPromise.then(() => {
+      if (findActiveTask(taskId) === task) finishTask(taskId, "cancelled");
+    }).catch(error => console.error(`[agent] ${taskId}: ${String(error)}`));
   } else {
     finishTask(taskId, "cancelled");
   }
 }
 
 function handleServerMessage(message: ServerToEmployeeMessage) {
+  if (message.type === "task.ack") return;
   if (message.type === "task.dispatch") {
     startTask(message);
     return;
@@ -265,41 +280,30 @@ function handleServerMessage(message: ServerToEmployeeMessage) {
 }
 
 export function connect() {
+  connState.onFatal = () => gracefulShutdown("connection rejected");
   connectionConnect(connState, () => mainTask, () => queueTask, handleServerMessage);
 }
 
 let shuttingDown = false;
 
-function gracefulShutdown(signal: string) {
+export async function gracefulShutdown(signal: string) {
   if (shuttingDown) return;
   shuttingDown = true;
+  connState.stopped = true;
   console.log(`[agent:${EMPLOYEE_ID}] received ${signal}, shutting down...`);
-
-  const children: Array<NonNullable<ActiveTask["child"]>> = [];
-  for (const task of [mainTask, queueTask]) {
-    if (!task) continue;
-    task.cancelRequested = true;
-    if (task.child) children.push(task.child);
-    task.child?.kill("SIGTERM");
-    send({ type: "task.cancelled", taskId: task.taskId, attempt: task.attempt });
-  }
-  mainTask = null;
-  queueTask = null;
-
-  setTimeout(() => {
-    for (const child of children) {
-      child.kill("SIGKILL");
-    }
-  }, 2000);
 
   if (connState.reconnectTimer) clearTimeout(connState.reconnectTimer);
   if (connState.heartbeatTimer) clearInterval(connState.heartbeatTimer);
+  const tasks = [mainTask, queueTask].filter((task): task is ActiveTask => !!task);
+  for (const task of tasks) cancelTask(task.taskId);
+  await Promise.allSettled(tasks.map(task => task.stopPromise));
 
   if (connState.socket && connState.socket.readyState === WebSocket.OPEN) {
     connState.socket.close(1000, "agent shutting down");
   }
 
-  setTimeout(() => process.exit(0), 3000);
+  // Unknown teardown is not acknowledged as stopped. A watchdog can reconcile it.
+  setTimeout(() => process.exit(mainTask || queueTask ? 1 : 0), 300);
 }
 
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
@@ -391,13 +395,14 @@ if (isCli) {
 
     if (subcommand === "start" || subcommand === "restart") {
       applyCliArgsToEnv();
+      let stopPrevious: Promise<void> = Promise.resolve();
 
       if (!process.env.__AI_TEAMS_DAEMON_WATCHDOG && !process.env.__AI_TEAMS_DAEMON_WORKER) {
         if (subcommand === "restart") {
           const pidFile = resolvePidFile();
           const status = getDaemonStatus(pidFile);
           if (status.running) {
-            void stopDaemon(pidFile);
+            stopPrevious = stopDaemon(pidFile);
           }
         } else {
           const status = getDaemonStatus(resolvePidFile());
@@ -417,6 +422,7 @@ if (isCli) {
       }
 
       void (async () => {
+        await stopPrevious;
         await daemonize({
           name: "ai-teams-agent",
           pidFile: resolvePidFile(),
